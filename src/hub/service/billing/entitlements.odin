@@ -28,7 +28,8 @@ plan_limits_enabled :: proc(config: Config) -> bool {
 
 // Serialize fills and invalidations so an in-flight read cannot repopulate an
 // obsolete entry after a webhook or an application override invalidates it.
-// No repository transaction runs on a hit. Keys use the heap, never request arenas.
+// A hit touches no repository; a miss runs read-only queries. Keys use the heap,
+// never request arenas.
 effective_entitlements :: proc(service: ^Service, user_id: string) -> (domain.User_Entitlements, domain.Domain_Error) {
 	parameters, _, err := effective_entitlements_with_label(service, user_id)
 	return parameters, err
@@ -53,11 +54,8 @@ effective_entitlements_with_label :: proc(service: ^Service, user_id: string) ->
 	plans, plan_err := service.repo.list_plans(service.repo.ctx)
 	if plan_err.code != .None do return {}, "", plan_err
 	label := effective_plan_label(account, plans, now)
-	// Lock order: entitlements_mutex -> bridge enrollment commit.mutex.
-	// Never call entitlement lookup/invalidation while holding commit.mutex.
-	if service.on_entitlements != nil {
-		if reconcile_err := service.on_entitlements(service.plan_change_ctx, user_id, account.entitlements); reconcile_err.code != .None do return {}, "", reconcile_err
-	}
+	// A fill has no write side effects: launch gates call this inside the main
+	// write UoW. Bridge suspensions are reconciled by startup, webhooks and the reaper.
 	if valid_time {
 		expires := seconds + ENTITLEMENTS_TTL_SECONDS
 		// A cached paid grant must not outlive its past_due grace boundary.

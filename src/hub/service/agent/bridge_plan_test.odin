@@ -7,8 +7,8 @@ import iface "odin_test:hub/repository/iface"
 
 Launch_Plan_Fixture :: struct {
 	disabled: bool,
-	upgrade: bool,
 	lookup_failed: bool,
+	lookups: int,
 }
 
 launch_plan_get_bridge :: proc(ctx: rawptr, id: string) -> (domain.Bridge, bool, domain.Domain_Error) {
@@ -25,16 +25,15 @@ launch_plan_count :: proc(ctx: rawptr, owner: domain.User_ID) -> (int, domain.Do
 
 launch_plan_lookup :: proc(ctx: rawptr, user_id: string) -> (domain.User_Entitlements, domain.Domain_Error) {
 	f := (^Launch_Plan_Fixture)(ctx)
+	f.lookups += 1
 	if f.lookup_failed do return {}, domain.domain_error(.Internal_Error, "test lookup failure")
-	// Model the production entitlement callback, which reconciles before returning.
-	if f.upgrade do f.disabled = false
 	result := domain.unlimited_entitlements()
-	result.max_bridges = 2 if f.upgrade else 1
+	result.max_bridges = 1
 	return result, {}
 }
 
 @(test)
-test_plan_launch_gate_refresh_and_reconfiguration_details :: proc(t: ^testing.T) {
+test_plan_launch_gate_reads_flag_and_reconfiguration_details :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	f := Launch_Plan_Fixture{disabled = true}
 	repo := iface.Bridge_Repository{ctx = &f, get_bridge = launch_plan_get_bridge, count_active_by_owner = launch_plan_count}
@@ -55,6 +54,16 @@ test_plan_launch_gate_refresh_and_reconfiguration_details :: proc(t: ^testing.T)
 	f.lookup_failed = true
 	testing.expect_value(t, require_launch_bridge_enabled(&service, bridge).code, domain.Error_Code.Internal_Error)
 	f.lookup_failed = false
-	f.upgrade = true
-	testing.expect(t, require_launch_bridge_enabled(&service, bridge).code == .None, "re-read the flag after an entitlement refresh")
+
+	// The reaper cleared the stored flag: the stale caller row must not refuse, and
+	// an enabled bridge never consults billing.
+	f.disabled = false
+	f.lookups = 0
+	testing.expect(t, require_launch_bridge_enabled(&service, bridge).code == .None, "re-read the stored flag, not the caller's row")
+	testing.expect(t, require_launch_bridge_enabled(&service, domain.Bridge{bridge_id = "enabled", owner_user_id = domain.User_ID("alice")}).code == .None)
+	testing.expect_value(t, f.lookups, 0)
+
+	// A suspension recorded after the caller read its row still refuses the launch.
+	f.disabled = true
+	testing.expect_value(t, require_launch_bridge_enabled(&service, domain.Bridge{bridge_id = "enabled", owner_user_id = domain.User_ID("alice")}).code, domain.Error_Code.Plan_Limit_Reached)
 }

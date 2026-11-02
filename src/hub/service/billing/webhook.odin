@@ -43,7 +43,7 @@ receive_webhook :: proc(service: ^Service, signature, body: string) -> domain.Do
 	if err.code == .None && result == "ok" {
 		invalidate_entitlements(service)
 		// The event is durable; a per-owner reconciliation failure must not fail
-		// the webhook. Cache fills and the reaper retry failed owners.
+		// the webhook. The reaper retries failed owners.
 		if service.on_plan_change != nil {
 			if plan_err := service.on_plan_change(service.plan_change_ctx); plan_err.code != .None {
 				fmt.eprintfln("hub: webhook bridge plan reconciliation incomplete: %s", plan_err.message)
