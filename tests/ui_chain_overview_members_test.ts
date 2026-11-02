@@ -114,6 +114,16 @@ test('ongoing and attention helpers read v2 state, including in_review', () => {
   assert.equal(isAttentionNeeded(noReviewer), true);
   assert.equal(attentionReason(noReviewer), 'No reviewer assigned');
   assert.equal(isAttentionNeeded(makeTask('t-legacy', { status: 'validated_not_good' })), false);
+  // Named reviewer only (brief.reviewers, no review_roles, no user gate).
+  const named = makeTask('t-named', { state: 'in_review' });
+  named.brief = { review_roles: [], reviewers: ['agt_reviewer'] } as TaskWire['brief'];
+  assert.equal(isAttentionNeeded(named), false, 'named reviewer: not on you');
+  assert.equal(attentionReason(named), 'Review required by you', 'named reviewer: not unassigned');
+  const namedLive = { ...named, task_id: 't-named-live', leases: [lease('inst-named', 'review')] };
+  assert.equal(isAttentionNeeded(namedLive), false, 'named reviewer holding its lease: not on you');
+  assert.equal(attentionReason(namedLive), 'Review required by you');
+  const leaseOnly = makeTask('t-lease', { state: 'in_review', leases: [lease('inst-r', 'review')] });
+  assert.equal(isAttentionNeeded(leaseOnly), false, 'a live review lease means someone is reviewing');
 
   assert.deepEqual(reviewHolders(reviewTask), ['inst-sec', 'inst-code']);
   assert.deepEqual(reviewHolders(workTask), []);

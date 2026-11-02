@@ -60,8 +60,18 @@ export function attentionReason(task: TaskWire): string {
   return hasReviewer(task) ? 'Review required by you' : 'No reviewer assigned';
 }
 
+/**
+ * Someone is assigned to review: you, a review role, a named reviewer
+ * (brief.reviewers), a gate, or an agent already holding a review lease.
+ */
 function hasReviewer(task: TaskWire): boolean {
-  return Boolean(task.requires_user_approval) || (task.brief?.review_roles || []).length > 0 || task.kind === 'gate';
+  return (
+    Boolean(task.requires_user_approval) ||
+    (task.brief?.review_roles || []).length > 0 ||
+    (task.brief?.reviewers || []).length > 0 ||
+    task.kind === 'gate' ||
+    reviewHolders(task).length > 0
+  );
 }
 
 /** Instance ids holding a review lease on the task, in wire order. */
