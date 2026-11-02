@@ -971,5 +971,9 @@ after_chain_change :: proc(svc: ^Service, u: ^Uow, chain_id: domain.Task_Chain_I
 	case .Lease_Released, .Lease_Expired, .Review_Posted, .Task_Reopened, .Task_Cancelled, .Chain_Published, .Task_Published:
 		rebuild_chain_summary_in_uow(svc, u, chain)
 	}
-	return match_chain_in_uow(svc, u, chain, trigger)
+	if mok, merr := match_chain_in_uow(svc, u, chain, trigger); !mok do return false, merr
+	// After the matcher (a re-granted instance holds a lease): stop instances
+	// whose tasks are all done or cancelled (T8: stop on completion only).
+	stop_finished_instances_in_uow(svc, u, chain)
+	return true, domain.Domain_Error{}
 }

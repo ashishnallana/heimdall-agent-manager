@@ -1817,6 +1817,11 @@ Wake_Agent_Run_Entry :: struct {
 	// REQ-EXT-PERM-2: the durable agent's permission mode ("yolo" | "ask");
 	// omitted when empty so the bridge keeps the yolo launch.
 	permission_mode:   string,
+	// T8: "nudge" when the instance is already running on the same
+	// provider/model: the bridge keeps the child (same run_count), refreshes
+	// TASK.md and types a `lease next` nudge instead of killing and
+	// re-bootstrapping it. Empty (omitted) = launch/restart as before.
+	deliver:           string,
 }
 
 // wake_agent_command_json builds the ephemeral-lifecycle push the reconcile pass
@@ -1883,6 +1888,9 @@ wake_agent_command_json :: proc(command_id, chain_id: string, run: []Wake_Agent_
 			strings.write_string(&b, ",\"permission_mode\":\""); write_service_json_string(&b, entry.permission_mode); strings.write_string(&b, "\"")
 		}
 		strings.write_string(&b, ",\"run_count\":"); strings.write_string(&b, fmt.tprintf("%d", entry.run_count))
+		if entry.deliver != "" {
+			strings.write_string(&b, ",\"deliver\":\""); write_service_json_string(&b, entry.deliver); strings.write_string(&b, "\"")
+		}
 		if strings.has_prefix(strings.trim_space(entry.pack_json), "{") {
 			strings.write_string(&b, ",\"pack\":"); strings.write_string(&b, strings.trim_space(entry.pack_json))
 		}

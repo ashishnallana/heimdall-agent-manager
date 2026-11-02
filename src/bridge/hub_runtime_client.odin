@@ -2271,7 +2271,9 @@ bridge_hub_handle_pane_capture_command :: proc(conn: ^ws.Connection, text: strin
 //   {"type":"wake_agent","chain_id":"..","payload":{"run":[{"agent_instance_id":"..",
 //    "task_id":"..","role":".."}],"stop":["..",..]}}
 // run[] names the non-coordinator agents that SHOULD be running for the chain right
-// now — started fresh (full bootstrap) when we hold no launch record, or restarted
+// now — nudged to run `lease next` when the entry says deliver="nudge" and the
+// child of that generation is confirmed live (T8), started fresh (full bootstrap)
+// when we hold no launch record, or restarted
 // (process re-fork from the saved spec, reusing run_dir + token) when a record
 // exists but the process is not registered with the daemon; an already-running agent
 // is left alone. stop[] names the instances whose task is no longer actionable and
@@ -2332,6 +2334,17 @@ bridge_hub_handle_wake_agent :: proc(conn: ^ws.Connection, text: string) {
 			pack_json, _ := bridge_provider_json_extract_object(entry, "pack")
 			defer delete(pack_json)
 
+			// T8: a lease for an instance that is already running is delivered as
+			// a nudge (keep the process; refresh TASK.md; "run lease next"). When
+			// the child is not confirmed live, fall through to the launch paths.
+			deliver := extract_json_string(entry, "deliver", "")
+			defer delete(deliver)
+			if deliver == "nudge" && bridge_wake_nudge_live_child(instance_id, task_id, role, lease_id, run_count, pack_json) {
+				bridge_runtime_set_launch_role(instance_id, role)
+				fmt.println("bridge wake_agent: nudged live instance", instance_id, "to run lease next")
+				continue
+			}
+
 			if _, has := bridge_runtime_get_launch(instance_id); has {
 				// A launch record exists, but restart via the pty-host's remembered
 				// spec would reuse the ORIGINAL run_dir contents — including a stale
@@ -2388,6 +2401,56 @@ bridge_hub_handle_wake_agent :: proc(conn: ^ws.Connection, text: string) {
 	}
 
 	if command_id != "" do _ = bridge_hub_send(conn, bridge_command_result_json(command_id, "succeeded", ""))
+}
+
+// bridge_wake_nudge_live_child delivers a wake run[] entry to a child that is
+// already running (T8: an agent is not re-bootstrapped per attempt or review
+// round). It requires a launch record, no stop intent, and a live child of
+// exactly this generation (`run_count`, confirmed with the PTY host). Then it
+// rewrites <run_dir>/TASK.md from the pack and types one line telling the agent
+// to run `ham-ctl lease next`. Returns false — the caller then launches — when
+// any precondition fails. A failed keystroke delivery still returns true: the
+// child is live, so a launch would no-op; the hub re-sends an unconfirmed
+// wake once and then parks the task (grant_unconfirmed).
+bridge_wake_nudge_live_child :: proc(instance_id, task_id, role, lease_id: string, run_count: int, pack_json: string) -> bool {
+	if run_count <= 0 || strings.trim_space(instance_id) == "" do return false
+	launch, has := bridge_runtime_get_launch(instance_id)
+	if !has do return false
+	sync.mutex_lock(&bridge_runtime_mutex)
+	stopped := bridge_runtime_stop_intent_active_locked(instance_id, bridge_runtime_now_ms())
+	sync.mutex_unlock(&bridge_runtime_mutex)
+	if stopped do return false
+	socket, daemon_ok := bridge_pty_host_ensure_daemon()
+	if !daemon_ok do return false
+	confirmed, _ := bridge_startup_confirm_spawned(socket, instance_id, run_count)
+	if !confirmed do return false
+	if strings.has_prefix(strings.trim_space(pack_json), "{") {
+		bridge_taskv2_ensure_pack_worktree(pack_json)
+		run_dir := launch.run_dir
+		default_dir := ""
+		if strings.trim_space(run_dir) == "" {
+			default_dir = bridge_runtime_default_run_dir(instance_id)
+			run_dir = default_dir
+		}
+		defer if default_dir != "" do delete(default_dir)
+		if !bridge_taskv2_materialize_task_md(run_dir, pack_json) {
+			fmt.eprintln("bridge wake_agent: could not refresh TASK.md for nudged instance", instance_id, "(lease next rewrites it)")
+		}
+	}
+	line := bridge_wake_nudge_line(lease_id, task_id, role)
+	defer delete(line)
+	if !bridge_pty_host_deliver_line(socket, instance_id, line) {
+		fmt.eprintln("bridge wake_agent: nudge delivery failed for live instance", instance_id)
+	}
+	bridge_task_wake_note_launched(instance_id)
+	return true
+}
+
+// bridge_wake_nudge_line is the one line typed into a live agent that was
+// granted a lease. Pure; caller owns the result.
+bridge_wake_nudge_line :: proc(lease_id, task_id, role: string) -> string {
+	what := "review" if role == "reviewer" else "work"
+	return fmt.aprintf("[taskv2] New %s lease %s on task %s: run `ham-ctl lease next`, then read TASK.md and follow it.", what, lease_id, task_id)
 }
 
 // bridge_wake_report_failed_status sends a woken instance's failed status, with its
