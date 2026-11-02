@@ -1,4 +1,4 @@
-import { mcpJobPayloadMax, resourceSpecs, resourceToolKinds, sealResourceFields } from './mcpResourceFields.ts';
+import { mcpJobPayloadMax, openArtifactBundle, resourceSpecs, resourceToolKinds, sealResourceFields } from './mcpResourceFields.ts';
 import { mcpConsentVersion, mcpConsentDomain, validMcpScopes } from './mcpCapabilities.ts';
 import type { DeviceIdentity } from './deviceIdentity.ts';
 import type { VerifiedChain } from './vaultDirectoryVerify.ts';
@@ -135,8 +135,12 @@ export async function transformMcpWorkerJob(job: McpWorkerJob, keyring: VaultKey
     if (input.records !== undefined && !Array.isArray(input.records)) throw new Error('Invalid catalog records');
     const spec = catalogFields[expectedKind];
     out.records = await Promise.all((input.records || []).map(async (record: Record<string, unknown>) => {
-      const source = expectedKind === 'provider' ? { ...record, models: undefined } : expectedKind === 'issue' ? { ...record, comments: undefined } : record;
+      const source = expectedKind === 'provider' ? { ...record, models: undefined } : expectedKind === 'issue' ? { ...record, comments: undefined } : expectedKind === 'artifact' ? { ...record, content_base64: undefined } : record;
       const row = await readable(source, spec.fields, spec.text, keyring, job.owner, expectedKind === 'memory');
+      if (expectedKind === 'artifact' && record.content_base64 !== undefined) {
+        if (record.content !== undefined || job.tool !== 'artifacts.get') throw new Error('Invalid artifact bundle');
+        row.content_base64 = await openArtifactBundle(record.kind, record.content_base64, keyring);
+      }
       if (expectedKind === 'artifact' && row.content !== undefined) {
         const mime = String(row.mime || row.content_type || '').split(';', 1)[0].trim().toLowerCase();
         if (!['text/plain', 'text/markdown', 'application/json'].includes(mime) || typeof row.content !== 'string' || new TextEncoder().encode(row.content).length > 65536 || row.content.includes('\0')) throw new Error('Invalid or oversized artifact text');

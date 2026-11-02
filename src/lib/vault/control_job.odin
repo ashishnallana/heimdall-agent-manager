@@ -44,6 +44,15 @@ CONTROL_JOB_PAYLOAD_MAX :: 4*1024*1024
 CONTROL_JOB_ARTIFACT_PAYLOAD_MAX :: CONTROL_ARTIFACT_BUNDLE_BASE64_MAX+1024*1024
 control_job_payload_max :: proc(operation,tool:string)->int {
 	if operation=="seal_resource" && tool=="artifacts.create" do return CONTROL_JOB_ARTIFACT_PAYLOAD_MAX
+	if operation=="read" && tool=="artifacts.get" do return CONTROL_JOB_ARTIFACT_PAYLOAD_MAX
+	return CONTROL_JOB_PAYLOAD_MAX
+}
+// Data bound for read jobs/results: only a single artifacts.get record that
+// carries an html-bundle (content_base64) may exceed the 4 MiB default.
+control_data_payload_max :: proc(data:Control_Data)->int {
+	if data.records_kind=="artifact" && len(data.records)==1 && data.chain==nil && len(data.chains)==0 && len(data.tasks)==0 && len(data.comments)==0 {
+		if _,bundle:=data.records[0]["content_base64"];bundle do return CONTROL_JOB_ARTIFACT_PAYLOAD_MAX
+	}
 	return CONTROL_JOB_PAYLOAD_MAX
 }
 // Reply bound: a bundle seal returns the armored archive token (~base64 size).
@@ -117,7 +126,7 @@ control_transform_data :: proc(data:Control_Data,kr:^Vault_Keyring,details:=fals
 	out.comments=make([]json.Object,len(data.comments),context.temp_allocator)
 	for c,i in data.comments {out.comments[i],ok=transform(c,.Comment,kr,&opened);if !ok do return "",false}
 	encoded,err:=json.marshal(out,allocator=context.temp_allocator)
-	if err!=nil || len(encoded)>4*1024*1024 {
+	if err!=nil || len(encoded)>control_data_payload_max(data) {
 		if len(encoded)>0 do crypto.zero_explicit(raw_data(encoded),len(encoded))
 		return "",false
 	}

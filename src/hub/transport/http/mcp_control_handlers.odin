@@ -252,7 +252,7 @@ mcp_control_handler :: proc(ctx:rawptr,req:Request)->(response:Response) {
 	if string(name)=="tasks.get" || string(name)=="tasks.list" do op.tool=string(name)
 	if mcp.catalog_tool(string(name)) do op.tool=string(name)
 	if mcp.resource_tool(string(name)) do op.tool=string(name)
-	defer if mcp.resource_kind(string(name))=="artifact" {for row in data.records {for key in ([]string{"name","description","content"}) {if text,typed:=row[key].(json.String);typed && len(text)>0 do crypto.zero_explicit(raw_data(text),len(text))}}}
+	defer if mcp.resource_kind(string(name))=="artifact" {for row in data.records {for key in ([]string{"name","description","content","content_base64"}) {if text,typed:=row[key].(json.String);typed && len(text)>0 do crypto.zero_explicit(raw_data(text),len(text))}}}
 	if !op.seal {
 		code:string
 		data,code=mcp.control_read(&h.control,view.owner,string(name),args)

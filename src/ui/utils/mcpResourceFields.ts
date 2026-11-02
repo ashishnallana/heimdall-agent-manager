@@ -1,13 +1,31 @@
 import type { VaultKeyring } from './vaultKeyring.ts';
 import { encryptVaultText } from './vaultContent.ts';
-import { encryptVaultBytes } from './vaultCrypto.ts';
+import { decryptVaultBytes, encryptVaultBytes } from './vaultCrypto.ts';
 import { HTML_BUNDLE_LIMITS, readHtmlBundle } from './htmlBundle.ts';
 
 /** base64 of the 15 MiB html-bundle archive (artifacts.create content_base64). */
 export const MCP_ARTIFACT_BUNDLE_BASE64_MAX = Math.floor((HTML_BUNDLE_LIMITS.archiveBytes + 2) / 3) * 4;
-/** Matches vault.control_job_payload_max: bundle seal jobs only, all others 4 MiB. */
+/** Matches vault.control_job_payload_max: bundle seal (create) and bundle download (get) jobs only, all others 4 MiB. */
 export function mcpJobPayloadMax(operation: string, tool?: string): number {
-  return operation === 'seal_resource' && tool === 'artifacts.create' ? MCP_ARTIFACT_BUNDLE_BASE64_MAX + 1024 * 1024 : 4 * 1024 * 1024;
+  return (operation === 'seal_resource' && tool === 'artifacts.create') || (operation === 'read' && tool === 'artifacts.get') ? MCP_ARTIFACT_BUNDLE_BASE64_MAX + 1024 * 1024 : 4 * 1024 * 1024;
+}
+
+/**
+ * artifacts.get of an html-bundle: open the relayed vault token to the exact archive
+ * bytes and return them as canonical base64 (matches vault.control_artifact_bundle_open).
+ * Only the ZIP magic and the 15 MiB size are checked; the viewer validates on render.
+ */
+export async function openArtifactBundle(kind: unknown, token: unknown, keyring: VaultKeyring): Promise<string> {
+  if (kind !== 'html-bundle' || typeof token !== 'string' || !token.startsWith('vault:v2:') || token.length > MCP_ARTIFACT_BUNDLE_BASE64_MAX + 1024 * 1024) throw new Error('Invalid artifact bundle');
+  const opened = await decryptVaultBytes(token, keyring);
+  if (opened.status !== 'ok') throw new Error('MCP key unavailable');
+  const bytes = opened.bytes;
+  try {
+    if (bytes.length < 4 || bytes.length > HTML_BUNDLE_LIMITS.archiveBytes || bytes[0] !== 0x50 || bytes[1] !== 0x4b || bytes[2] !== 3 || bytes[3] !== 4) throw new Error('Invalid artifact bundle');
+    let binary = '';
+    for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+    return btoa(binary);
+  } finally { bytes.fill(0); }
 }
 
 /** Canonical standard base64 only (padded, no whitespace), as the Odin sealer requires. */
@@ -22,7 +40,7 @@ function decodeCanonicalBase64(text: string): Uint8Array {
 }
 
 export const resourceSpecs: Record<string, { fields: string[]; text: string[] }> = {
-  artifact: { fields: ["artifact_id", "name", "description", "kind", "content_type", "mime", "ext", "size_bytes", "stored_bytes", "agent_id", "agent_instance_id", "chain_id", "task_id", "project_id", "link", "created_at", "updated_at", "revision", "content", "content_error"], text: ["name", "description", "content"] },
+  artifact: { fields: ["artifact_id", "name", "description", "kind", "content_type", "mime", "ext", "size_bytes", "stored_bytes", "agent_id", "agent_instance_id", "chain_id", "task_id", "project_id", "link", "created_at", "updated_at", "revision", "content", "content_error", "content_base64"], text: ["name", "description", "content"] },
   memory: { fields: ['memory_id', 'read_only', 'title', 'description', 'body', 'evidence', 'title_error', 'description_error', 'body_error', 'evidence_error', 'type', 'status', 'expires_at', 'agent_ids', 'project_ids', 'bridge_ids', 'template_ids', 'proposed_by_instance_id', 'proposed_in_chain_id', 'created_at', 'updated_at', 'revision'], text: ['title', 'description', 'body', 'evidence'] },
   project: { fields: ['project_id', 'name', 'name_error', 'slug', 'description', 'description_error', 'repo_url', 'vcs_kind', 'default_path', 'state', 'created_at', 'updated_at', 'revision', 'bridge_paths'], text: ['name', 'description', 'slug'] },
   issue: { fields: ['issue_id', 'title', 'title_error', 'description', 'description_error', 'description_limit', 'created_by', 'status', 'scope_type', 'target_id', 'chain_id', 'vote_count', 'comment_count', 'created_at', 'updated_at', 'closed_at', 'revision', 'comments', 'comments_next_cursor'], text: ['title', 'description'] },

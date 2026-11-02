@@ -89,7 +89,7 @@ Control_Transform :: struct {data:Control_Data,title,description,tool,body:strin
 control_payload_ok :: proc(data:Control_Data)->bool {
 	encoded,err:=json.marshal(data,allocator=context.temp_allocator)
 	defer if len(encoded)>0 do crypto.zero_explicit(raw_data(encoded),len(encoded))
-	return err==nil && len(encoded)<=4*1024*1024
+	return err==nil && len(encoded)<=vault.control_data_payload_max(data)
 }
 control_record_matches :: proc(expected,actual:json.Object,kind:Hosted_Record_Kind)->bool {
 	allowed,text:=vault.control_record_fields(kind)
@@ -117,6 +117,8 @@ control_record_matches :: proc(expected,actual:json.Object,kind:Hosted_Record_Ki
 			items,typed:=value.(json.Array);expected_items,expected_typed:=expected[key].(json.Array)
 			if !typed || !expected_typed || len(items)!=len(expected_items) do return false
 			for item in items do if _,string_item:=item.(json.String);!string_item do return false
+		} else if kind==.Artifact && key=="content_base64" {
+			text,ok:=value.(json.String);if !ok || !vault.control_artifact_base64_shape_ok(string(text)) do return false
 		} else if is_text {
 			text,ok:=value.(json.String);if !ok do return false
 			if kind==.Artifact && key=="content" && (len(text)>65536 || strings.contains(string(text),"\x00")) do return false
@@ -131,7 +133,7 @@ control_record_matches :: proc(expected,actual:json.Object,kind:Hosted_Record_Ki
 // Treat device output as untrusted even though its signature verifies: the Hub
 // forwards only the exact records/metadata it requested, without nested extras.
 control_result_ok :: proc(data:Control_Data,result:string)->bool {
-	if len(result)>4*1024*1024 || strings.contains(result,vault.VAULT_V2_PREFIX) do return false
+	if len(result)>vault.control_data_payload_max(data) || strings.contains(result,vault.VAULT_V2_PREFIX) do return false
 	parser:=json.make_parser_from_string(result,.JSON,true,context.temp_allocator)
 	value,err:=json.parse_value(&parser)
 	defer vault.control_wipe_value(value)

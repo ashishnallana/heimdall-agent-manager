@@ -16,6 +16,7 @@ import content "odin_test:hub/service/content"
 import project "odin_test:hub/service/project"
 import issue "odin_test:hub/service/issue"
 import http "odin_test:hub/transport/http"
+import hb "odin_test:lib/html_bundle"
 
 @(test)
 test_mcp_artifact_native_content_task_results_and_lifecycle :: proc(t:^testing.T) {
@@ -147,6 +148,20 @@ mcp_artifact_bundle_test :: proc(t:^testing.T,g:^App_Graph,h:^http.MCP_Control_H
 	testing.expect(t,!strings.contains(native.content,"color:red") && !strings.contains(native.content,"doctype"),"stored content is ciphertext only")
 	row:=mcp_resource_first(t,h,headers,"artifacts.get",json.Object{"artifact_id"=json.String(id)})
 	if row!=nil do testing.expect(t,row["kind"].(json.String)=="html-bundle" && row["name"].(json.String)=="Site")
+	// Complete download through the same relay: exact archive bytes, not text.
+	packed,pack_err:=hb.html_bundle_from_entry_files("index.html",files,context.temp_allocator)
+	testing.expect(t,pack_err=="")
+	full:=mcp_resource_first(t,h,headers,"artifacts.get",json.Object{"artifact_id"=json.String(id),"include_content"=json.Boolean(true)})
+	if full!=nil {
+		encoded,typed:=full["content_base64"].(json.String)
+		_,has_text:=full["content"]
+		testing.expectf(t,typed && !has_text,"bundle get returns content_base64 only: %v",full)
+		archive,_:=base64.decode(string(encoded),allocator=context.temp_allocator)
+		testing.expect(t,string(archive)==string(packed.zip),"downloaded archive is byte-exact")
+		checked,err:=hb.html_bundle_from_zip(archive,"",context.temp_allocator)
+		testing.expect(t,err=="" && checked.entry=="index.html")
+	}
+	mcp_artifact_bundle_large_test(t,h,headers)
 	// Changed input under the same request_id is a conflict, not a silent replay.
 	files["styles.css"]=json.Object{"text"=json.String("body {color:blue}")}
 	testing.expect(t,strings.contains(mcp_resource_heap_call(h,headers,"artifacts.create",create).body,"idempotency_conflict"))
@@ -173,4 +188,21 @@ mcp_artifact_bundle_test :: proc(t:^testing.T,g:^App_Graph,h:^http.MCP_Control_H
 	big:=strings.concatenate({`{"jsonrpc":"2.0","id":77,"method":"tools/call","params":{"name":"memories.list","arguments":{"cursor":"`,strings.repeat("x",600*1024,context.temp_allocator),`"}}}`},context.temp_allocator)
 	refused:=http.mcp_control_handler(h,{method="POST",path="/api/v1/mcp",headers=headers,body=big})
 	testing.expect(t,strings.contains(refused.body,"request_too_large"))
+}
+
+// >1 MiB of binary asset through tools/call JSON (body > 512 KiB), relay seal and
+// relay open: create then download returns the identical archive.
+mcp_artifact_bundle_large_test :: proc(t:^testing.T,h:^http.MCP_Control_Handlers,headers:[]contracts.HTTP_Header) {
+	blob:=make([]byte,3*1024*1024+17,context.temp_allocator)
+	copy(blob,[]byte{0x89,'P','N','G',0x0d,0x0a,0x1a,0x0a})
+	x:=u32(2463534242);for i in 8..<len(blob) {x~=x<<13;x~=x>>17;x~=x<<5;blob[i]=byte(x)}
+	blob64,_:=base64.encode(blob,allocator=context.temp_allocator)
+	files:=json.Object{"index.html"=json.Object{"text"=json.String("<!doctype html><img src=photo.png>")},"photo.png"=json.Object{"base64"=json.String(blob64)}}
+	response:=mcp_resource_heap_call(h,headers,"artifacts.create",json.Object{"request_id"=json.String("bundle_large"),"name"=json.String("Large"),"entry"=json.String("index.html"),"files"=files})
+	result:=mcp_task_test_output(t,response);if result==nil do return
+	row:=mcp_resource_first(t,h,headers,"artifacts.get",json.Object{"artifact_id"=result["resource_id"],"include_content"=json.Boolean(true)});if row==nil do return
+	encoded,_:=row["content_base64"].(json.String)
+	archive,_:=base64.decode(string(encoded),allocator=context.temp_allocator)
+	packed,_:=hb.html_bundle_from_entry_files("index.html",files,context.temp_allocator)
+	testing.expectf(t,len(archive)>3*1024*1024 && string(archive)==string(packed.zip),"large download byte-exact (%d vs %d)",len(archive),len(packed.zip))
 }

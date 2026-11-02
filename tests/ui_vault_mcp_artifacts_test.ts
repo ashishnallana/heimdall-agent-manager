@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { mcpWorkerFixture } from './helpers/mcpWorkerFixture.ts';
 import { mcpJobDigest, mcpJobScopeAllowed, transformMcpWorkerJob, verifyMcpWorkerJob } from '../src/ui/utils/mcpWorker.ts';
 import { decryptVaultBytes, encryptVaultText } from '../src/ui/utils/vaultContent.ts';
+import { encryptVaultBytes } from '../src/ui/utils/vaultCrypto.ts';
 
 const scope = 'mcp:chains mcp:artifacts:read mcp:artifacts:write';
 test('artifact workers seal only bounded typed prose with explicit artifact write consent', async () => {
@@ -79,4 +80,28 @@ test('artifact workers re-validate and seal a relayed html-bundle byte-exact', a
   const big = { ...f.job, tool: 'memories.create', operation: 'seal_resource' as const, payload: 'x'.repeat(4 * 1024 * 1024 + 1) };
   big.digest = await mcpJobDigest(big);
   await assert.rejects(verifyMcpWorkerJob(big, f.identity, f.chain, big.resource, f.now));
+});
+
+test('artifact workers open a relayed html-bundle download byte-exact (>4 MiB job)', async () => {
+  const f = await mcpWorkerFixture(Date.now(), scope);
+  const record = { owner_user_id: f.job.owner, artifact_id: 'art_site', name: await encryptVaultText('Site', f.keyring), kind: 'html-bundle', content_type: 'application/zip', mime: 'application/zip', ext: 'zip', content_base64: await encryptVaultBytes(Buffer.from(BUNDLE_B64, 'base64'), f.keyring) };
+  const job = { ...f.job, tool: 'artifacts.get', operation: 'read' as const, payload: JSON.stringify({ records_kind: 'artifact', records: [record] }) };
+  job.digest = await mcpJobDigest(job);
+  await verifyMcpWorkerJob(job, f.identity, f.chain, job.resource, f.now);
+  const result = JSON.parse(await transformMcpWorkerJob(job, f.keyring));
+  assert.equal(result.records[0].content_base64, BUNDLE_B64);
+  assert.equal(result.records[0].name, 'Site');
+  assert.ok(!JSON.stringify(result).includes('vault:v2:'));
+  // Non-bundle kinds, text+bundle mixes, list tools and non-ZIP plaintext are refused.
+  const notZip = await encryptVaultBytes(new Uint8Array([1, 2, 3, 4, 5]), f.keyring);
+  for (const [tool, row] of [['artifacts.get', { ...record, kind: 'markdown' }], ['artifacts.get', { ...record, content: 'x' }], ['artifacts.list', record], ['artifacts.get', { ...record, content_base64: notZip }], ['artifacts.get', { ...record, content_base64: BUNDLE_B64 }]] as const) {
+    await assert.rejects(transformMcpWorkerJob({ ...job, tool, payload: JSON.stringify({ records_kind: 'artifact', records: [row] }) }, f.keyring));
+  }
+  // Download jobs may exceed 4 MiB (15 MiB archive budget); other reads may not.
+  const large = { ...job, payload: JSON.stringify({ records_kind: 'artifact', records: [record], pad: 'x'.repeat(5 * 1024 * 1024) }) };
+  large.digest = await mcpJobDigest(large);
+  await verifyMcpWorkerJob(large, f.identity, f.chain, large.resource, f.now);
+  const other = { ...large, tool: 'memories.get' };
+  other.digest = await mcpJobDigest(other);
+  await assert.rejects(verifyMcpWorkerJob(other, f.identity, f.chain, other.resource, f.now));
 });

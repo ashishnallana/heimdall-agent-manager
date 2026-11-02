@@ -1,12 +1,13 @@
 package vault
 
 import "core:crypto"
+import "core:encoding/base64"
 import "core:encoding/json"
 import "core:strings"
 import "core:unicode/utf8"
 import hb "odin_test:lib/html_bundle"
 
-CONTROL_FIELDS_ARTIFACT := [?]string{"artifact_id","name","description","kind","content_type","mime","ext","size_bytes","stored_bytes","agent_id","agent_instance_id","chain_id","task_id","project_id","link","created_at","updated_at","revision","content","content_error"}
+CONTROL_FIELDS_ARTIFACT := [?]string{"artifact_id","name","description","kind","content_type","mime","ext","size_bytes","stored_bytes","agent_id","agent_instance_id","chain_id","task_id","project_id","link","created_at","updated_at","revision","content","content_error","content_base64"}
 CONTROL_TEXT_ARTIFACT := [?]string{"name","description","content"}
 // artifacts.create with entry/files: the Hub packs the html-bundle ZIP and relays
 // it as canonical base64 under this key; the device decodes, re-validates and seals
@@ -15,6 +16,32 @@ CONTROL_SEAL_ARTIFACT_CREATE := [?]string{"name","description","content","conten
 // Payload bound for a seal_resource artifacts.create job: base64 of the 15 MiB
 // archive plus 1 MiB for name/description/JSON framing.
 CONTROL_ARTIFACT_BUNDLE_BASE64_MAX :: (hb.HTML_BUNDLE_MAX_ARCHIVE + 2) / 3 * 4
+// artifacts.get of an html-bundle: the Hub relays the stored vault token under
+// content_base64; the decrypting side opens it and returns the exact archive bytes
+// as canonical base64. Only the ZIP local-header magic and size are checked: this
+// is a byte-exact download of an already-stored artifact, and the viewer
+// validates the archive on render.
+control_artifact_bundle_open :: proc(kr:^Vault_Keyring,record:json.Object,token:string)->(string,bool) {
+	kind,_:=record["kind"].(json.String)
+	if string(kind)!="html-bundle" || !is_armored(token) do return "",false
+	plain,result:=open(token,kr,context.temp_allocator)
+	defer if plain!="" do crypto.zero_explicit(raw_data(plain),len(plain))
+	if result!=.Ok || len(plain)<4 || len(plain)>hb.HTML_BUNDLE_MAX_ARCHIVE || plain[:4]!="PK\x03\x04" do return "",false
+	encoded,err:=base64.encode(transmute([]byte)plain,allocator=context.temp_allocator)
+	if err!=nil do return "",false
+	return encoded,true
+}
+// Shape check for a relayed bundle download: canonical-length standard base64 of
+// at most the 15 MiB archive. Full decoding happens at the MCP client.
+control_artifact_base64_shape_ok :: proc(text:string)->bool {
+	if len(text)<8 || len(text)%4!=0 || len(text)>CONTROL_ARTIFACT_BUNDLE_BASE64_MAX do return false
+	for c,i in transmute([]byte)text {
+		if c>='A' && c<='Z' || c>='a' && c<='z' || c>='0' && c<='9' || c=='+' || c=='/' do continue
+		if c=='=' && i>=len(text)-2 && (i==len(text)-1 || text[len(text)-1]=='=') do continue
+		return false
+	}
+	return true
+}
 CONTROL_SEAL_ARTIFACT_METADATA := [?]string{"name","description"}
 
 control_artifact_type_ok :: proc(fields:json.Object)->bool {
