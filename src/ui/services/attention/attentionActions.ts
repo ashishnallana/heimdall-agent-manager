@@ -1,8 +1,12 @@
 // Network calls for deferred attention actions. Plain JSON calls (no vault
 // encryption needed), sent with fetch keepalive when flushing on page exit, which
 // RTK mutations cannot do. Callers invalidate caches after success.
-import { apiUrl } from '../../api/cookieFetch';
-import type { AttentionTaskRefs } from '../../api/endpoints/attention';
+import { apiUrl, cookieMutation } from '../../api/cookieFetch';
+import type { AttentionTaskRefs, PlacementRecoveryInput } from '../../api/endpoints/attention';
+
+/** Targeted repair preserves unrelated named/role reviews and user approval. */
+export const recoverCardPlacement = (cardId: string, input: PlacementRecoveryInput) =>
+  cookieMutation(`/cards/${encodeURIComponent(cardId)}/placement-recovery`, 'POST', input);
 
 async function send(path: string, method: string, body: unknown, keepalive: boolean): Promise<void> {
   const res = await fetch(apiUrl(path), {
