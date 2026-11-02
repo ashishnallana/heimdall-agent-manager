@@ -918,6 +918,7 @@ register_routes :: proc(graph: ^App_Graph) {
 	http.router_add(&graph.router, "POST", "/api/v1/task-chains/*/tasks/*/comments", rawptr(&graph.taskchain_handlers), http.create_task_comment_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/agent-actions/chat/send-to-user", rawptr(&graph.agent_action_handlers), http.agent_action_chat_send_to_user_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/agent-actions/chat/send-to-agent", rawptr(&graph.agent_action_handlers), http.agent_action_chat_send_to_agent_handler)
+	http.router_add(&graph.router, "POST", "/api/v1/agent-actions/chat/previous-context", rawptr(&graph.agent_action_handlers), http.agent_action_chat_previous_context_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/agent-actions/chat/fetch", rawptr(&graph.agent_action_handlers), http.agent_action_chat_fetch_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/agent-actions/chat/read", rawptr(&graph.agent_action_handlers), http.agent_action_chat_read_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/agent-actions/conversation/set-title", rawptr(&graph.agent_action_handlers), http.agent_action_conversation_set_title_handler)
