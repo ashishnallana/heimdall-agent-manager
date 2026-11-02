@@ -1,4 +1,5 @@
 import React from 'react';
+import { isChunkLoadError, tryChunkReload } from '../../utils/chunkReload';
 
 type ErrorBoundaryProps = {
   children: React.ReactNode;
@@ -32,6 +33,9 @@ export default class ErrorBoundary extends React.Component<ErrorBoundaryProps, E
     // Surface to the console for diagnosis; never rethrow.
     // eslint-disable-next-line no-console
     console.error('[ErrorBoundary] caught render error', error, info?.componentStack);
+    // A missing lazy chunk (stale build after a deploy) is fixed by a reload; the
+    // fallback below stays if the reload is skipped (offline / just reloaded).
+    if (isChunkLoadError(error) && typeof window !== 'undefined') tryChunkReload(window);
   }
 
   componentDidUpdate(prev: ErrorBoundaryProps) {
@@ -40,7 +44,12 @@ export default class ErrorBoundary extends React.Component<ErrorBoundaryProps, E
     }
   }
 
-  private handleReset = () => this.setState({ error: null });
+  // React.lazy caches a failed import, so re-rendering can never recover a chunk
+  // error; only a reload fetches the current build.
+  private handleReset = () => {
+    if (isChunkLoadError(this.state.error)) window.location.reload();
+    else this.setState({ error: null });
+  };
 
   render() {
     const { error } = this.state;
