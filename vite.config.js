@@ -1,6 +1,11 @@
 import { fileURLToPath, URL } from 'node:url';
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
+import { readFileSync } from 'node:fs';
+
+// `app_version` for analytics (src/ui/analytics): VITE_APP_VERSION wins, else package.json.
+const APP_VERSION = process.env.VITE_APP_VERSION
+  || JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8')).version;
 
 // Users authenticate only with OIDC. In dev the renderer runs at the Vite
 // dev-server origin (the hub's --ui-origin), so relative `/api/v1` requests —
@@ -19,6 +24,9 @@ const LONG_PROXY_TIMEOUT_MS = 16 * 60 * 1000;
 export default defineConfig({
   plugins: [react()],
   base: './',
+  define: {
+    'import.meta.env.VITE_APP_VERSION': JSON.stringify(APP_VERSION),
+  },
   resolve: {
     alias: [
       {

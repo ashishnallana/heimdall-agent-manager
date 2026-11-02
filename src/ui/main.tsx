@@ -17,6 +17,7 @@ import { installAppViewportHeightSync } from './utils/appViewportHeight';
 import { ShortcutProvider } from './services/shortcuts/ShortcutContext';
 import { ChordHud } from './components/shortcuts/ChordHud';
 import { ShortcutCheatsheetModal } from './components/shortcuts/ShortcutCheatsheetModal';
+import { analytics, type AnalyticsClient } from './analytics/analytics';
 import './styles.css';
 import { desktopCapabilities } from './bridge/desktopBridge';
 import { desktopUpdatePreparation, installDesktopUpdatePreparation, unsupportedUpdateEditorOpen } from './utils/desktopUpdatePreparation';
@@ -54,6 +55,16 @@ desktopUpdatePreparation.register({
   blocked: () => store.dispatch(heimdallApi.util.getRunningMutationsThunk()).length > 0
     || unsupportedUpdateEditorOpen(document),
   flush: () => {}, // Unknown editors/forms block; registered composers/workspace perform checked writes.
+});
+
+// REQ-PH-3: PostHog product analytics. The key is read at runtime from /posthog-config.json
+// (web: same origin; Electron: https://web.ninjy.ai), rendered from sops on the hosted
+// deployment; VITE_POSTHOG_KEY is a dev override. Without a key (404, network error, empty)
+// analytics stays off and the lazy posthog-js chunk is never loaded. Sends `app_opened` once
+// per session; the AuthGate identifies the user. See docs/analytics.md.
+void analytics.start({
+  env: import.meta.env,
+  loadClient: async () => (await import('posthog-js')).default as unknown as AnalyticsClient,
 });
 
 // Register the notification service worker early so OS notifications work on
