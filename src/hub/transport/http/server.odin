@@ -52,6 +52,27 @@ Body_Stream :: struct {
 	total:     int, // declared Content-Length
 	remaining: int, // bytes not yet returned by body_stream_read
 	from_socket: bool,
+	// Socket reads are bounded (§7: a stalled or trickling peer must not hold a
+	// data-path slot): each recv waits at most `idle`, and the whole body must
+	// arrive before `deadline` (set when has_deadline). Either limit ends the read
+	// with ok=false, exactly like a peer that closed early.
+	idle:         time.Duration,
+	deadline:     time.Tick,
+	has_deadline: bool,
+}
+
+// Bounds for slot-holding (pre-body admitted) requests. A streamed body must keep
+// arriving (no recv waits longer than the idle timeout) and finish within
+// base + declared_length / min_rate, so a 15 MiB-class body at the minimum rate
+// takes <= ~5 min and 8 trickling peers cannot starve the data path indefinitely.
+STREAM_BODY_IDLE_TIMEOUT :: 30 * time.Second
+STREAM_BODY_DEADLINE_BASE :: 30 * time.Second
+STREAM_BODY_MIN_BYTES_PER_SEC :: 64 * 1024
+
+// stream_body_budget is the total time a streamed body of `total` bytes may take.
+stream_body_budget :: proc(total: int, base: time.Duration, min_rate: int) -> time.Duration {
+	rate := min_rate > 0 ? min_rate : STREAM_BODY_MIN_BYTES_PER_SEC
+	return base + time.Duration(i64(max(total, 0)) * i64(time.Second) / i64(rate))
 }
 
 body_stream_from_bytes :: proc(body: []byte) -> Body_Stream {
@@ -72,6 +93,13 @@ body_stream_read :: proc(s: ^Body_Stream, buf: []byte) -> (n: int, ok: bool) {
 			continue
 		}
 		if !s.from_socket do return n, false
+		wait := s.idle
+		if s.has_deadline {
+			left := time.tick_diff(time.tick_now(), s.deadline)
+			if left <= 0 do return n, false
+			if wait <= 0 || left < wait do wait = left
+		}
+		if wait > 0 do _ = net.set_option(s.client, .Receive_Timeout, wait)
 		got, err := net.recv_tcp(s.client, buf[n:want])
 		if err != nil || got <= 0 do return n, false
 		n += got
@@ -84,6 +112,10 @@ Pre_Body_Gate :: struct {
 	ctx:     rawptr,
 	admit:   proc(ctx: rawptr, method, path: string, content_length: int) -> Pre_Body_Verdict,
 	release: proc(ctx: rawptr),
+	// Overrides for the STREAM_BODY_* bounds (0 = default); tests shorten them.
+	body_idle_timeout:  time.Duration,
+	body_deadline_base: time.Duration,
+	body_min_rate:      int,
 }
 
 Server_State :: struct {
@@ -169,10 +201,22 @@ handle_client :: proc(client: net.TCP_Socket, source: net.Endpoint, router: ^Rou
 		admitted = verdict.held,
 	}
 	stream: Body_Stream
+	idle := STREAM_BODY_IDLE_TIMEOUT
+	if config.pre_body != nil && config.pre_body.body_idle_timeout > 0 do idle = config.pre_body.body_idle_timeout
+	if verdict.held {
+		// A slot holder must not block on a stalled peer in either direction:
+		// bounded receive (streamed body) and send (ciphertext GET windows).
+		_ = net.set_option(client, .Receive_Timeout, idle)
+		_ = net.set_option(client, .Send_Timeout, idle)
+	}
 	if verdict.stream {
 		prefix := transmute([]byte)body
 		declared := content_length(request[:max(len(request) - len(body) - 4, 0)])
-		stream = Body_Stream{client = client, prefix = prefix, total = declared, remaining = declared, from_socket = true}
+		base := STREAM_BODY_DEADLINE_BASE
+		if config.pre_body.body_deadline_base > 0 do base = config.pre_body.body_deadline_base
+		stream = Body_Stream{client = client, prefix = prefix, total = declared, remaining = declared, from_socket = true,
+			idle = idle, has_deadline = true,
+			deadline = time.tick_add(time.tick_now(), stream_body_budget(declared, base, config.pre_body.body_min_rate))}
 		req_obj.body = ""
 		req_obj.body_stream = &stream
 	}

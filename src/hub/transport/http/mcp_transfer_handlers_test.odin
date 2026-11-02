@@ -354,3 +354,62 @@ test_transfer_put_body_is_streamed_in_1_mib_windows :: proc(t: ^testing.T) {
 	testing.expectf(t, strings.has_prefix(r401, "HTTP/1.1 401") || strings.has_prefix(r401, "HTTP/1.1 404"), "bad bearer: %q", r401[:min(len(r401), 200)])
 	testing.expect_value(t, f.svc.data_path_in_flight, i64(0))
 }
+
+// Review finding (§7): a bearer holder that stalls mid-body cannot keep its slot.
+// With a short injected idle timeout the server ends the read, keeps the bytes that
+// arrived (resume offset), answers 400 incomplete_body and returns the slot: with a
+// single slot the resume PATCH is then admitted.
+@(test)
+test_transfer_stalled_body_times_out_and_releases_slot :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	f: Xh
+	if !xh_open(t, &f, "_stall") do return
+	defer xh_close(&f)
+	f.svc.data_path_max = 1
+	who := mcp.Transfer_Caller{owner = "user_a", client_id = "c", grant_id = "g", family_id = "fam"}
+	x, token, _ := mcp.transfer_upload_begin(&f.svc, who, {request_id = "st", request_digest = "d", kind = "file", content_type = "application/octet-stream"})
+	ct := fmt.tprintf("%s/%s/ciphertext", MCP_TRANSFERS_PATH, x.transfer_id)
+	body := strings.repeat("z", 1000, context.temp_allocator)
+	gate := Pre_Body_Gate{body_idle_timeout = 200 * time.Millisecond}
+	head := fmt.tprintf("PUT %s HTTP/1.1\r\nHost: hub.example\r\nAuthorization: Bearer %s\r\nContent-Length: 1000\r\n\r\n", ct, token)
+	resp, elapsed := transfer_loopback(t, &f.h, gate, head, {body[:10]}, 0)
+	testing.expectf(t, strings.has_prefix(resp, "HTTP/1.1 400") && strings.contains(resp, "incomplete_body"), "stalled PUT: %q", resp[:min(len(resp), 200)])
+	testing.expectf(t, elapsed < 3 * time.Second, "idle timeout ended the read (took %v)", elapsed)
+	testing.expect(t, strings.contains(resp, "Upload-Offset: 10"))
+	testing.expect_value(t, stream_offset(&f, x.transfer_id), i64(10))
+	testing.expect_value(t, f.svc.data_path_in_flight, i64(0))
+	// The single slot is free again: the resume is admitted and completes.
+	rhead := fmt.tprintf("PATCH %s HTTP/1.1\r\nHost: hub.example\r\nAuthorization: Bearer %s\r\nUpload-Offset: 10\r\nContent-Length: 990\r\n\r\n", ct, token)
+	done, _ := transfer_loopback(t, &f.h, gate, rhead, {body[10:]}, 0)
+	testing.expectf(t, strings.has_prefix(done, "HTTP/1.1 200"), "resume PATCH: %q", done[:min(len(done), 200)])
+	testing.expect_value(t, stream_offset(&f, x.transfer_id), i64(1000))
+	testing.expect_value(t, f.svc.data_path_in_flight, i64(0))
+}
+
+// Review finding (§7, minor): a peer that keeps trickling (never idle long enough
+// for the idle timeout) is still cut off by the total body deadline
+// (base + declared/min_rate), so it cannot hold a slot for the token lifetime.
+@(test)
+test_transfer_trickled_body_hits_deadline_and_releases_slot :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	f: Xh
+	if !xh_open(t, &f, "_trickle") do return
+	defer xh_close(&f)
+	f.svc.data_path_max = 1
+	who := mcp.Transfer_Caller{owner = "user_a", client_id = "c", grant_id = "g", family_id = "fam"}
+	x, token, _ := mcp.transfer_upload_begin(&f.svc, who, {request_id = "tr", request_digest = "d", kind = "file", content_type = "application/octet-stream"})
+	ct := fmt.tprintf("%s/%s/ciphertext", MCP_TRANSFERS_PATH, x.transfer_id)
+	// Idle 2 s never trips (a byte every 100 ms); the deadline is ~300 ms.
+	gate := Pre_Body_Gate{body_idle_timeout = 2 * time.Second, body_deadline_base = 300 * time.Millisecond, body_min_rate = 1 << 30}
+	head := fmt.tprintf("PUT %s HTTP/1.1\r\nHost: hub.example\r\nAuthorization: Bearer %s\r\nContent-Length: 100\r\n\r\n", ct, token)
+	parts := make([]string, 10, context.temp_allocator)
+	for i in 0 ..< 10 do parts[i] = "y"
+	resp, _ := transfer_loopback(t, &f.h, gate, head, parts, 100 * time.Millisecond)
+	// The response can race the client's later sends (RST), so judge by state:
+	// the read ended early, the partial bytes are kept, and the slot is back.
+	if len(resp) > 0 do testing.expectf(t, strings.has_prefix(resp, "HTTP/1.1 400"), "trickled PUT: %q", resp[:min(len(resp), 200)])
+	got := stream_offset(&f, x.transfer_id)
+	testing.expectf(t, got >= 1 && got < 10, "deadline cut the body short (received %d of 100)", got)
+	testing.expect_value(t, f.svc.data_path_in_flight, i64(0))
+	testing.expect_value(t, stream_body_budget(15 * 1024 * 1024, STREAM_BODY_DEADLINE_BASE, 0), 30 * time.Second + 240 * time.Second)
+}

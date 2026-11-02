@@ -31,19 +31,30 @@ MCP_Transfer_Handlers :: struct {
 	delegation: ^MCP_Delegation_Handlers,
 }
 
-// xfr_browser_owner authenticates a browser executor request: a Hub session (never
-// OIDC or an MCP bearer), same Origin for every non-GET/HEAD method, and a v2 request
-// proof from an APPROVED device of that user. Returns the owner whose transfers it may
-// reach; ownership itself is checked by transfer_get_owned (foreign -> 404).
+// xfr_browser_session runs the body-independent half of browser executor auth: a Hub
+// session (never OIDC or an MCP bearer), the same Origin for every non-GET/HEAD
+// method, and the presence of a v2 device request proof. It reads no body byte, so
+// it runs BEFORE a streamed body is read (an unauthenticated peer never reaches the
+// body read while holding a data-path slot).
 @(private = "file")
-xfr_browser_owner :: proc(h: ^MCP_Transfer_Handlers, req: Request) -> (string, bool, Response) {
+xfr_browser_session :: proc(h: ^MCP_Transfer_Handlers, req: Request) -> (contracts.Auth_Context, bool, Response) {
 	d := h.delegation
 	principal, ok, _ := require_auth(d.auth, req)
-	if !ok || principal.kind != .Session do return "", false, xfr_error(401, "unauthenticated")
-	if req.method != "GET" && req.method != "HEAD" && header_value(req.headers, "Origin") != d.origin do return "", false, xfr_error(403, "origin_required")
+	if !ok || principal.kind != .Session do return {}, false, xfr_error(401, "unauthenticated")
+	if req.method != "GET" && req.method != "HEAD" && header_value(req.headers, "Origin") != d.origin do return {}, false, xfr_error(403, "origin_required")
+	if header_value(req.headers, "X-Heimdall-Device-Sig") == "" || header_value(req.headers, "X-Heimdall-Device-Id") == "" do return {}, false, xfr_error(401, "device_proof_required")
+	return principal, true, {}
+}
+
+// xfr_browser_proof verifies the v2 request proof (over method, target and
+// sha256(body)) from an APPROVED device of the session's user. The body must be in
+// req.body. Ownership itself is checked by transfer_get_owned (foreign -> 404).
+@(private = "file")
+xfr_browser_proof :: proc(h: ^MCP_Transfer_Handlers, principal: contracts.Auth_Context, req: Request) -> (bool, Response) {
+	d := h.delegation
 	vh := Vault_Directory_Handlers{auth = d.auth, vault = d.directory}
-	if _, err := vault_request_signer(&vh, principal, req, .Approved); err.code != .None do return "", false, xfr_error(401, "device_proof_required")
-	return principal.user_id, true, {}
+	if _, err := vault_request_signer(&vh, principal, req, .Approved); err.code != .None do return false, xfr_error(401, "device_proof_required")
+	return true, {}
 }
 
 // mcp_transfer_pre_body is the server's pre-body gate for transfer routes (§7): the
@@ -238,20 +249,30 @@ mcp_transfer_handler :: proc(ctx: rawptr, request: Request) -> Response {
 	// the browser session + device proof. Any other bearer (OAuth MCP, OIDC) is 401.
 	token := bearer_token(req)
 	browser_owner := ""
+	x: domain.Mcp_Transfer
+	have_x := false
 	if header_value(req.headers, "Authorization") == "" && h.delegation != nil {
-		// The browser's v2 device proof signs sha256(body), so its body must be in
-		// hand before the proof is checked: browser uploads are limited to one
-		// <= 1 MiB window per request (PATCH with Upload-Offset), which keeps the §7
-		// bound (a slot holds <= 1 MiB) without appending unverified bytes.
+		// Body-independent checks first (session, Origin, proof headers): nothing
+		// unauthenticated reaches a body read while the request holds a slot.
+		principal, sok, sresp := xfr_browser_session(h, req)
+		if !sok do return sresp
+		owner := principal.user_id
+		// The v2 device proof signs sha256(body), so the body must be in hand before
+		// the proof is checked: browser uploads are limited to one <= 1 MiB window
+		// per request (PATCH with Upload-Offset), which keeps the §7 bound (a slot
+		// holds <= 1 MiB) without appending unverified bytes. The transfer must
+		// exist and belong to the session's user before that window is read.
 		if req.body_stream != nil {
 			if req.body_stream.total > contracts.ARTIFACT_TRANSFER_STORE_CHUNK_BYTES do return xfr_error(413, "browser_chunk_size")
+			gx, gf := mcp.transfer_get_owned(h.svc, owner, id)
+			if !mcp.transfer_ok(gf) do return fail_response(gf)
+			x, have_x = gx, true
 			buf := make([]byte, req.body_stream.total, context.temp_allocator)
 			if n, complete := body_stream_read(req.body_stream, buf); !complete || n != len(buf) do return xfr_error(400, "incomplete_body")
 			req.body = string(buf)
 			req.body_stream = nil
 		}
-		owner, bok, bresp := xfr_browser_owner(h, req)
-		if !bok do return bresp
+		if pok, presp := xfr_browser_proof(h, principal, req); !pok do return presp
 		browser_owner = owner
 	} else if !strings.has_prefix(token, mcp.TRANSFER_TOKEN_PREFIX) {
 		return xfr_error(401, "unauthenticated")
@@ -268,11 +289,12 @@ mcp_transfer_handler :: proc(ctx: rawptr, request: Request) -> Response {
 	}
 	defer if acquired do mcp.transfer_data_path_release(h.svc)
 
-	x: domain.Mcp_Transfer
-	af: mcp.Transfer_Fail
-	if browser_owner != "" do x, af = mcp.transfer_get_owned(h.svc, browser_owner, id)
-	else do x, af = mcp.transfer_authenticate(h.svc, token, id)
-	if !mcp.transfer_ok(af) do return fail_response(af)
+	if !have_x {
+		af: mcp.Transfer_Fail
+		if browser_owner != "" do x, af = mcp.transfer_get_owned(h.svc, browser_owner, id)
+		else do x, af = mcp.transfer_authenticate(h.svc, token, id)
+		if !mcp.transfer_ok(af) do return fail_response(af)
+	}
 	if h.grant_live != nil && !h.grant_live(h.grant_ctx, x) {
 		mcp.transfer_fail_for_revocation(h.svc, x)
 		return xfr_error(401, "revoked")

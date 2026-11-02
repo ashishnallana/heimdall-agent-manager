@@ -209,4 +209,62 @@ test_transfer_browser_auth_positive_path_and_owner_isolation :: proc(t: ^testing
 	x3, _, _ := repo.get(repo.ctx, xa.transfer_id)
 	testing.expect_value(t, x3.received_bytes, i64(2000))
 	testing.expect_value(t, svc.data_path_in_flight, i64(0))
+
+	// Over the real server: session + origin + proof headers, but user_b's transfer.
+	// Ownership is decided before the body is read: 404 although no body byte is
+	// ever sent and the socket stays open.
+	foreign_head := fmt.tprintf("PATCH %s/%s/ciphertext HTTP/1.1\r\nHost: hub.example\r\nCookie: %s\r\nOrigin: https://hub.example\r\nX-Heimdall-Device-Id: %s\r\nX-Heimdall-Device-Sig: x\r\nUpload-Offset: 0\r\nContent-Length: 1000\r\n\r\n",
+		MCP_TRANSFERS_PATH, xb.transfer_id, header_value(session_a, "Cookie"), p.devices[0].device_id)
+	fr, felapsed := transfer_loopback(t, &h, Pre_Body_Gate{body_idle_timeout = 5 * time.Second}, foreign_head, nil, 0)
+	testing.expectf(t, strings.has_prefix(fr, "HTTP/1.1 404"), "foreign transfer before body: %q", fr[:min(len(fr), 200)])
+	testing.expect(t, felapsed < 2 * time.Second)
+	testing.expect_value(t, svc.data_path_in_flight, i64(0))
+}
+
+// Review finding (§7 admission): with NO Authorization header the browser branch
+// must authenticate BEFORE it reads a body byte. A peer that declares a body, sends
+// none and keeps the socket open gets 401 at once (well inside the idle timeout),
+// and the data-path slot is back, so the next request is admitted. With a single
+// slot, a held slot would make the second request 503.
+@(test)
+test_transfer_unauthenticated_browser_body_never_holds_a_slot :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	user_repo := iface.User_Repository{get_by_id = proc(ctx: rawptr, id: domain.User_ID) -> (domain.User, bool, domain.Domain_Error) {
+		return {user_id = id, name = string(id), status = .Active}, true, {}
+	}}
+	clock := platform.real_clock()
+	ids := http_test_id_generator()
+	users := user_service.new_user_service_basic(&user_repo, &clock, &ids)
+	auth := auth_service.new_auth_service(auth_service.Auth_Config{}, &users)
+	defer auth_service.oidc_free(&auth)
+	session := http_test_login(t, &auth, "user_a")
+	vrepo := iface.Vault_Directory_Repository{}
+	directory := vd.new_service(&vrepo, &clock)
+	defer vd.service_free(&directory)
+	delegation := MCP_Delegation_Handlers{auth = &auth, directory = &directory, origin = "https://hub.example"}
+	svc := mcp.Transfer_Service{data_path_max = 1}
+	defer mcp.transfer_limits_destroy(&svc)
+	h := MCP_Transfer_Handlers{svc = &svc, delegation = &delegation}
+	gate := Pre_Body_Gate{body_idle_timeout = 5 * time.Second}
+
+	// No credentials: 401 without the body ever being sent.
+	noauth := "PATCH " + MCP_TRANSFERS_PATH + "/xfr_a/ciphertext HTTP/1.1\r\nHost: hub.example\r\nUpload-Offset: 0\r\nContent-Length: 1000\r\n\r\n"
+	for _ in 0 ..< 3 {
+		resp, elapsed := transfer_loopback(t, &h, gate, noauth, nil, 0)
+		testing.expectf(t, strings.has_prefix(resp, "HTTP/1.1 401") && strings.contains(resp, "unauthenticated"), "no-auth PATCH: %q", resp[:min(len(resp), 200)])
+		testing.expectf(t, elapsed < 2 * time.Second, "answered before any body byte (took %v)", elapsed)
+		testing.expect_value(t, svc.data_path_in_flight, i64(0))
+	}
+	// A session but cross-origin, and a session without proof headers: both refused
+	// before the body (no body byte is ever sent here either).
+	cookie := header_value(session, "Cookie")
+	cross := fmt.tprintf("PATCH %s/xfr_a/ciphertext HTTP/1.1\r\nHost: hub.example\r\nCookie: %s\r\nOrigin: https://evil.example\r\nUpload-Offset: 0\r\nContent-Length: 1000\r\n\r\n", MCP_TRANSFERS_PATH, cookie)
+	resp, elapsed := transfer_loopback(t, &h, gate, cross, nil, 0)
+	testing.expectf(t, strings.has_prefix(resp, "HTTP/1.1 403"), "cross-origin: %q", resp[:min(len(resp), 200)])
+	testing.expect(t, elapsed < 2 * time.Second)
+	noproof := fmt.tprintf("PATCH %s/xfr_a/ciphertext HTTP/1.1\r\nHost: hub.example\r\nCookie: %s\r\nOrigin: https://hub.example\r\nUpload-Offset: 0\r\nContent-Length: 1000\r\n\r\n", MCP_TRANSFERS_PATH, cookie)
+	resp, elapsed = transfer_loopback(t, &h, gate, noproof, nil, 0)
+	testing.expectf(t, strings.has_prefix(resp, "HTTP/1.1 401") && strings.contains(resp, "device_proof_required"), "no proof: %q", resp[:min(len(resp), 200)])
+	testing.expect(t, elapsed < 2 * time.Second)
+	testing.expect_value(t, svc.data_path_in_flight, i64(0))
 }
