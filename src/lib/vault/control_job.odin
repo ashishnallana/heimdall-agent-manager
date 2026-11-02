@@ -38,6 +38,14 @@ control_reply_statement :: proc(job:Control_Job,device_id,result:string)->string
 	// All identifiers and hashes are restricted single-line values.
 	return fmt.tprintf("heimdall-mcp-worker-result/v1\n%s\n%s\n%s\n%s\n%s\n%d\n%s\n%s\n%s\n%d\n%s",job.owner,job.resource,job.grant,job.request_id,job.generation,job.revision,job.head,job.digest,device_id,job.deadline_ms,sha256_hex(result))
 }
+// Artifact-specific bound: only an artifacts.create seal job may carry a packed
+// html-bundle (base64 of <=15 MiB + 1 MiB framing); every other job keeps 4 MiB.
+CONTROL_JOB_PAYLOAD_MAX :: 4*1024*1024
+CONTROL_JOB_ARTIFACT_PAYLOAD_MAX :: CONTROL_ARTIFACT_BUNDLE_BASE64_MAX+1024*1024
+control_job_payload_max :: proc(operation,tool:string)->int {
+	if operation=="seal_resource" && tool=="artifacts.create" do return CONTROL_JOB_ARTIFACT_PAYLOAD_MAX
+	return CONTROL_JOB_PAYLOAD_MAX
+}
 control_job_digest :: proc(job:Control_Job)->string {
 	// Include EVERY authority/operation field and public directory snapshot.
 	j:=job;j.digest=""
@@ -47,7 +55,7 @@ control_job_digest :: proc(job:Control_Job)->string {
 	return sha256_hex(string(encoded))
 }
 control_job_verify :: proc(job:Control_Job,owner,resource,device_id:string,kr:^Vault_Keyring,now:i64,root_pin:^Root_Pin=nil)->bool {
-	if job.owner!=owner || job.resource!=resource || job.request_id=="" || !valid_id_value(job.request_id) || job.generation=="" || !valid_id_value(job.generation) || job.deadline_ms<=now || job.deadline_ms>now+5000 || len(job.payload)>4*1024*1024 || job.digest!=control_job_digest(job) || (job.operation!="read" && job.operation!="seal" && job.operation!="seal_comment" && job.operation!="seal_task" && job.operation!="seal_agent" && job.operation!="seal_resource") do return false
+	if job.owner!=owner || job.resource!=resource || job.request_id=="" || !valid_id_value(job.request_id) || job.generation=="" || !valid_id_value(job.generation) || job.deadline_ms<=now || job.deadline_ms>now+5000 || len(job.payload)>control_job_payload_max(job.operation,job.tool) || job.digest!=control_job_digest(job) || (job.operation!="read" && job.operation!="seal" && job.operation!="seal_comment" && job.operation!="seal_task" && job.operation!="seal_agent" && job.operation!="seal_resource") do return false
 	c:Control_Consent
 	if json.unmarshal_string(job.consent,&c,.JSON,context.temp_allocator)!=nil do return false
 	if !control_job_scope_ok(c.scope,job.tool,job.operation) do return false

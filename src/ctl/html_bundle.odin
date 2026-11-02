@@ -4,7 +4,10 @@ import "core:fmt"
 import "core:os"
 import "core:slice"
 import "core:strings"
+import "odin_test:contracts"
 import hb "odin_test:lib/html_bundle"
+
+#assert(hb.HTML_BUNDLE_MAX_ARCHIVE == contracts.ARTIFACT_MAX_CONTENT_BYTES)
 
 // ── Static HTML bundle artifacts: ham-ctl packaging ─────────────────────────
 // The format core (limits, path grammar, type allowlist, ZIP reader/writer,

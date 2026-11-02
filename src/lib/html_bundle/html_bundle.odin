@@ -11,7 +11,6 @@ import "core:mem"
 import "core:slice"
 import "core:strings"
 import "core:unicode/utf8"
-import "odin_test:contracts"
 
 // ── Static HTML bundle artifacts (REQ-BUNDLE-1/2/5) ─────────────────────────
 // Shared format core: ham-ctl (src/ctl) and the Hub's MCP artifacts.create
@@ -32,10 +31,12 @@ HTML_BUNDLE_FORMAT_VERSION :: 1
 // The archive is the artifact content, so its limit IS the artifact content limit:
 // 15 MB = 15 MiB = 15,728,640 bytes (contracts.ARTIFACT_MAX_CONTENT_BYTES, REQ-ART-1).
 // Expanded size, entry count and per-member size bound decompression work separately.
-HTML_BUNDLE_MAX_ARCHIVE    :: contracts.ARTIFACT_MAX_CONTENT_BYTES
+// Kept literal (no contracts import: contracts -> vault -> html_bundle would cycle);
+// src/ctl/html_bundle.odin asserts it equals contracts.ARTIFACT_MAX_CONTENT_BYTES.
+HTML_BUNDLE_MAX_ARCHIVE    :: 15 * 1024 * 1024
 HTML_BUNDLE_MAX_EXPANDED   :: 50 * 1024 * 1024
 HTML_BUNDLE_MAX_ENTRIES    :: 1000
-HTML_BUNDLE_MAX_MEMBER     :: contracts.ARTIFACT_MAX_CONTENT_BYTES
+HTML_BUNDLE_MAX_MEMBER     :: HTML_BUNDLE_MAX_ARCHIVE
 HTML_BUNDLE_MAX_MANIFEST   :: 64 * 1024
 HTML_BUNDLE_MAX_PATH       :: 1024
 
