@@ -16,7 +16,9 @@ mcp_transfers_init :: proc(graph: ^App_Graph) -> bool {
 	graph.mcp_transfer_conn = conn
 	graph.mcp_transfer_repo = sqlite.new_transfer_repository(&graph.mcp_transfer_repo_impl, &graph.mcp_transfer_conn)
 	graph.mcp_transfer_service = mcp.Transfer_Service{repo = &graph.mcp_transfer_repo, directory = mcp_transfer_directory, directory_ctx = graph}
-	graph.mcp_transfer_handlers = {svc = &graph.mcp_transfer_service, grant_live = mcp_transfer_grant_live, grant_ctx = graph}
+	// Browser executor auth reuses the delegation handlers' session auth, origin and
+	// vault directory (filled by configure_mcp_delegation; held by pointer).
+	graph.mcp_transfer_handlers = {svc = &graph.mcp_transfer_service, grant_live = mcp_transfer_grant_live, grant_ctx = graph, delegation = &graph.mcp_delegation_handlers}
 	return true
 }
 

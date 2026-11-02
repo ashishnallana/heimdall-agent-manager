@@ -26,6 +26,24 @@ MCP_Transfer_Handlers :: struct {
 	// (revocation fails every data-path request with 401 and wipes staging, §9).
 	grant_live: proc(ctx: rawptr, x: domain.Mcp_Transfer) -> bool,
 	grant_ctx:  rawptr,
+	// delegation enables the browser executor's auth (§5.2): the native same-origin
+	// session plus an approved-device v2 request proof. nil = bearer hxt_ only.
+	delegation: ^MCP_Delegation_Handlers,
+}
+
+// xfr_browser_owner authenticates a browser executor request: a Hub session (never
+// OIDC or an MCP bearer), same Origin for every non-GET/HEAD method, and a v2 request
+// proof from an APPROVED device of that user. Returns the owner whose transfers it may
+// reach; ownership itself is checked by transfer_get_owned (foreign -> 404).
+@(private = "file")
+xfr_browser_owner :: proc(h: ^MCP_Transfer_Handlers, req: Request) -> (string, bool, Response) {
+	d := h.delegation
+	principal, ok, _ := require_auth(d.auth, req)
+	if !ok || principal.kind != .Session do return "", false, xfr_error(401, "unauthenticated")
+	if req.method != "GET" && req.method != "HEAD" && header_value(req.headers, "Origin") != d.origin do return "", false, xfr_error(403, "origin_required")
+	vh := Vault_Directory_Handlers{auth = d.auth, vault = d.directory}
+	if _, err := vault_request_signer(&vh, principal, req, .Approved); err.code != .None do return "", false, xfr_error(401, "device_proof_required")
+	return principal.user_id, true, {}
 }
 
 // mcp_transfer_pre_body is the server's pre-body gate for transfer routes (§7): the
@@ -179,8 +197,17 @@ mcp_transfer_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	if len(parts) < 1 || len(parts) > 2 || len(parts[0]) == 0 || len(parts[0]) > 64 do return xfr_error(404, "not_found")
 	id := parts[0]
 	sub := len(parts) == 2 ? parts[1] : ""
+	// Either a per-transfer bearer (shell executor) or, with NO Authorization header,
+	// the browser session + device proof. Any other bearer (OAuth MCP, OIDC) is 401.
 	token := bearer_token(req)
-	if !strings.has_prefix(token, mcp.TRANSFER_TOKEN_PREFIX) do return xfr_error(401, "unauthenticated")
+	browser_owner := ""
+	if header_value(req.headers, "Authorization") == "" && h.delegation != nil {
+		owner, bok, bresp := xfr_browser_owner(h, req)
+		if !bok do return bresp
+		browser_owner = owner
+	} else if !strings.has_prefix(token, mcp.TRANSFER_TOKEN_PREFIX) {
+		return xfr_error(401, "unauthenticated")
+	}
 
 	is_data := sub == "ciphertext" && (req.method == "PUT" || req.method == "PATCH" || req.method == "GET")
 	// Global data-path admission before touching SQLite (§7). In the server this
@@ -193,7 +220,10 @@ mcp_transfer_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	}
 	defer if acquired do mcp.transfer_data_path_release(h.svc)
 
-	x, af := mcp.transfer_authenticate(h.svc, token, id)
+	x: domain.Mcp_Transfer
+	af: mcp.Transfer_Fail
+	if browser_owner != "" do x, af = mcp.transfer_get_owned(h.svc, browser_owner, id)
+	else do x, af = mcp.transfer_authenticate(h.svc, token, id)
 	if !mcp.transfer_ok(af) do return fail_response(af)
 	if h.grant_live != nil && !h.grant_live(h.grant_ctx, x) {
 		mcp.transfer_fail_for_revocation(h.svc, x)
