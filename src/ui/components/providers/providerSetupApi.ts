@@ -45,9 +45,11 @@ function normalizeStatus(raw: any): BridgeProviderStatus {
   };
 }
 
+/** The bridge's row from the shared bridge-list cache (label, hostname, status). */
 async function bridgeDetails(bridgeId: string) {
-  const raw = await cookieJsonFetch('/bridges');
-  const bridges = raw?.bridges || (Array.isArray(raw) ? raw : []);
+  // Lazy: bridgeSupport imports this module.
+  const { readBridgeRows } = await import('../../api/endpoints/bridgeSupport');
+  const bridges = await readBridgeRows();
   return bridges.find((bridge: any) => String(bridge?.bridge_id || bridge?.id || '') === bridgeId) || {};
 }
 

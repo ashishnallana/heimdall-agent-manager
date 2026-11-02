@@ -9,9 +9,13 @@ import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 import React, { act } from 'react';
 import { createRoot } from 'react-dom/client';
+import { Provider } from 'react-redux';
+import { configureStore } from '@reduxjs/toolkit';
 
-test('REQ-ENROLL-PENDING: Settings discovers a later replacement and cancels it', async () => {
-  const { default: Card } = await import('../src/ui/components/settings/PendingEnrollmentsCard.tsx');
+test('REQ-ENROLL-PENDING: Settings discovers a later replacement on the WebSocket event and cancels it', async () => {
+  const { default: Card, PENDING_FALLBACK_POLL_MS } = await import('../src/ui/components/settings/PendingEnrollmentsCard.tsx');
+  const { heimdallApi } = await import('../src/ui/api/heimdallApi.ts');
+  const { handleUserWsEvent } = await import('../src/ui/api/wsInvalidation.ts');
   const dom = new JSDOM('<div id="root"></div>', { url: 'https://hub.example.test/' });
   const saved = new Map<string, PropertyDescriptor | undefined>();
   for (const [key, value] of Object.entries({ window: dom.window, document: dom.window.document,
@@ -19,36 +23,58 @@ test('REQ-ENROLL-PENDING: Settings discovers a later replacement and cancels it'
     saved.set(key, Object.getOwnPropertyDescriptor(globalThis, key));
     Object.defineProperty(globalThis, key, { value, writable: true, configurable: true });
   }
-  const original = { fetch: globalThis.fetch, setInterval: globalThis.setInterval, clearInterval: globalThis.clearInterval };
-  let poll: (() => void) | undefined;
-  let cleared = false;
-  globalThis.setInterval = ((fn: () => void, ms: number) => { assert.equal(ms, 10_000); poll = fn; return 123; }) as any;
-  globalThis.clearInterval = ((id: any) => { assert.equal(id, 123); cleared = true; }) as any;
+  const original = { fetch: globalThis.fetch, setInterval: globalThis.setInterval };
+  // The old 10 s timer is gone: any interval here is a regression.
+  globalThis.setInterval = ((_fn: () => void, ms: number) => assert.fail(`unexpected setInterval(${ms})`)) as any;
   let pending = false;
+  const reads: string[] = [];
   const mutations: string[] = [];
   globalThis.fetch = (async (url: any, init: any = {}) => {
     if (init.method === 'POST') {
       mutations.push(String(url)); pending = false;
       return json({ data: { rolled_back: true } });
     }
+    reads.push(String(url));
     return json({ data: pending ? [{ bridge_id: 'brg_replace', label: 'Desktop', status: 'online',
       enrollment_state: 'enrolled', enrollment_in_progress: true }] : [] });
   }) as any;
+  const store = configureStore({
+    reducer: { [heimdallApi.reducerPath]: heimdallApi.reducer },
+    middleware: (defaults) => defaults().concat(heimdallApi.middleware),
+  });
   const root = createRoot(dom.window.document.getElementById('root')!);
+  const settle = () => act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+  const until = async (ready: () => boolean) => { for (let i = 0; i < 50 && !ready(); i++) await settle(); };
+  const cancelButton = () => dom.window.document.querySelector('[data-debug-id="settings-bridge-pending-cancel-brg_replace"]') as HTMLButtonElement | null;
   try {
-    await act(async () => { root.render(React.createElement(Card)); });
+    await act(async () => { root.render(React.createElement(Provider, { store, children: React.createElement(Card) })); });
+    await until(() => reads.length > 0 && !(store.getState() as any).heimdallApi.queries['listBridgesWithPending(undefined)']?.status?.startsWith('pending'));
     assert.equal(dom.window.document.querySelector('button'), null);
-    assert.ok(poll, 'polling continues from an empty list');
+    assert.deepEqual(reads.map((u) => new URL(u, 'https://hub.example.test').search), ['?include_pending=1']);
+    // RTK 2 keeps live subscription options in middleware, not in the store state.
+    const live = (store.dispatch(heimdallApi.internalActions.internal_getRTKQSubscriptions()) as any).getSubscriptions();
+    const subscriptions = [...live.values()].flatMap((subs: Map<string, any>) => [...subs.values()]);
+    assert.deepEqual(subscriptions.map((s) => [s.pollingInterval, s.skipPollingIfUnfocused]), [[PENDING_FALLBACK_POLL_MS, true]],
+      'only a slow fallback poll, paused while the page is hidden');
+    assert.ok(PENDING_FALLBACK_POLL_MS >= 60_000);
+
+    // An enrollment started elsewhere: the hub announces it and the list refetches.
     pending = true;
-    await act(async () => { poll!(); });
-    const cancel = dom.window.document.querySelector('[data-debug-id="settings-bridge-pending-cancel-brg_replace"]') as HTMLButtonElement;
+    await act(async () => {
+      handleUserWsEvent(store.dispatch, { type: 'resource_changed', resource: 'bridge', resource_id: 'brg_replace',
+        change: 'bridge_enrollment_changed', summary: {} });
+    });
+    await until(() => cancelButton() !== null);
+    assert.equal(reads.length, 2, 'the WebSocket event refetches the pending list once');
+    const cancel = cancelButton();
     assert.ok(cancel, 'an online bridge replacement offers cancellation');
     await act(async () => { cancel.click(); });
+    await until(() => cancelButton() === null);
     assert.deepEqual(mutations, ['/api/v1/bridges/brg_replace/enrollment/cancel']);
     assert.equal(dom.window.document.querySelector('button'), null, 'cancelled replacement disappears');
   } finally {
     await act(async () => root.unmount());
-    assert.ok(cleared, 'unmount stops polling');
+    store.dispatch(heimdallApi.util.resetApiState());
     Object.assign(globalThis, original);
     dom.window.close();
     for (const [key, descriptor] of saved) {

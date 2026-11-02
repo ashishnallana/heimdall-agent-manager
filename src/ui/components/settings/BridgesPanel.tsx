@@ -182,7 +182,7 @@ export default function BridgesPanel({ onHeadingChange }: { onHeadingChange?: (h
       {actionError ? <div data-debug-id="settings-bridges-error" className="mt-3 rounded-xl border border-danger/30 bg-danger-soft px-3 py-2 text-sm text-danger">{actionError}</div> : null}
 
       {/* Approved bridges whose vault key has not been delivered yet (REQ-EA-6) */}
-      {!selectedId ? <PendingEnrollmentsCard refreshKey={bridgesQuery.fulfilledTimeStamp} /> : null}
+      {!selectedId ? <PendingEnrollmentsCard /> : null}
 
       {/* Bridge list */}
       <div data-debug-id="settings-bridges-list" className="mt-6">

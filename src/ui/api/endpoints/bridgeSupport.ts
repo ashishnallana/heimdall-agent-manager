@@ -1,7 +1,7 @@
 import { refreshBridgeProviderCatalog } from '../../components/providers/providerSetupApi';
 import { normalizeModelCatalog } from '../../components/providers/modelCatalogStatus';
 import * as daemonApi from '../daemonApi';
-import { heimdallApi, withSessionQuery } from '../heimdallApi';
+import { heimdallApi, heimdallApiDispatch, withSessionQuery } from '../heimdallApi';
 import { profileLabel } from '../../components/providers/providerProfiles';
 import { useMemo } from 'react';
 import { cookieJsonFetch, cookieMutation, customQueryError } from '../cookieFetch';
@@ -149,6 +149,55 @@ function normalizeBridgeSupport(data: any): { agentId: string; entries: AgentBri
   };
 }
 
+/**
+ * GET /bridges rows (list or `{bridges}`), tolerant of either envelope. The hub's
+ * row `capabilities` are dropped because they are not filtered to
+ * enabled/present/active providers (see listBridges).
+ */
+function bridgeRowsFrom(data: any): any[] {
+  const rows = data?.bridges || data || [];
+  return (Array.isArray(rows) ? rows : []).map((bridge: any) => {
+    const { capabilities: _unfiltered, ...rest } = bridge || {};
+    return rest;
+  });
+}
+
+export interface ReadBridgeRowsOptions {
+  /** Include approved-but-not-enrolled bridges (`?include_pending=1`). */
+  includePending?: boolean;
+  /**
+   * Fetch now even when the cache holds the list. For decisions that must not act
+   * on a stale row (auto-unseal re-check, key delivery, enrollment); the answer
+   * still lands in the shared cache for every mounted consumer.
+   */
+  fresh?: boolean;
+}
+
+/**
+ * The bridge list for code outside React. Reads through the shared listBridges
+ * (or listBridgesWithPending) cache instead of calling GET /bridges directly, so a
+ * list a mounted component already holds costs no request. Falls back to a plain
+ * fetch when no app store is bound (tests, demos).
+ */
+export async function readBridgeRows(options: ReadBridgeRowsOptions = {}): Promise<any[]> {
+  const dispatch = heimdallApiDispatch();
+  if (!dispatch) {
+    return bridgeRowsFrom(await cookieJsonFetch(options.includePending ? '/bridges?include_pending=1' : '/bridges'));
+  }
+  const endpoint = options.includePending
+    ? bridgeSupportApi.endpoints.listBridgesWithPending
+    : bridgeSupportApi.endpoints.listBridges;
+  // Subscribe briefly, then release: the entry stays cached for its
+  // keepUnusedDataFor instead of being dropped at once like a subscribe:false read.
+  const request = dispatch((endpoint as any).initiate(undefined, { forceRefetch: Boolean(options.fresh) }));
+  try {
+    const data = await request.unwrap();
+    return Array.isArray(data?.bridges) ? data.bridges : [];
+  } finally {
+    request.unsubscribe();
+  }
+}
+
 export const bridgeSupportApi = heimdallApi.injectEndpoints({
   endpoints: (build) => ({
     listAgentBridgeSupport: build.query<any, { agentId: string }>({
@@ -195,21 +244,30 @@ export const bridgeSupportApi = heimdallApi.injectEndpoints({
     listBridges: build.query<any, void | {}>({
       queryFn: async () => {
         try {
-          const data = await cookieJsonFetch('/bridges');
-          const rows = data?.bridges || data || [];
-          const bridges = (Array.isArray(rows) ? rows : []).map((bridge: any) => {
-            const { capabilities: _unfiltered, ...rest } = bridge || {};
-            return rest;
-          });
-          return { data: { bridges } };
+          return { data: { bridges: bridgeRowsFrom(await cookieJsonFetch('/bridges')) } };
         } catch (error: any) {
           return { error: customQueryError(error) as any };
         }
       },
       providesTags: [{ type: 'Bridges' as const, id: 'LIST' }],
       // Bridges change rarely; keep cached across conversation switches (was the
-      // 30s global default). Bridge mutations invalidate the LIST tag.
+      // 30s global default). Bridge mutations and the user WebSocket's bridge events
+      // (wsInvalidation.ts) invalidate the LIST tag, so consumers need no poll.
       keepUnusedDataFor: 600,
+    }),
+    // GET /bridges?include_pending=1: the same rows plus approved-but-not-enrolled
+    // bridges (REQ-EA-6). Only Settings and the enrollment flows want those, so they
+    // are a separate entry that shares the LIST tag: the WebSocket's
+    // bridge_enrollment_changed invalidation refreshes both.
+    listBridgesWithPending: build.query<{ bridges: any[] }, void>({
+      queryFn: async () => {
+        try {
+          return { data: { bridges: bridgeRowsFrom(await cookieJsonFetch('/bridges?include_pending=1')) } };
+        } catch (error: any) {
+          return { error: customQueryError(error) as any };
+        }
+      },
+      providesTags: [{ type: 'Bridges' as const, id: 'LIST' }],
     }),
     fetchBridgeDetail: build.query<any, { bridgeId: string; expand?: string }>({
       queryFn: withSessionQuery(async ({ bridgeId, expand }, { session }) => {
@@ -414,6 +472,7 @@ export const bridgeSupportApi = heimdallApi.injectEndpoints({
 export const {
   useListAgentBridgeSupportQuery,
   useListBridgesQuery,
+  useListBridgesWithPendingQuery,
   useRenameBridgeMutation,
   useUpdateBridgeTelemetryMutation,
   useRevokeBridgeMutation,

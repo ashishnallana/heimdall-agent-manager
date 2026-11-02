@@ -268,7 +268,7 @@ export const FleetManagementDrawer: React.FC<FleetManagementDrawerProps> = ({
 
   // Use the same effective bridge as reconciliation for role-wide settings.
   const allInstancesQuery = useListAgentInstancesQuery({ limit: 1000 }, { skip: !isOpen });
-  const bridgesQuery = useListBridgesQuery(undefined, { skip: !isOpen, pollingInterval: 120000 });
+  const bridgesQuery = useListBridgesQuery(undefined, { skip: !isOpen });
   const activeBridges = useMemo(() => {
     return (bridgesQuery.data?.bridges || []).filter((b: any) => !isRevokedBridge(b));
   }, [bridgesQuery.data?.bridges]);
