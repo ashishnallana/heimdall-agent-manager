@@ -119,6 +119,7 @@ export function takePendingApprovalCode(): string {
 }
 
 export async function runDesktopBridgeOperation(manager: DesktopBridgeManagerApi, kind: DesktopBridgeOperation, target: DesktopBridgeTarget, options: DesktopBridgeOperationOptions = {}): Promise<string> {
+  if (state.operation) return 'Another bridge operation is already running.';
   attachDesktopBridgeSession(manager);
   pendingApprovalCode = '';
   set({ lastRun: { kind, options: { ...options }, target: { ...target } }, log: [], operation: kind, wizard: startWizard() });
@@ -127,9 +128,9 @@ export async function runDesktopBridgeOperation(manager: DesktopBridgeManagerApi
   const result = await manager.run(kind, target, { ...options, inAppApproval: true }).catch((err: any) => ({ ok: false, error: String(err?.message || err) }));
   // Progress and the final state arrive as events; a refusal (another
   // operation running, invalid Hub URL) arrives only here.
-  if (!result.ok && result.error) {
+  if (!result.ok) {
     set({ operation: '' });
-    return result.error;
+    return result.error || 'The bridge operation could not start.';
   }
   return '';
 }

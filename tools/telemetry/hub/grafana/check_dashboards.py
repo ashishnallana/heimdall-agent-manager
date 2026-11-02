@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Static checks for the Grafana dashboards (run by verify-db-dashboard.sh).
+"""Static checks for the Grafana dashboards.
 
   check_dashboards.py <repo-root> <rules-out.yml>
 

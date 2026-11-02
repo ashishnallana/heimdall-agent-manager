@@ -2,6 +2,9 @@ package http
 
 import "core:fmt"
 import "core:os"
+import "core:net"
+import "core:thread"
+import ws "odin_test:lib/ws"
 import "core:strings"
 import "core:sync"
 import "core:testing"
@@ -580,4 +583,84 @@ test_bridge_auto_update_config_authorization :: proc(t: ^testing.T) {
     req.headers = other
     response = bridge_auto_update_config_handler(rawptr(&f.bh), req)
     testing.expect(t, response.status == 403 || response.status == 404, "another account cannot edit the profile")
+}
+
+// Discovery reuses the owner-only live filesystem relay; history must never be
+// available through an unauthenticated or cross-owner request.
+@(test)
+test_session_projects_owner_authorization :: proc(t: ^testing.T) {
+	f := setup_update_test_fixture(t, "session-projects")
+	defer teardown_update_test_fixture(f)
+	path := fmt.tprintf("/api/v1/bridges/%s/session-projects", f.bridge_id)
+	resp := list_bridge_session_projects_handler(rawptr(&f.bh), Request{method = "GET", path = path, request_id = "history-anon", remote_addr = "192.168.1.1:1234"})
+	testing.expect_value(t, resp.status, 401)
+	other := http_test_login(t, &f.auth_svc, "session-history-other")
+	resp = list_bridge_session_projects_handler(rawptr(&f.bh), Request{method = "GET", path = path, request_id = "history-other", remote_addr = "127.0.0.1:4444", headers = other})
+	testing.expect(t, resp.status == 403 || resp.status == 404)
+	resp = list_bridge_session_projects_handler(rawptr(&f.bh), Request{method = "GET", path = path, request_id = "history-owner", remote_addr = "127.0.0.1:4444", headers = f.user_headers})
+	testing.expect_value(t, resp.status, 409)
+	testing.expect(t, !f.sink_rec.sent, "no discovery sent when unauthorized or offline")
+}
+
+
+@(private = "file")
+Session_Discovery_Peer :: struct {
+	f: ^update_handler_wire_fixture,
+	socket: net.TCP_Socket,
+	generation: int,
+	received: bool,
+	correlated: bool,
+}
+
+@(private = "file")
+session_discovery_peer :: proc(data: rawptr) {
+	peer := (^Session_Discovery_Peer)(data)
+	reader: ws.Frame_Reader
+	defer ws.reader_destroy(&reader)
+	_, command, ok := ws.read_frame(peer.socket, &reader, time.Second)
+	if !ok do return
+	defer delete(command)
+	peer.received = json_string(command, "type", context.temp_allocator) == "session_projects"
+	id := json_string(command, "command_id", context.temp_allocator)
+	reply := fmt.tprintf(`{{"type":"session_projects_result","command_id":"%s","ok":true,"projects":[{{"source":"Codex","path":"/fixture/app","canonical_path":"/fixture/app","description":"App is a calendar service.","sessions":2,"last_session_at":"2026-10-31T10:00:00Z"}}],"truncated":false}}`, id)
+	chunks: [dynamic]Bridge_Chunk_Reassembly
+	defer bridge_chunk_reassemblies_free(&chunks)
+	peer.correlated = bridge_ws_process_frame(&peer.f.bh, peer.f.bridge_id, peer.generation, peer.socket, &chunks, strings.clone(reply))
+}
+
+@(test)
+test_session_projects_authorized_roundtrip :: proc(t: ^testing.T) {
+	f := setup_update_test_fixture(t, "session-projects-roundtrip")
+	defer teardown_update_test_fixture(f)
+	bridge, ok, _ := iface.bridge_get_bridge(&f.br_repo, f.bridge_id)
+	if !testing.expect(t, ok) do return
+	defer domain.bridge_destroy(&bridge)
+	bridge.status = .Online
+	_, saved, _ := iface.bridge_save_bridge(&f.br_repo, bridge)
+	testing.expect(t, saved)
+	_, generation, live := project_service.bridge_runtime_registry_accept_live(&f.registry, f.bridge_id, false, "", f.owner_user_id)
+	if !testing.expect(t, live) do return
+	defer project_service.bridge_runtime_registry_destroy(&f.registry)
+	listener, listen_err := net.listen_tcp({address = net.IP4_Loopback, port = 0})
+	if listen_err != nil do testing.fail_now(t, "loopback listen")
+	defer net.close(listener)
+	bound, _ := net.bound_endpoint(listener)
+	socket, dial_err := net.dial_tcp(net.Endpoint{address = net.IP4_Loopback, port = bound.port})
+	if dial_err != nil do testing.fail_now(t, "loopback dial")
+	defer net.close(socket)
+	hub, _, accept_err := net.accept_tcp(listener)
+	if accept_err != nil do testing.fail_now(t, "loopback accept")
+	defer net.close(hub)
+	project_service.bridge_runtime_registry_set_command_socket(&f.registry, f.bridge_id, hub, generation)
+	peer := Session_Discovery_Peer{f = f, socket = socket, generation = generation}
+	worker := thread.create_and_start_with_data(&peer, session_discovery_peer)
+	response := list_bridge_session_projects_handler(rawptr(&f.bh), Request{method = "GET", path = fmt.tprintf("/api/v1/bridges/%s/session-projects", f.bridge_id), request_id = "history-roundtrip", remote_addr = "127.0.0.1:4444", headers = f.user_headers})
+	thread.join(worker)
+	thread.destroy(worker)
+	defer delete(response.body)
+	testing.expect_value(t, response.status, 200)
+	testing.expect(t, peer.received && peer.correlated)
+	testing.expect(t, strings.contains(response.body, `"path":"/fixture/app"`))
+	testing.expect(t, strings.contains(response.body, `"sessions":2`))
+	testing.expect(t, strings.contains(response.body, `"description":"App is a calendar service."`))
 }

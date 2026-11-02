@@ -201,7 +201,7 @@ bridge_setup_port_busy :: proc(port: int) -> bool {
 }
 
 bridge_setup_exec_inherit :: proc(argv: []string) -> bool {
-	p, err := os.process_start(os.Process_Desc{command = argv, stdin = os.stdin, stdout = os.stdout, stderr = os.stderr})
+	p, err := bridge_os_start_hidden(os.Process_Desc{command = argv, stdin = os.stdin, stdout = os.stdout, stderr = os.stderr})
 	if err != nil do return false
 	state, werr := os.process_wait(p)
 	// core:os on Windows reports success for every exited process (dev-2026-09/10

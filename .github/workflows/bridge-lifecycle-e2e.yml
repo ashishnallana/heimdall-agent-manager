@@ -76,6 +76,15 @@ jobs:
           echo "XDG_RUNTIME_DIR=/run/user/$uid" >> "$GITHUB_ENV"
           echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$uid/bus" >> "$GITHUB_ENV"
           XDG_RUNTIME_DIR="/run/user/$uid" systemctl --user is-system-running || true
+          # A user service inherits the manager's environment, not this job's.
+          # The PTY socket fallback must resolve identically in the service and
+          # the test client; otherwise the client probes a healthy daemon in
+          # RUNNER_TEMP while systemd started it under /tmp.
+          echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
+          XDG_RUNTIME_DIR="/run/user/$uid" systemctl --user set-environment "TMPDIR=$RUNNER_TEMP"
+          manager_tmp="$(XDG_RUNTIME_DIR="/run/user/$uid" systemctl --user show-environment | sed -n 's/^TMPDIR=//p')"
+          test "$manager_tmp" = "$RUNNER_TEMP"
+          echo "Service scratch directory: $manager_tmp"
       - name: Unlocked default keychain (macOS)
         if: runner.os == 'macOS'
         shell: bash
