@@ -307,14 +307,14 @@ is_chain_coordinator :: proc(service: ^Taskchain_Service, chain: domain.Task_Cha
 // than one holds the role), or "" if the chain has no coordinator member. Used to
 // stamp the derived mirror column and to serialize coordinator identity.
 coordinator_primary_instance :: proc(service: ^Taskchain_Service, chain_id: domain.Task_Chain_ID, owner: domain.User_ID) -> string {
-	members, err := iface.taskchain_list_members_by_chain(service.repo, chain_id, owner)
-	if err.code != .None do return ""
-	// list_members_by_chain is ordered by created_at ASC, so the first coordinator
-	// encountered is the earliest-designated one.
-	for m in members {
-		if m.role == "coordinator" do return m.agent_instance_id
-	}
-	return ""
+ id,_:=coordinator_primary_instance_checked(service,chain_id,owner)
+ return id
+}
+coordinator_primary_instance_checked :: proc(service: ^Taskchain_Service, chain_id: domain.Task_Chain_ID, owner: domain.User_ID) -> (string,domain.Domain_Error) {
+ members,err:=iface.taskchain_list_members_by_chain(service.repo,chain_id,owner)
+ if err.code!=.None do return "",err
+ for m in members do if m.role=="coordinator" do return m.agent_instance_id,{}
+ return "",{}
 }
 
 // coordinator_sync_mirror recomputes the derived coordinator_agent_instance_id

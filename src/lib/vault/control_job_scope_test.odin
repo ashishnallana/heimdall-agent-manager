@@ -21,3 +21,14 @@ test_control_job_scoped_operations_cannot_repurpose_consent :: proc(t:^testing.T
 	testing.expect(t,!control_job_scope_ok(read,"tasks.create","seal_task"))
 	testing.expect(t,!control_job_scope_ok(CONTROL_SCOPE_BASE,"","seal_task"))
 }
+
+@(test)
+test_control_message_sealing_requires_dedicated_scope :: proc(t:^testing.T) {
+ scope:="mcp:chains mcp:chains:message"
+ testing.expect(t,control_scopes_valid(scope))
+ testing.expect(t,control_job_scope_ok(scope,"chains.message","seal_message"))
+ for denied in ([]string{"mcp:chains","mcp:chains mcp:tasks:write","mcp:chains mcp:instances:control"}) do testing.expect(t,!control_job_scope_ok(denied,"chains.message","seal_message"))
+ testing.expect(t,!control_job_scope_ok(scope,"tasks.comment","seal_message"))
+ testing.expect(t,!control_job_scope_ok(scope,"chains.message","seal_comment"))
+ testing.expect(t,!control_job_scope_ok(scope,"","seal_message"))
+}
