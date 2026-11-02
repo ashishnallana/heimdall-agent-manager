@@ -3,6 +3,7 @@ package main
 import "core:strings"
 import "core:sync"
 import "core:testing"
+import vault "odin_test:lib/vault"
 import ws "odin_test:lib/ws"
 
 @(test)
@@ -380,4 +381,23 @@ test_bridge_hub_plan_refusal_logs_upgrade_url :: proc(t: ^testing.T) {
 	defer delete(message)
 	testing.expect(t, strings.contains(message, "Bridge disabled by plan limits"))
 	testing.expect(t, strings.contains(message, "https://hub.example.test/#/settings/account"))
+}
+
+@(test)
+test_bridge_dispatch_mcp_large_lane_is_mcp_only_and_one_at_a_time :: proc(t: ^testing.T) {
+	// A 15 MiB html-bundle job: base64 payload + job/command envelope.
+	bundle_job := vault.CONTROL_JOB_ARTIFACT_PAYLOAD_MAX + 1024 * 1024
+	testing.expect(t, bundle_job <= BRIDGE_DISPATCH_MCP_LARGE_BYTES_LIMIT, "lane holds a full 15 MiB bundle job")
+	testing.expect(t, bridge_command_dispatch_is_mcp_large("mcp_transform", 3 * 1024 * 1024))
+	testing.expect(t, !bridge_command_dispatch_is_mcp_large("mcp_transform", BRIDGE_DISPATCH_COMMAND_BYTES_LIMIT), "small MCP jobs stay in the general budget")
+	testing.expect(t, !bridge_command_dispatch_is_mcp_large("provider_profile_op", 3 * 1024 * 1024), "other commands keep the 1 MiB cap")
+	testing.expect(t, bridge_command_dispatch_mcp_large_admit(0, bundle_job))
+	testing.expect(t, !bridge_command_dispatch_mcp_large_admit(bundle_job, bundle_job), "a second large job is refused busy")
+	testing.expect(t, !bridge_command_dispatch_mcp_large_admit(0, BRIDGE_DISPATCH_MCP_LARGE_BYTES_LIMIT + 1))
+	big := strings.concatenate({`{"type":"mcp_transform_result","command_id":"c","reply":{"result":"`, strings.repeat("A", 2 * 1024 * 1024, context.temp_allocator), `"}}`}, context.temp_allocator)
+	testing.expect(t, bridge_command_dispatch_is_mcp_large_result(big))
+	other := strings.concatenate({`{"type":"command_result","command_id":"c","result":"`, strings.repeat("A", 2 * 1024 * 1024, context.temp_allocator), `"}`}, context.temp_allocator)
+	testing.expect(t, !bridge_command_dispatch_is_mcp_large_result(other), "non-MCP results keep the outbox caps")
+	// The general admission budget is unchanged: a large job charged there is refused.
+	testing.expect_value(t, bridge_command_dispatch_admission_scope(.Interactive, 0, 0, 0, 0, bundle_job), "global")
 }

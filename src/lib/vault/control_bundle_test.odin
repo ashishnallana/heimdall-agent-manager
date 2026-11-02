@@ -3,6 +3,7 @@ package vault
 
 import "core:encoding/base64"
 import "core:encoding/json"
+import "core:strings"
 import "core:testing"
 import hb "odin_test:lib/html_bundle"
 
@@ -37,6 +38,23 @@ test_control_seal_resource_bundle_is_byte_exact_and_validated :: proc(t:^testing
 	// Payload bound is artifact-specific.
 	testing.expect_value(t,control_job_payload_max("seal_resource","artifacts.create"),CONTROL_JOB_ARTIFACT_PAYLOAD_MAX)
 	testing.expect_value(t,control_job_payload_max("seal_resource","memories.create"),4*1024*1024)
-	testing.expect_value(t,control_job_payload_max("read","artifacts.get"),4*1024*1024)
+	// Bundle download (artifacts.get) is the only read allowed the artifact bound.
+	testing.expect_value(t,control_job_payload_max("read","artifacts.get"),CONTROL_JOB_ARTIFACT_PAYLOAD_MAX)
+	testing.expect_value(t,control_job_payload_max("read","artifacts.list"),4*1024*1024)
+	testing.expect_value(t,control_job_payload_max("read","memories.get"),4*1024*1024)
+	// Download: stored token -> exact archive bytes as canonical base64.
+	stored,sealed_ok:=seal_string(string(bundle.zip),&kr,context.temp_allocator);testing.expect(t,sealed_ok)
+	record:=json.Object{"owner_user_id"=json.String(keyring_user_id(&kr)),"artifact_id"=json.String("art_b"),"kind"=json.String("html-bundle"),"mime"=json.String("application/zip"),"content_base64"=json.String(stored)}
+	opened,opened_ok:=control_record_json(&kr,.Artifact,record);testing.expect(t,opened_ok)
+	testing.expect(t,strings.contains(opened,archive64) && !strings.contains(opened,"vault:v2:"),"download returns the exact archive as base64")
+	testing.expect(t,control_artifact_base64_shape_ok(archive64))
+	for bad in ([]string{"","abc","ab=c","a b=","%%%%"}) do testing.expect(t,!control_artifact_base64_shape_ok(bad))
+	for bad in ([]json.Object{
+		json.Object{"owner_user_id"=record["owner_user_id"],"kind"=json.String("markdown"),"content_base64"=json.String(stored)},
+		json.Object{"owner_user_id"=record["owner_user_id"],"kind"=json.String("html-bundle"),"content_base64"=json.String(archive64)},
+		json.Object{"owner_user_id"=record["owner_user_id"],"kind"=json.String("html-bundle"),"content_base64"=json.String(stored),"content"=json.String("x"),"mime"=json.String("text/plain")},
+	}) {_,ok:=control_record_json(&kr,.Artifact,bad);testing.expect(t,!ok)}
+	not_zip,_:=seal_string("not a zip",&kr,context.temp_allocator)
+	_,not_zip_ok:=control_record_json(&kr,.Artifact,json.Object{"owner_user_id"=record["owner_user_id"],"kind"=json.String("html-bundle"),"content_base64"=json.String(not_zip)});testing.expect(t,!not_zip_ok)
 	testing.expect(t,CONTROL_ARTIFACT_BUNDLE_BASE64_MAX>=hb.HTML_BUNDLE_MAX_ARCHIVE/3*4)
 }

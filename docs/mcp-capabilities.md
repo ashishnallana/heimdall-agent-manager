@@ -95,20 +95,36 @@ authorized device lists, decrypts, previews and downloads it with the existing
 viewer and vault keys after the uploader disconnects. The bundle receipt digest
 (v2) binds `entry` plus the key-sorted `files`; text digests keep v1.
 
-Transport bounds for bundles only: MCP request body 48 MiB (every other tool
-is still refused above 512 KiB, after parsing); seal job payload and reply
-`base64(15 MiB) + 1 MiB` (`vault.control_job_payload_max` /
-`control_reply_max`, 4 MiB for every other job); worker/bridge reply envelope
-+1 MiB. Relay deadlines, the 64-slot/4-per-owner broker and request registry
-are unchanged.
+Complete download: `artifacts.get` with `include_content: true` on a
+`kind: html-bundle` artifact returns `content_base64`, the exact stored archive
+bytes as canonical standard base64 (never `content`). The Hub relays the stored
+`vault:v2:` token in a normal `read` job; the decrypting device (browser worker or
+bridge) or hosted keyring opens it, checks the ZIP signature and the 15 MiB budget,
+and returns base64; the Hub checks the shape and that no `vault:v2:` token leaks.
+Decode it to get the same `.zip` that ham-ctl or the UI viewer downloads. Text
+artifacts keep `content` (64 KiB inline / 128 KiB stored); other binaries still
+report `content_error: unsupported_content_type`; a bundle not stored as vault
+ciphertext reports `content_not_encrypted`.
 
-**Current gaps (tracked on task_18e449b9e73aac5c):** the enrolled-bridge sealer still
-keeps its 1 MiB `mcp_transform` command/frame guards (and the WebSocket layer a
-16 MiB message cap), so a bundle job above ~1 MiB is not offered to a bridge and
-is served by an unlocked browser worker or hosted consent instead. `artifacts.get`
-does not yet return bundle bytes over MCP (it reports
-`content_error: unsupported_content_type`); download through the UI viewer or
-`ham-ctl artifact get`.
+Transport bounds, bundles only (every other tool and job keeps its old bound):
+
+| Hop | Bundle bound | Everything else |
+| --- | --- | --- |
+| MCP request body | 48 MiB, only `tools/call artifacts.create` with a `files` object (checked after parse) | 512 KiB |
+| Control job payload / reply (`vault.control_job_payload_max`, `control_reply_max`, `control_data_payload_max`) | `base64(15 MiB) + 1 MiB` = 22,020,096 B for `seal_resource artifacts.create` and `read artifacts.get` with one `content_base64` record | 4 MiB |
+| Worker broker job / browser worker POST / bridge result frame | payload bound + 1 MiB | (same formula, 4 MiB + 1 MiB) |
+| Hub -> bridge `mcp_transform` command (`mcp_bridge_command_max`) | payload bound + 2 MiB | 1 MiB |
+| Bridge dispatcher (`BRIDGE_DISPATCH_MCP_LARGE_BYTES_LIMIT`) | one large-MCP lane: a single job up to payload bound + 2 MiB queued/running and a single result frame in the outbox, outside the 4 MiB owned / 8 MiB outbox budgets; a second concurrent large job is refused `busy` (`mcp_large`) | 1 MiB command, 4 MiB owned, 8 MiB outbox |
+| Bridge `mcp_transform` handler | same lane limit, then `control_job_verify` per operation/tool | |
+| WS chunk reassembly (both directions, `BRIDGE_WS_MAX_REASSEMBLY_BYTES`, `ws.CHUNK_MAX_*`) | 32 MiB message / 8192 chunks / 32 MiB buffered per connection (a ~24 MiB bundle job is ~4200 hub->bridge chunks of 6000 B) | per-command caps above apply after reassembly |
+
+Relay deadlines are unchanged: a job must complete within its 5 s signed deadline.
+For bundle jobs the Hub waits for the bridge until that deadline (small jobs keep
+the 1.5 s bridge window and leave the rest for an unlocked browser), so a 15 MiB
+bundle over a slow Hub<->device link can still time out (`decryption_unavailable`;
+retry with the same `request_id`). The 64-slot/4-per-owner broker and request
+registry are unchanged. Peak Hub memory per bundle request is a small multiple of
+the ~21 MiB base64 (request body, parsed JSON, packed archive, job, reply).
 
 Optional owned `project_id`, `chain_id`, `task_id`, `agent_id` and
 `agent_instance_id` establish native associations. Native consistency checks

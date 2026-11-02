@@ -87,8 +87,13 @@ BRIDGE_WS_DEFAULT_CHUNK_BYTES :: 65536
 // or hostile chunk stream cannot exhaust hub memory. Shared here because the
 // bridge chunker and the hub reassembler must agree on the same limits.
 BRIDGE_WS_MAX_REASSEMBLIES :: 64
-BRIDGE_WS_MAX_REASSEMBLY_BYTES :: 16 * 1024 * 1024
-BRIDGE_WS_MAX_CHUNK_COUNT :: 4096
+// 32 MiB / 8192 chunks: the largest runtime message is an MCP html-bundle job or
+// reply (base64 of the 15 MiB artifact budget + envelope, ~24 MiB; the bridge's
+// BRIDGE_DISPATCH_MCP_LARGE_BYTES_LIMIT), which at the 6000-byte hub->bridge
+// chunk size needs ~4200 chunks. Every other command keeps its own smaller cap
+// (bridge dispatcher 1 MiB) after reassembly.
+BRIDGE_WS_MAX_REASSEMBLY_BYTES :: 32 * 1024 * 1024
+BRIDGE_WS_MAX_CHUNK_COUNT :: 8192
 // Raw bytes per chunk on the bridge<->hub RUNTIME channel. That connection
 // traverses the edge proxy (nginx -> Caddy) which enforces a ~16 KiB PER-MESSAGE
 // WS cap: a single frame at/above it is silently dropped in transit (the >16KB fs
