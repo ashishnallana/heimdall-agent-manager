@@ -364,7 +364,6 @@ build_graph :: proc(graph: ^App_Graph, config: Hub_Config) -> (bool, string) {
 	}
 	graph.bridges.catalog = &graph.bridge_update_catalog
 	graph.bridge_update_catalog.release_get = bridge_service.bridge_catalog_http_get
-	graph.bridge_update_catalog.cache_enabled = true
 	graph.agents = agent_service.new_agent_service_with_runtime(&graph.repos.agents, &graph.repos.bridges, &graph.repos.projects, &graph.repos.content, &graph.repos.taskchains, bridge_command_sink, &graph.bridge_runtime_registry, &graph.clock, &graph.ids)
 	graph.agents.event_bus = &graph.event_bus
 	graph.agents.entitlements = billing_service.entitlement_lookup(&graph.billing)
