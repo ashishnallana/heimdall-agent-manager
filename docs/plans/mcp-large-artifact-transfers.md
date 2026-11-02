@@ -142,9 +142,21 @@ Result:
  "limits":{"plaintext_max_bytes":15728640,"ciphertext_max_bytes":20971598,"chunk_max_bytes":8388608},
  "expires_at":"…",
  "executor":{
-   "shell":"ham-ctl artifact transfer upload --url <upload_url> --token-env HEIMDALL_TRANSFER_TOKEN --file <path> [--name <n>] [--description <d>] [--entry index.html]",
+   "shell":"printf '%s' '<token>' | ham-ctl artifact transfer upload --url <upload_url> --token-stdin --file <path> [--name <n>] [--description <d>] [--entry index.html]",
    "browser_url":"https://<hub>/#/artifact-transfers/xfr_…"}}
 ```
+
+**Transfer token exposure is accepted by design.** The `hxt_…` token is returned in
+a tool result, so it is in the model's context and transcript, and a model-run
+shell will usually carry it on its command line or in history. That is acceptable
+because the token is a **ciphertext-only, per-transfer, short-lived bearer**: it
+addresses one transfer row, expires with it (≤ 60 min, §7), is rotated on
+`*_begin` replay and grants no plaintext, no key and no other artifact. Someone
+holding it can at most upload ciphertext that will fail the receipt check (they hold
+no device key) or fetch ciphertext they cannot open. `--token-stdin` (shown above)
+is the documented form because it keeps the token out of `argv`/`ps`; `ham-ctl`
+also accepts `--token-env <VAR>`. `ham-ctl` never accepts the token as a flag
+value, and never logs it.
 
 `artifact_id` is **reserved** now so the executor's receipt can bind it (§6). Replay
 of the same `request_id` returns the same transfer with a freshly minted token
@@ -168,9 +180,12 @@ it is short (no 30 s concern; §7).
  "receipt_present":true,"kind":"html-bundle","content_type":"application/zip",
  "expires_at":"…","max_fetches":8,
  "executor":{
-   "shell":"ham-ctl artifact transfer download --url <download_url> --token-env HEIMDALL_TRANSFER_TOKEN --expect-artifact art_… -o <path>",
+   "shell":"printf '%s' '<token>' | ham-ctl artifact transfer download --url <download_url> --token-stdin --expect-artifact art_… -o <path>",
    "browser_url":"https://<hub>/#/artifact-transfers/xfr_…"}}
 ```
+
+`receipt_present` is **advisory** (it tells the model what to expect); executors never
+rely on it (§5.3 receipt policy).
 
 The Hub computes `ciphertext_sha256` over the stored bytes at begin; the transfer is
 bound to that digest and the artifact `revision`. Native artifact content is
@@ -181,7 +196,8 @@ transfer path does not pretend otherwise; the native download route remains.
 Accounts with no vault get `vault_required` for every transfer tool.
 
 **`artifacts.transfer_status`** `{transfer_id}` →
-`{state, direction, received_bytes, ciphertext_bytes, expires_at, error?, sealed_by?, opened_by?:{device_id, device_kind, verified:true, at}}`.
+`{state, direction, received_bytes, ciphertext_bytes, expires_at, error?, sealed_by?, opened_by?:{device_id, device_kind, verification:"verified"|"unverified", verified:bool, at}}`
+(`verified` is true only for a signed `verified` result, §6.3).
 
 **`artifacts.transfer_cancel`** `{request_id, transfer_id}` → `{state:"cancelled"}`;
 idempotent; deletes staging immediately.
@@ -213,15 +229,18 @@ unauthenticated link.
 | `POST /{id}/opened` | download | JSON open receipt (§6.3) → `delivered` |
 | `DELETE /{id}` | both | cancel |
 
-Bodies are bounded before reading (≤ 8 MiB PATCH, ≤ 20,971,598 PUT) and stay far
-below the shared 80 MiB reader cap (`artifact_limits.odin`). Ciphertext bodies are
+Bodies are bounded before reading (≤ 8 MiB PATCH, ≤ 20,971,598 PUT, the PUT
+streamed to chunk rows rather than buffered), stay far below the shared 80 MiB
+reader cap (`artifact_limits.odin`), and are admitted only under the global
+data-path semaphore (§7). Ciphertext bodies are
 never parsed as JSON; only the small `seal`/`opened` bodies are (≤ 64 KiB).
 
 ### 5.3 Executor flows
 
 **Shell (`ham-ctl artifact transfer upload`)**, inside a Heimdall agent:
 
-1. Read the token from the named env var or stdin (never argv). `GET` the
+1. Read the token from stdin (`--token-stdin`) or a named env var (`--token-env`),
+   never from a flag value. `GET` the
    descriptor; refuse unless `direction = upload`, `state = receiving`, and
    `owner_user_id`/`vault_id` equal the local keyring's (`ctl_read_vault_keyring`,
    `src/ctl/vault.odin:74`). The keyring's current epoch must equal the descriptor's
@@ -246,9 +265,37 @@ with `Range` resume into a temp file next to `out`, verify `ciphertext_sha256`,
 when `receipt_present`), verify via bridge RPC `agent.vault.verify_transfer_receipt`
 (signature under the bridge's verified directory, artifact id = expected,
 ciphertext digest equal, attestation opens and its plaintext SHA-256/size match),
-`fsync` + rename, wipe buffers, `POST …/opened`. A missing receipt (artifacts
-created before this feature) is reported as `receipt: absent` and refused only with
-`--require-receipt`.
+`fsync` + rename, wipe buffers, `POST …/opened` with result `verified`.
+
+**Receipt policy (normative).** `receipt_present`, the receipt and the attestation
+all come from the Hub, so the executor treats them as **untrusted input**: a
+malicious Hub can claim `receipt_present:false` and serve any other same-vault v2
+token, which GCM opens fine (v2 AAD binds only vault id + epoch, §2). Therefore:
+
+- `ham-ctl artifact transfer download` is **verified-only**. With no receipt, or a
+  receipt that fails any check, it writes **no output file** (the temp file is
+  removed), posts no open receipt, prints
+  `{"transfer_id","artifact_id","verification":"receipt_absent"|"receipt_invalid"}`
+  and exits with status `3`. There is deliberately **no flag** to accept unverified
+  bytes on the transfer path: the shell command line is copied from a Hub-supplied
+  hint (`executor.shell`), so an escape flag would be one the Hub could inject.
+  `ham-ctl` also ignores any unknown flag in that hint (hard error).
+- Artifacts that legitimately have no receipt (everything created before this
+  feature, and anything created through the native `ham-ctl artifact create`, UI
+  upload or MCP text tools) are read through the **existing native** path
+  (`ham-ctl artifact download`, the web viewer), which offers the same
+  vault+epoch-only integrity it offers today and never claims more.
+  `download_begin` still serves them; the shell executor refuses them with
+  `receipt_absent` and its message names the native command.
+- The browser page shows a receipt-less or invalid-receipt download as a
+  distinct **Unverified origin** state (warning panel, no Save button). Saving
+  requires a second, explicit user action ("Save unverified copy"), and the page
+  then posts an open receipt with result `unverified`. An invalid receipt
+  (signature/fields/attestation mismatch) is never saveable.
+- `transfer_status` reports `opened_by.verification` exactly as signed
+  (`verified` | `unverified`); the Hub sets `state = delivered` for both but
+  `opened_by.verified = true` **only** for `verified`, and the result field is part
+  of the signed statement, so the Hub cannot upgrade it.
 
 **Browser (`#/artifact-transfers/<id>`)**: the user opens the link in their own
 signed-in Heimdall tab. The page requires an approved, unlocked device (existing
@@ -258,7 +305,8 @@ and expiry before anything happens. Upload: user picks a file → size check →
 metadata/attestation → receipt signed with `signP256` → chunked `PATCH` with resume
 → `POST seal`. Download: fetch ciphertext → digest → `decryptVaultBytes` → verify
 receipt with the browser directory verifier (`vaultDirectoryVerify.ts`) → save via a
-Blob `download` link (plaintext never leaves the tab) → `POST opened`. Nothing in
+Blob `download` link (plaintext never leaves the tab) → `POST opened`; a missing or
+invalid receipt follows the receipt policy above (Unverified origin state). Nothing in
 the page renders artifact HTML; bundles are saved as `.zip` (the viewer remains the
 place to view them, with its script-disabled sandbox).
 
@@ -330,15 +378,33 @@ whole keyring (`src/ctl/vault.odin:16-18`).
 Downloaders open it and compare against the decrypted bytes, so even a
 same-vault ciphertext swap or a receipt replayed onto another artifact is detected
 (receipt binds artifact id; attestation binds plaintext). The Hub stores it opaque.
+This protection needs the receipt to be present; a Hub that strips it is handled by
+the executor receipt policy (§5.3), not by the attestation.
 
 ### 6.3 Open receipt (signed by the downloading device)
 
-Same format with verb `open`, the download `transfer_id`, the artifact id, the
-served `ciphertext_sha256`, a result field `verified | receipt_absent` and the
-opening device id. Failures are not signed or posted (the executor reports them
-locally); the transfer stays `ready`. The Hub verifies the signature and directory
-trust and sets `delivered`, which `transfer_status` reports to the model — the
-model learns *that* a trusted device got verified bytes, never the bytes.
+```
+heimdall-artifact-transfer-receipt/v1
+open
+<owner_user_id>
+<vault_id>
+e<epoch of the served token>
+<download transfer_id>
+<artifact_id>
+<verified|unverified>
+<ciphertext_bytes served>
+<ciphertext_sha256 served>
+<device_id>
+<issued_ms>
+```
+
+The result line is covered by the signature. `unverified` is produced only by the browser after the user's explicit
+"Save unverified copy"; `ham-ctl` never produces it. Failures and refusals are not
+signed or posted (the executor reports them locally); the transfer stays `ready`.
+The Hub verifies the signature and directory trust and sets `delivered`;
+`transfer_status` reports `opened_by.verification` from the signed field and
+`verified:true` only when it says `verified` — the model learns *whether* a trusted
+device got verified bytes, never the bytes.
 
 ### 6.4 What the receipts prove
 
@@ -346,12 +412,19 @@ model learns *that* a trusted device got verified bytes, never the bytes.
 |---|---|
 | Read content, name, description | impossible: no key (E1) |
 | Flip/truncate ciphertext | GCM tag + ciphertext digest |
-| Serve another same-vault artifact's ciphertext | receipt artifact id ≠ expected; attestation digest |
+| Serve another same-vault artifact's ciphertext **with** its receipt | receipt artifact id ≠ expected; attestation digest → refused |
+| **Strip the receipt** (`receipt_present:false`) and serve another same-vault token | `ham-ctl`: refused (`receipt_absent`, exit 3, no file); browser: Unverified-origin state, saved only on explicit user confirmation and reported `unverified`, never `verified` (§5.3 receipt policy) |
+| Substitute content of a **receipt-less** artifact (pre-existing / native-path artifacts) | **not detected** by any reader — v2 AAD binds only vault+epoch. Same as every native reader today; the transfer path refuses (shell) or labels (browser) these, it does not protect them |
 | Replay a receipt for another transfer | transfer/artifact ids in signed statement; unique per transfer |
 | Forge a receipt | needs a trusted device key; executors verify against their **own** verified directory, not the Hub's word |
 | Downgrade to a stale/old epoch | blind check 2 at the Hub; executors seal only under their verified current epoch |
 | Confirm a guessed file | no plaintext digest in clear |
 | Learn size | **not prevented** (ciphertext length, inherent in v2; same as today) |
+
+Substitution protection therefore exists **only for artifacts committed through a
+transfer with a verified receipt, and only on the transfer download path**. Closing
+the gap for all artifacts needs an envelope whose AAD binds the artifact id (a v3
+format plus migration of every reader) — out of scope here because E4 keeps v2.
 
 ## 7. Bounds, overhead and resources
 
@@ -365,7 +438,8 @@ model learns *that* a trusted device got verified bytes, never the bytes.
 | TTL | idle 15 min since last byte, absolute 60 min since begin; janitor ≤ 60 s |
 | Download fetches | ≤ 8 full-or-ranged GETs; ≤ 2 concurrent GETs per owner |
 | Rate limits | per grant ≤ 10 `*_begin` / hour, ≤ 60 data-path requests / minute |
-| Hub memory | upload: one request body (≤ 8 MiB, or ≤ 21 MiB for PUT) + streaming hash; commit concatenates ≤ 21 MiB once into the artifact row (≈ 42 MiB peak with the row copy); download: ≤ 21 MiB per GET (stored value) — **no cryptographic buffers, no keyring** |
+| Data-path concurrency (**global**, all owners) | ≤ 8 in-flight body-carrying requests (`PUT`/`PATCH`/`GET …/ciphertext`), config `mcp_transfer_data_path_max_concurrent`; a counting semaphore acquired **before** reading the request body or touching SQLite. Full → `503 Service Unavailable` + `Retry-After: 2` and JSON `{error:"busy", retry_after_ms:2000}`, nothing read or written; executors retry with jittered backoff (≤ 5 tries, then report `busy`). Per-owner limits above still apply first (`429` + `Retry-After`). Commits: ≤ 2 concurrent globally (separate semaphore), MCP result `busy` with `retry_after_ms`, retryable, no receipt stored |
+| Hub memory | upload: `PATCH` body ≤ 8 MiB is read into memory, `PUT` is streamed to chunk rows in ≤ 1 MiB pieces (never a 21 MiB body buffer) + streaming hash; download `GET`: streamed from SQLite in ≤ 1 MiB windows (`substr(CAST(content AS BLOB), off+1, 1048576)` on the artifact row, same row/owner predicates as `artifact_bounded.odin:8-24`), never a full-value copy; commit concatenates chunk rows into one ≤ 21 MiB value (≈ 42 MiB peak with the bound-parameter copy). **Global worst case** = 8 × 8 MiB (data path) + 2 × 42 MiB (commits) ≈ **148 MiB**, independent of owner count — **no cryptographic buffers, no keyring** |
 | Executor memory | ≈ 72 MiB peak for a 15 MiB seal (plaintext + payload + base64 + token, `envelope.odin:246-262`), local to the user's machine or tab |
 | Storage | staging rows deleted at commit/TTL; persisted artifact identical in size to a `ham-ctl` sealed upload; receipt row ≈ 2 KiB |
 
@@ -385,6 +459,12 @@ model learns *that* a trusted device got verified bytes, never the bytes.
   only metadata, ciphertext digests and verification status.
 - **Unvaulted accounts** (`vault_required`) and **legacy plaintext artifacts**
   (`not_encrypted`): out of scope for E2EE transfers.
+- **Verified download of receipt-less artifacts**: sealed artifacts created before
+  this feature or through native paths have no receipt. The shell executor refuses
+  them (`receipt_absent`, use `ham-ctl artifact download`); the browser saves them
+  only as an explicitly confirmed `unverified` copy. Their content can be
+  substituted by a malicious Hub with another same-vault token without detection,
+  exactly as for every native reader today (§6.4).
 - **Remote placement** (asking a bridge on another machine to write a download to
   its disk, or to read a path on its disk for upload): not offered — the Hub would
   be choosing local paths on a user machine.
@@ -506,11 +586,25 @@ All Odin tests under `nix develop --command odin test … -collection:odin_test=
    cross-runtime vectors for statement, signature and attestation.
 5. **Tamper on download**: Hub test double serves (a) a flipped byte, (b) another
    same-vault artifact's token, (c) a different receipt → executor refuses in all
-   three, writes no output file, posts no open receipt.
+   three, writes no output file, posts no open receipt. (d) **Receipt strip**: the
+   double reports `receipt_present:false`, omits receipt/attestation and serves
+   another same-vault token for the requested artifact → `ham-ctl` exits 3 with
+   `verification:"receipt_absent"`, no output file, no open receipt; the browser
+   page shows Unverified origin with no Save button, and only after the explicit
+   confirm posts an open receipt whose signed result is `unverified`; the Hub's
+   `transfer_status` then reports `verified:false` (an attempt to post `verified`
+   with that signature fails verification). (e) The `executor.shell` hint with an
+   injected unknown flag (e.g. `--allow-unverified`) is rejected by `ham-ctl`.
 6. **Data path**: PUT, PATCH resume, wrong offset `409`, overrun rejected, `Range`
    reassembly, `max_fetches`, TTL expiry, quotas, cancel deletes chunks, restart
    keeps staging, revoked grant → `401` + wipe, cross-owner → `404`, headers
    (`no-store`, `nosniff`, `attachment`, `Repr-Digest`), no `?t=` accepted.
+   **Global overload**: with the data-path semaphore held at its limit by other
+   owners, a ninth request gets `503` + `Retry-After` before its body is read
+   (assert no chunk row written, request body not consumed beyond headers); a
+   third concurrent commit gets MCP `busy` with no receipt and succeeds on retry;
+   a `GET` of a 15 MiB artifact allocates no buffer > 1 MiB (tracking allocator)
+   and a `PUT` of 20,971,589 B lands as ≤ 1 MiB chunk rows.
 7. **MCP tools**: schemas reject `name`/`sha256`/`size_bytes`; scope gating;
    idempotent replay with token rotation; concurrent commits → one artifact;
    `not_sealed` retryable without a receipt; hosted-mode grant still never enters
@@ -525,6 +619,26 @@ All Odin tests under `nix develop --command odin test … -collection:odin_test=
    asserted by a fetch spy).
 10. **Manual (no deploy in this chain)**: local Hub + Heimdall-agent Claude Code
     session using the documented `ham-ctl` flow; browser link flow in a local UI.
+11. **REQ-CROSS-DEVICE (two devices, one vault)**: isolated test owner with a
+    synthetic vault and two approved devices, A (bridge + `ham-ctl` executor) and B
+    (browser/WebCrypto device), sharing the keyring via the existing synced-vault
+    wrap mechanism (no test-only key path on the Hub). (a) A uploads a 15,728,640 B
+    binary file and a 15 MiB HTML bundle through the full MCP tools + HTTP flow and
+    commits. (b) A **disconnects** (bridge stopped, its sessions revoked from the
+    test Hub's live set) and the transfer janitor runs past staging TTL so every
+    `mcp_transfer_chunks` row and transfer token is gone. (c) B in a **fresh
+    session** lists the artifacts (sealed names open on B), downloads via the
+    native content route **and** via a new `download_begin` transfer → byte-exact,
+    receipt `verified` with A as sealer, and the bundle renders in the viewer
+    (`HtmlBundlePreview`) with scripts disabled. (d) B locked → open requires
+    unlock first; another owner → `404`; B revoked → no keyring delivery and
+    transfer data path `401`; a vault epoch rotation after commit → B (current
+    keyring keeps every epoch entry, `src/lib/vault/keyring.odin:8-9,185-189`)
+    still opens it, and a new upload sealed under
+    the old epoch fails `stale_epoch`. (e) The §12.2 plaintext-marker scan is
+    repeated over the Hub DB/WAL/logs/HTTP captures of the whole two-device run.
+    Over-limit (15,728,641 B) is rejected by A before any byte is sent and, when
+    forced by a test executor, by the Hub's blind check.
 
 ## 13. Implementation tickets (staged; replace T1–T6 of 9bd7b372)
 
@@ -541,6 +655,23 @@ All Odin tests under `nix develop --command odin test … -collection:odin_test=
 X1–X5 deliver the shell path; X6 adds chat-only clients via the browser. Each
 ticket keeps the chain rules: source only, no push/deploy/restart/live mutation.
 
+### 13.1 Mapping onto the chain's staged tickets
+
+X1–X7 are work packages, not new tickets; they are assigned to the three staged
+tasks (each task got a comment with this split):
+
+| Staged task | Packages | Also owns | Tests it must deliver |
+|---|---|---|---|
+| `task_18e442d120604cf4` — ciphertext-only storage + HTTP | **X1 (Odin half)**, **X2**, **X3** | `src/contracts/artifacts.odin` (ciphertext max = `vault_armored_max_bytes(ARTIFACT_MAX_CONTENT_BYTES)`, chunk max, transfer limits beside `ARTIFACT_MAX_CONTENT_BYTES`), `src/hub/transport/http/artifact_limits.odin` (data-path body bounds), global data-path/commit semaphores and `503`/`busy` (§7) | §12.1 (structural no-key scan for service + handlers), §12.3, §12.4 (Odin side), §12.6 incl. global overload; Hub-blind upload/commit with a **test executor** (synthetic keyring in test code only) |
+| `task_18e442d6e89f4103` — MCP tools + trusted clients | **X4**, **X5**, **X6**, **X1 (TS half**: `artifactTransferReceipt.ts` + cross-runtime vectors) | receipt policy (§5.3: verified-only `ham-ctl`, browser Unverified-origin state, signed `verified|unverified`), `--token-stdin`, resume record, bundle validation in both executors | §12.1 (MCP tool scan), §12.2, §12.4 (cross-runtime vectors), §12.5 incl. (d)/(e) receipt strip, §12.7, §12.8 (executor rejection), §12.9 |
+| `task_18e442dc5048dd2a` — cross-device + integration | **X7** | UI listing/viewer compatibility for transfer-created artifacts (`src/ui/api/endpoints/artifacts.ts`, `ArtifactViewer.tsx`, `HtmlBundlePreview.tsx`, `src/ui/utils/htmlBundle.ts`), user/agent guidance and limitations (`docs/mcp-capabilities.md`, `docs/html-bundle-artifacts.md`, skills) | **§12.11 (REQ-CROSS-DEVICE)**, §12.8 viewer half, §12.2 repeated end to end, §12.10 manual, over-limit through the full flow |
+
+Invariants every one of the three tasks carries: no transfer code path calls
+`hosted_with_access`, `vault.open*`/`vault.seal*` on the Hub, or enqueues a device
+control job; the Hub stores and serves ciphertext only and checks it blind (§5.4);
+no plaintext digest/name/description in clear; no `?t=` or plaintext URL; tokens
+stored as `sha256` only.
+
 ## 14. Decisions and open items
 
 - **Decided:** strict E2EE — no Hub-side seal/open for transfers, in any mode;
@@ -550,6 +681,11 @@ ticket keeps the chain rules: source only, no push/deploy/restart/live mutation.
 - **Decided:** integrity beyond GCM through signed device receipts plus a sealed
   attestation; the plaintext digest is never stored or sent in clear.
 - **Decided:** Hub enforces the 15 MiB decoded limit blind from token length.
+- **Decided:** the Hub's receipt claims are untrusted; the shell transfer download
+  is verified-only with no escape flag, the browser labels and gates unverified
+  saves, and receipt-less artifacts get no substitution protection (v2 limitation).
+- **Decided:** Hub memory is bounded globally (data-path and commit semaphores,
+  `503`/`busy`), not only per owner; downloads stream in ≤ 1 MiB windows.
 - **Decided:** HTML bundle validation happens in the executor (ctl validator /
   `readHtmlBundle`) and again in the viewer; the Hub cannot and does not validate.
 - **Open (user):** whether to keep, restrict or redesign the existing non-E2EE MCP
