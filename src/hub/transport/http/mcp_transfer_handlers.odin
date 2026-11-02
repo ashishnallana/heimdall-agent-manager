@@ -223,7 +223,8 @@ xfr_append_stream :: proc(h: ^MCP_Transfer_Handlers, x: domain.Mcp_Transfer, off
 	return xfr_json(200, struct {received_bytes: i64}{pos}, contracts.HTTP_Header{"Upload-Offset", fmt.tprintf("%d", pos)})
 }
 
-mcp_transfer_handler :: proc(ctx: rawptr, req: Request) -> Response {
+mcp_transfer_handler :: proc(ctx: rawptr, request: Request) -> Response {
+	req := request
 	h := (^MCP_Transfer_Handlers)(ctx)
 	if h == nil || h.svc == nil do return xfr_error(503, "unavailable")
 	// No token in the URL, ever.
@@ -238,6 +239,17 @@ mcp_transfer_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	token := bearer_token(req)
 	browser_owner := ""
 	if header_value(req.headers, "Authorization") == "" && h.delegation != nil {
+		// The browser's v2 device proof signs sha256(body), so its body must be in
+		// hand before the proof is checked: browser uploads are limited to one
+		// <= 1 MiB window per request (PATCH with Upload-Offset), which keeps the §7
+		// bound (a slot holds <= 1 MiB) without appending unverified bytes.
+		if req.body_stream != nil {
+			if req.body_stream.total > contracts.ARTIFACT_TRANSFER_STORE_CHUNK_BYTES do return xfr_error(413, "browser_chunk_size")
+			buf := make([]byte, req.body_stream.total, context.temp_allocator)
+			if n, complete := body_stream_read(req.body_stream, buf); !complete || n != len(buf) do return xfr_error(400, "incomplete_body")
+			req.body = string(buf)
+			req.body_stream = nil
+		}
 		owner, bok, bresp := xfr_browser_owner(h, req)
 		if !bok do return bresp
 		browser_owner = owner
