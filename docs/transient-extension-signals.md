@@ -96,8 +96,8 @@ Each snapshot also carries `context_window`, `window_source`
 2. the read-only config shipped in the binary
    (`src/bridge/context_windows.json`): ordered `{provider, model_regex,
    context_window}` entries, first match wins, the regex anchored to the whole
-   id, tried against the configured model (which may be an alias such as
-   `default`) and then the `resolved_model` from model discovery; it also
+   id, tried against the `resolved_model` from model discovery first and then
+   the configured model (which may be an alias such as `default`); it also
    ships `warn_pct` 40 and `rollover_pct` 70;
 3. the 200000 default.
 
