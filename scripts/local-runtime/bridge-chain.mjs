@@ -4,9 +4,9 @@
 //   node scripts/local-runtime/bridge-chain.mjs --api <proxy-url> --hub-dir <hub instance dir> \
 //     --bridge-id <brg_...> [--dev-user <name>]
 //
-// local-bridge.sh runs this after a bridge enrolls (and on every start) when the
-// bridge belongs to a local-hub.sh instance (--hub NAME). Data only: nothing is
-// launched and no provider process starts.
+// local-bridge.sh runs this on every start, once the bridge is connected, when
+// the bridge belongs to a local-hub.sh instance (--hub NAME). Data only: no
+// agent is launched and no provider session starts.
 //
 // 1. The bridge's owner and label come from <hub-dir>/hub.db. The owner's seed
 //    record is <hub-dir>/seed.json for the hub's dev user (--dev-user) and
@@ -15,14 +15,27 @@
 // 2. The chain "Sample: <bridge label>" and its tasks are created through the
 //    public REST API, signed in as the owner like seed.mjs, without a
 //    coordinator. An existing chain with that title is adopted.
-// 3. The coordinator is written into hub.db directly, the same way plans.mjs
+// 3. The coordinator's provider and model come from the hub's own view of this
+//    bridge: POST /bridges/<id>/providers/discover (the Settings "check again"
+//    probe; it looks up binaries, it starts no session), then
+//    GET /bridges/<id>/provider-status. The first provider that is present and
+//    enabled wins, else the first present one; its model is the first active one
+//    in the hub's effective list, and its profile is the reported profile_id.
+//    Those are the values the hub's start path validates
+//    (validate_provider_model_intersection). With no present provider the
+//    coordinator is deferred (nothing recorded) and the next start retries.
+// 4. The coordinator is written into hub.db directly, the same way plans.mjs
 //    writes billing: the API only adds a coordinator by launching one
-//    (create_instance sends launch_agent and needs the bridge online). It is one
-//    STOPPED, never-launched instance of the seeded sample-coordinator agent,
-//    bound to this bridge, with no provider and run_count 0; a coordinator row in
+//    (create_instance sends launch_agent). In one transaction, as prepare_instance
+//    and ensure_instance_conversation write them: one STOPPED, never-launched
+//    instance of the seeded sample-coordinator agent bound to this bridge, with
+//    that provider/profile/model and run_count 0; its chat_conversations row
+//    (bound to the instance, agent and chain); a coordinator row in
 //    task_chain_members (the canonical source) and the
-//    task_chains.coordinator_agent_instance_id mirror, as the hub's
-//    set_chain_coordinator writes them. Resuming it later is the normal UI flow.
+//    task_chains.coordinator_agent_instance_id mirror. Start in the UI then
+//    launches it like any stopped instance. Like every launch, that needs the
+//    provider enabled on the bridge (Settings > Bridges); the seed never changes
+//    bridge provider settings.
 //
 // Idempotent: the record gains `bridge:<bridge-id>` (chain) and
 // `bridge:<bridge-id>:coordinator` (instance). A recorded key is never redone,
@@ -43,7 +56,7 @@ export const coordinatorKey = (bridgeId) => `bridge:${bridgeId}:coordinator`;
 export function chainFixture(label) {
   return {
     title: `Sample: ${label}`,
-    description: `Seeded sample chain for bridge ${label}, created when it enrolled. Its coordinator is the Sample Coordinator on this bridge, not started yet.`,
+    description: `Seeded sample chain for bridge ${label}, created when it first connected. Its coordinator is the Sample Coordinator on this bridge, not started yet.`,
     tasks: [
       { title: 'Read the project README', description: 'Summarise the setup steps.' },
       { title: 'Add a hello-world endpoint', description: 'Small change with a test.' },
@@ -66,6 +79,37 @@ export function parseArgs(argv) {
 // The hub's own timestamp shape (RFC 3339, second precision, UTC).
 const nowStamp = () => new Date().toISOString().replace(/\.\d+Z$/, 'Z');
 const newInstanceId = () => `inst_${randomBytes(8).toString('hex')}`;
+const newConversationId = () => `chat_${randomBytes(8).toString('hex')}`;
+
+// pickRuntime chooses the coordinator's provider/profile/model from a
+// GET /bridges/<id>/provider-status body. null = nothing usable is installed.
+export function pickRuntime(status) {
+  const usable = (status?.data?.providers || status?.providers || [])
+    .filter((p) => p.state === 'present' && (p.catalog_state || 'active') === 'active')
+    .map((p) => ({ p, model: (p.models || []).find((m) => m.state === 'active')?.model_id || '' }))
+    .filter((c) => c.model);
+  const hit = usable.find((c) => c.p.enabled) || usable[0];
+  return hit ? { provider: hit.p.provider, profile: hit.p.profile_id || hit.p.provider, model: hit.model, enabled: Boolean(hit.p.enabled) } : null;
+}
+
+// apiClient: JSON calls to the hub as the signed-in owner.
+function apiClient({ api, fetchImpl, auth }) {
+  const base = api.replace(/\/+$/, '');
+  const headers = { 'Content-Type': 'application/json', ...auth };
+  return async function call(method, path, body) {
+    const res = await fetchImpl(base + path, { method, headers, body: body ? JSON.stringify(body) : undefined });
+    const text = await res.text();
+    if (!res.ok) throw new Error(`${method} ${path} -> ${res.status}: ${text.slice(0, 300)}`);
+    return text ? JSON.parse(text) : {};
+  };
+}
+
+// bridgeRuntime asks the hub to re-probe the bridge's providers, then reads them.
+export async function bridgeRuntime(call, bridgeId, log = console.log) {
+  const bridge = `/api/v1/bridges/${encodeURIComponent(bridgeId)}`;
+  try { await call('POST', `${bridge}/providers/discover`, {}); } catch (err) { log(`bridge-chain: provider discovery failed (${err.message}); using the last report`); }
+  return pickRuntime(await call('GET', `${bridge}/provider-status`));
+}
 
 function openDb(file) {
   const conn = new DatabaseSync(file);
@@ -99,17 +143,9 @@ function recordStore(record) {
 }
 
 // ensureChain creates (or adopts by title) the bridge's chain through the REST API.
-export async function ensureChain({ api, bridgeId, label, store, fetchImpl = fetch, auth = {}, log = console.log }) {
+export async function ensureChain({ api, bridgeId, label, store, fetchImpl = fetch, auth = {}, log = console.log, call = apiClient({ api, fetchImpl, auth }) }) {
   const key = chainKey(bridgeId);
   if (store.state.seeded[key]) { log(`bridge-chain: skip ${key} (recorded)`); return { id: store.state.seeded[key], created: false }; }
-  const base = api.replace(/\/+$/, '');
-  const headers = { 'Content-Type': 'application/json', ...auth };
-  async function call(method, path, body) {
-    const res = await fetchImpl(base + path, { method, headers, body: body ? JSON.stringify(body) : undefined });
-    const text = await res.text();
-    if (!res.ok) throw new Error(`${method} ${path} -> ${res.status}: ${text.slice(0, 300)}`);
-    return text ? JSON.parse(text) : {};
-  }
   const f = chainFixture(label);
   const hit = ((await call('GET', '/api/v1/task-chains?flat=1')).data || []).find((c) => c.title === f.title);
   if (hit) {
@@ -126,8 +162,10 @@ export async function ensureChain({ api, bridgeId, label, store, fetchImpl = fet
   return { id, created: true };
 }
 
-// ensureCoordinator writes the stopped coordinator instance for the bridge's chain.
-export function ensureCoordinator({ db, bridgeId, store, log = console.log, now = nowStamp, newId = newInstanceId }) {
+// ensureCoordinator writes the stopped coordinator instance (and its
+// conversation) for the bridge's chain. runtime: () => Promise<pickRuntime()>,
+// asked only when an instance is really about to be written.
+export async function ensureCoordinator({ db, bridgeId, store, runtime, log = console.log, now = nowStamp, newId = newInstanceId, newConvId = newConversationId }) {
   const key = coordinatorKey(bridgeId);
   const seeded = store.state.seeded;
   if (seeded[key]) { log(`bridge-chain: skip ${key} (recorded)`); return { id: seeded[key], created: false }; }
@@ -147,16 +185,23 @@ export function ensureCoordinator({ db, bridgeId, store, log = console.log, now 
     if (!agent) { log(`bridge-chain: skip ${key} (sample coordinator agent missing)`); return { id: '', created: false }; }
     const bridge = conn.prepare('SELECT owner_user_id FROM bridges WHERE bridge_id = ?').get(bridgeId);
     if (!bridge || bridge.owner_user_id !== chain.owner_user_id) throw new Error(`bridge ${bridgeId} does not belong to the owner of chain ${chainId}`);
+    const rt = await runtime();
+    if (!rt) { log(`bridge-chain: defer ${key} (the bridge reports no installed provider; retried on the next start)`); return { id: '', created: false }; }
 
     const id = newId();
+    const convId = newConvId();
     const at = now();
     conn.exec('BEGIN IMMEDIATE');
     try {
       conn.prepare(`INSERT INTO agent_instances
-        (agent_instance_id, owner_user_id, agent_id, bridge_id, display_name, chain_id, kind,
+        (agent_instance_id, owner_user_id, agent_id, bridge_id, display_name, chain_id, conversation_id, kind,
+         provider, provider_profile, model, run_count,
          runtime_status, startup_status, activity_status, created_at, updated_at, stopped_at)
-        VALUES (?, ?, ?, ?, ?, ?, 'agent', 'stopped', 'stopped', 'idle', ?, ?, ?)`)
-        .run(id, chain.owner_user_id, agentId, bridgeId, agent.name, chainId, at, at, at);
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'agent', ?, ?, ?, 0, 'stopped', 'stopped', 'idle', ?, ?, ?)`)
+        .run(id, chain.owner_user_id, agentId, bridgeId, agent.name, chainId, convId, rt.provider, rt.profile, rt.model, at, at, at);
+      conn.prepare(`INSERT INTO chat_conversations
+        (conversation_id, owner_user_id, agent_id, agent_instance_id, chain_id, title, title_source, last_activity_at, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, 'default', ?, ?, ?)`).run(convId, chain.owner_user_id, agentId, id, chainId, agent.name, at, at, at);
       conn.prepare(`INSERT INTO task_chain_members (chain_id, agent_instance_id, agent_id, owner_user_id, role, created_at)
         VALUES (?, ?, ?, ?, 'coordinator', ?)`).run(chainId, id, agentId, chain.owner_user_id, at);
       // The task_chains_work_revision_control trigger bumps work_revision.
@@ -168,7 +213,7 @@ export function ensureCoordinator({ db, bridgeId, store, log = console.log, now 
       throw err;
     }
     seeded[key] = id; store.save();
-    log(`bridge-chain: created ${key} ${id}`);
+    log(`bridge-chain: created ${key} ${id} (${rt.provider}/${rt.model}${rt.enabled ? '' : '; enable the provider on the bridge to start it'})`);
     return { id, created: true };
   } finally { conn.close(); }
 }
@@ -180,15 +225,20 @@ export async function seedBridgeChain({ api, hubDir, bridgeId, devUser = '', fet
   const record = recordFor(hubDir, bridge.owner, devUser);
   if (!existsSync(record)) { log(`bridge-chain: skip (no seed record for ${bridge.owner}; hub started with --no-seed?)`); return null; }
   const store = recordStore(record);
+  // Signed in only when something is left to do, so a seeded bridge's restart
+  // makes no API call at all.
+  let client;
+  const call = async (...args) => {
+    if (!client) client = apiClient({ api, fetchImpl, auth: sessionHeaders(await login(api, bridge.owner), uiOrigin || api) });
+    return client(...args);
+  };
   let chain = { id: store.state.seeded[chainKey(bridgeId)], created: false };
   if (!chain.id) {
-    const session = await login(api, bridge.owner);
-    const auth = sessionHeaders(session, uiOrigin || api);
-    chain = await ensureChain({ api, bridgeId, label: bridge.label, store, fetchImpl, auth, log });
+    chain = await ensureChain({ api, bridgeId, label: bridge.label, store, log, call });
   } else {
     log(`bridge-chain: skip ${chainKey(bridgeId)} (recorded)`);
   }
-  const coordinator = ensureCoordinator({ db, bridgeId, store, log });
+  const coordinator = await ensureCoordinator({ db, bridgeId, store, log, runtime: () => bridgeRuntime(call, bridgeId, log) });
   return { chain: chain.id, coordinator: coordinator.id };
 }
 

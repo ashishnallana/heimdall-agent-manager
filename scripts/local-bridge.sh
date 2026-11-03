@@ -18,12 +18,6 @@
 #   --user NAME                 with --auto-enroll, approve as that seeded account of
 #                               the --hub (e.g. paid), so the bridge is that user's
 #                               (default: the hub's dev proxy user)
-#
-# With --hub NAME, once the bridge is enrolled (enroll, and every start) its owner
-# on that seeded hub gets a sample task chain "Sample: <bridge label>" whose
-# coordinator is the seeded Sample Coordinator bound to this bridge. Data only:
-# the coordinator is recorded stopped and is never launched
-# (scripts/local-runtime/bridge-chain.mjs). Seeded once per bridge.
 #   --build MODE                nix | odin | none (default nix)
 #   --bin-dir DIR               take ham-bridge/ham-ctl/ham-pty-host from DIR
 #   --pty-host-bin PATH         ham-pty-host to run agents with (default: built, else PATH)
@@ -35,6 +29,14 @@
 #                               profiles/secrets and provider home
 #   --providers LIST            providers whose auth is seeded into an isolated home
 #                               (default: claude,codex,gemini,pi,git)
+#
+# Sample chain. With --hub NAME, once the bridge is up (every start) its owner on
+# that seeded hub gets a sample task chain "Sample: <bridge label>" whose
+# coordinator is the seeded Sample Coordinator bound to this bridge, with a
+# provider/model the bridge reports and its conversation. Data only: the
+# coordinator is recorded stopped and is never launched; Start in the UI runs it
+# (scripts/local-runtime/bridge-chain.mjs). Seeded once per bridge. A failure is
+# a warning; the bridge keeps running.
 #
 # `enroll` runs the device flow (`ham-bridge enroll --headless`) in the foreground. It
 # prints the hub's approval link and a pairing code; a trusted device of the hub's
@@ -67,7 +69,9 @@ LR_TAG=local-bridge
 # shellcheck source=local-runtime/lib.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/local-runtime/lib.sh"
 
-usage() { sed -n '2,56p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+# The whole header comment, however long it grows. One process, so a reader that
+# stops early (grep -q) cannot SIGPIPE a second stage under pipefail.
+usage() { awk 'NR > 1 { if (!/^#/) exit; sub(/^# ?/, ""); print }' "${BASH_SOURCE[0]}"; }
 
 CMD="${1:-help}"; [ $# -gt 0 ] && shift
 NAME=default HUB_URL="" HUB_NAME="" PORT="" EP_PORT="" AUTO=0 APPROVE_URL="" APPROVER_KEY="" APPROVE_USER="" APPROVAL_BASE_URL=""
@@ -209,19 +213,24 @@ seed_approve() {
   return "${PIPESTATUS[0]}"
 }
 
-# enroll_flow <auto 0|1>: the supported device flow (ham-bridge enroll --headless).
 # seed_bridge_chain: the bridge's sample chain and stopped coordinator on a local
-# hub (scripts/local-runtime/bridge-chain.mjs). A failure warns; the bridge still runs.
+# hub (scripts/local-runtime/bridge-chain.mjs). Run once the bridge has reported
+# its providers. A failure warns and returns 0: under errexit the status is taken
+# inside the `if`, so a failing helper can never abort start.
 seed_bridge_chain() {
   [ -n "$HUB_NAME" ] || return 0
   local hdir id; hdir="$(lr_instance_dir hub "$HUB_NAME")"
   id="$(sed -n 's/^daemon_id = "\(brg_[0-9a-f]*\)"$/\1/p' "$CFG" | head -1)"
   [ -n "$id" ] || { lr_log "WARN: no enrolled bridge id in $CFG; sample chain not seeded"; return 0; }
-  (cd "$LR_ROOT" && node "$LR_HELPERS/bridge-chain.mjs" --api "$APPROVE_URL" --hub-dir "$hdir" --bridge-id "$id" \
-    --dev-user "$(lr_env_get "$hdir/instance.env" DEV_USER)") 2>&1 | sed 's/^/  /'
-  [ "${PIPESTATUS[0]}" = 0 ] || lr_log "WARN: seeding the sample chain for bridge $id failed"
+  # pipefail: the `if` sees node's status, not sed's.
+  if (cd "$LR_ROOT" && node "$LR_HELPERS/bridge-chain.mjs" --api "$APPROVE_URL" --hub-dir "$hdir" --bridge-id "$id" \
+    --dev-user "$(lr_env_get "$hdir/instance.env" DEV_USER)") 2>&1 | sed 's/^/  /'; then
+    return 0
+  fi
+  lr_log "WARN: seeding the sample chain for bridge $id failed; the bridge keeps running"
 }
 
+# enroll_flow <auto 0|1>: the supported device flow (ham-bridge enroll --headless).
 enroll_flow() {
   local auto="$1" log="$DIR/logs/enroll.log"
   if [ "$auto" = 1 ] && { [ -z "$HUB_NAME" ] || [ ! -s "$APPROVER_KEY" ]; }; then
@@ -287,7 +296,6 @@ start() {
     [ "$AUTO" = 1 ] || lr_die "bridge '$NAME' is not enrolled; run '$0 enroll --name $NAME' or pass --auto-enroll"
     enroll_flow "$AUTO"
   fi
-  seed_bridge_chain
   lr_log "starting bridge on 127.0.0.1:$PORT -> $HUB_URL"
   lr_spawn "$DIR" bridge "$DIR/logs/bridge.log" env ${ISO_ENV[@]+"${ISO_ENV[@]}"} \
     "HEIMDALL_HAM_CTL_BIN=$CTL_BIN" "HEIMDALL_BRIDGE_PTY_HOST=1" "HEIMDALL_HAM_PTY_HOST_BIN=$PTY_BIN" \
@@ -301,6 +309,7 @@ start() {
   done
   grep -q 'bridge hub runtime ready' "$DIR/logs/bridge.log" \
     || lr_log "WARN: no 'hub runtime ready' yet; check $DIR/logs/bridge.log"
+  seed_bridge_chain
   status
 }
 
@@ -310,7 +319,6 @@ enroll() {
   lr_owned_pid "$DIR" bridge >/dev/null && lr_die "stop bridge '$NAME' before re-enrolling"
   prepare
   enroll_flow "$AUTO"
-  seed_bridge_chain
 }
 
 reseed_auth() {
