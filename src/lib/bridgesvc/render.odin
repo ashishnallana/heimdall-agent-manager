@@ -144,7 +144,7 @@ render_service_file :: proc(host: Host, l: Layout, in_: Render_Input) -> string 
 		for a in args do fmt.sbprintf(&b, " %s", sh_quote(a))
 		strings.write_byte(&b, '\n')
 	case .Schtasks:
-		// Per-user logon task running run.cmd (render_windows_run_cmd), which
+		// Per-user logon task running a hidden, synchronous launcher, which
 		// carries the environment the other backends set inline, like install.ps1.
 		strings.write_string(&b, "<?xml version=\"1.0\" encoding=\"UTF-16\"?>\n<Task version=\"1.2\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\">\n")
 		fmt.sbprintf(&b, "  <RegistrationInfo><Description>Ninjy Bridge %s</Description></RegistrationInfo>\n", xml_escape(in_.hub))
@@ -152,8 +152,8 @@ render_service_file :: proc(host: Host, l: Layout, in_: Render_Input) -> string 
 		fmt.sbprintf(&b, "  <Triggers><LogonTrigger><Enabled>true</Enabled>%s</LogonTrigger></Triggers>\n", user_id)
 		fmt.sbprintf(&b, "  <Principals><Principal id=\"Author\">%s<LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>\n", user_id)
 		strings.write_string(&b, "  <Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><ExecutionTimeLimit>PT0S</ExecutionTimeLimit><RestartOnFailure><Interval>PT1M</Interval><Count>999</Count></RestartOnFailure></Settings>\n")
-		strings.write_string(&b, "  <Actions Context=\"Author\"><Exec>\n    <Command>cmd.exe</Command>\n")
-		fmt.sbprintf(&b, "    <Arguments>/d /c \"%s\"</Arguments>\n", xml_escape(windows_run_cmd_path(l)))
+		strings.write_string(&b, "  <Actions Context=\"Author\"><Exec>\n    <Command>wscript.exe</Command>\n")
+		fmt.sbprintf(&b, "    <Arguments>//B //NoLogo \"%s\"</Arguments>\n", xml_escape(windows_launcher_path(l)))
 		strings.write_string(&b, "  </Exec></Actions>\n</Task>\n")
 	}
 	return strings.to_string(b)
@@ -219,4 +219,13 @@ render_windows_run_cmd :: proc(host: Host, l: Layout, in_: Render_Input) -> stri
 	// Make that failure visible to Task Scheduler rather than reporting success.
 	fmt.sbprintf(&b, " 1>>\"%s\" 2>>\"%s\" || exit /b 1\r\nexit /b %%ERRORLEVEL%%\r\n", cmdq(pjoin(l.data_dir, "logs", "bridge.out.log")), cmdq(pjoin(l.data_dir, "logs", "bridge.err.log")))
 	return strings.to_string(b)
+}
+
+// WScript has no console. Wait for cmd/Bridge and return its status so Task
+// Scheduler supervises the whole lifetime and applies RestartOnFailure.
+windows_launcher_path :: proc(l: Layout) -> string {return pjoin(l.data_dir, "run.vbs")}
+
+render_windows_launcher :: proc(l: Layout) -> string {
+	path, _ := strings.replace_all(windows_run_cmd_path(l), "\"", "\"\"", context.temp_allocator)
+	return fmt.tprintf("Option Explicit\r\nDim shell, result\r\nSet shell = CreateObject(\"WScript.Shell\")\r\nresult = shell.Run(\"cmd.exe /d /s /c \"\"\"\"%s\"\"\"\"\", 0, True)\r\nWScript.Quit result\r\n", path)
 }
