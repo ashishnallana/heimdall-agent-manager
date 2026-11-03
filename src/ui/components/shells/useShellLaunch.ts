@@ -31,6 +31,11 @@ export interface UseShellLaunchOptions {
   initialBridgeId?: string;
   /** Called with the new session id once the shell has started. */
   onStarted: (sessionId: string) => void;
+  /**
+   * False while the shell UI is not shown (the new-conversation page in
+   * conversation mode): the bridge home-directory lookup is skipped. Default true.
+   */
+  enabled?: boolean;
 }
 
 export interface ShellLaunch {
@@ -69,7 +74,7 @@ export interface ShellLaunch {
  * new-conversation composer: bridge choice, working directory, optional command,
  * plan/vault/bridge validation and the createShell call with its busy/error state.
  */
-export function useShellLaunch({ projects, bridges, projectId, initialBridgeId, onStarted }: UseShellLaunchOptions): ShellLaunch {
+export function useShellLaunch({ projects, bridges, projectId, initialBridgeId, onStarted, enabled = true }: UseShellLaunchOptions): ShellLaunch {
   const entitlements = useEntitlements();
   const shellsEnabled = Boolean(entitlements.shells_enabled);
   const vaultUnlocked = useSelector(selectIsVaultUnlocked);
@@ -93,7 +98,7 @@ export function useShellLaunch({ projects, bridges, projectId, initialBridgeId, 
   // path its filesystem API lists for an empty path, i.e. the user's home) so the
   // field always shows the real directory the shell will start in.
   const projectPath = (project && bridgeId && resolveProjectBridgeShellCwd(project, bridgeId)) || '';
-  const bridgeHomeQuery = useListBridgeDirQuery({ bridgeId, path: '' }, { skip: Boolean(projectPath) || !bridge || !composerBridgeIsOnline(bridge) });
+  const bridgeHomeQuery = useListBridgeDirQuery({ bridgeId, path: '' }, { skip: !enabled || Boolean(projectPath) || !bridge || !composerBridgeIsOnline(bridge) });
   const defaultCwd = projectPath || (bridgeHomeQuery.data?.ok !== false ? String(bridgeHomeQuery.data?.path || '') : '');
   const [cwd, setCwd] = useState(defaultCwd);
   useEffect(() => { setCwd(defaultCwd); }, [defaultCwd]);

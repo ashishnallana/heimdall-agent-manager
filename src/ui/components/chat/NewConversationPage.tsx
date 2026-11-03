@@ -1,97 +1,91 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { useSelector } from 'react-redux';
-import { Combobox, Icon, Modal } from '@ui';
+import { Button, IconButton, Input, Modal, Text, Textarea } from '@ui';
 import { useCreateAgentMutation, useListAgentIdentitiesQuery, useListAgentTemplatesQuery } from '../../api/endpoints/agents';
 import { useListBridgesQuery, useListAgentBridgeSupportQuery, useBridgeProviderStatus } from '../../api/endpoints/bridgeSupport';
 import { useCreateLaunchConversationMutation } from '../../api/endpoints/chats';
 import { useCreateProjectMutation, useListProjectsQuery } from '../../api/endpoints/projects';
+import { useGetProjectVcsStatusQuery } from '../../api/endpoints/projectVcs';
+import { useFetchExperimentsQuery } from '../../api/endpoints/settings';
 import { useCreateArtifactMutation } from '../../api/endpoints/artifacts';
 import { useGetConversationLaunchPreferencesQuery, useSaveConversationLaunchSelectionMutation, useSetAgentFavoriteMutation } from '../../api/endpoints/conversationLaunch';
 import { selectIsVaultUnlocked } from '../../store/vaultSlice';
 import { buildRouteHash, getRouteSearch, getRoutePathname } from '../../utils/appLocation';
 import { apiErrorText } from '../../api/cookieFetch';
 import { artifactKindForFile, artifactLinkFromResponse, artifactMimeForFile, artifactUploadName, clipboardFilesFromEvent } from '../../utils/artifactUpload';
-import { isVaultArmored, getActiveVaultKey } from '../../utils/vaultContent';
+import { composerBridgeIsOnline } from '../../utils/composerBridgeOptions';
+import { getActiveVaultKey } from '../../utils/vaultContent';
 import { MAX_UPLOAD_BYTES, UPLOAD_TOO_LARGE_ERROR } from '../ArtifactUpload';
+import UpgradePrompt from '../billing/UpgradePrompt';
+import ModelCatalogRefresh from '../providers/ModelCatalogRefresh';
 import { useIsMobile } from '../shell/responsive';
-import { useAuthUser } from '../auth/AuthUserContext';
-import { VaultText } from '../vault/VaultText';
-import { MessageComposerInput, MessageComposerActions } from './MessageComposer';
-import RuntimeConfigurationOptions, { type RuntimeSelection } from './RuntimeConfigurationOptions';
-import ShellLaunchPanel from './ShellLaunchPanel';
-import { selectMainAgentIds, type LauncherIntent } from '../../store/workspaceLayoutSlice';
+import { resolveProjectBridgeShellCwd } from '../shells/interactiveShellLaunch';
+import { useShellLaunch } from '../shells/useShellLaunch';
+import { resolveProjectExplorerAccess } from './projectVcsExperiment';
+import type { RuntimeSelection } from './RuntimeConfigurationOptions';
+import { AgentMenu, type NewFavoriteAgent } from './launcher/AgentMenu';
+import { bridgeDisplayName } from './launcher/BridgeMenu';
+import { ConversationComposerBody, LaunchComposer, ShellComposerBody } from './launcher/LaunchComposer';
+import { LaunchHeadline, shouldShowBridgeClause } from './launcher/LaunchHeadline';
+import type { LauncherMode } from './launcher/ModeMenu';
+import { isDefaultConversationProject } from './launcher/ProjectMenu';
+import { RuntimeMenu } from './launcher/RuntimeMenu';
+import type { LauncherIntent } from '../../store/workspaceLayoutSlice';
 
 type Attachment = { localId: string; id?: string; file: File; name: string; status: 'uploading' | 'uploaded' | 'error'; error?: string };
 function message(e: any) { return String(e?.error || e?.message || apiErrorText(e)); }
-const label = (name: string, fallback: string) => isVaultArmored(name) ? 'Locked name' : name || fallback;
-const workflowLabel = (agent: any) => agent?.slug === 'coordinator' ? 'Multi-agent workflow' : agent?.slug === 'soloist' ? 'Single-agent workflow' : '';
 
-const GREETINGS = [
-  { text: 'Hello', lang: 'en' }, { text: 'Hey', lang: 'en' },
-  { text: 'Hola', lang: 'es' }, { text: 'Bonjour', lang: 'fr' },
-  { text: 'Ciao', lang: 'it' }, { text: 'Namaste', lang: 'hi' },
-  { text: 'こんにちは', lang: 'ja' }, { text: '안녕하세요', lang: 'ko' },
-  { text: 'Olá', lang: 'pt' }, { text: 'Hallo', lang: 'de' },
-];
+/** localStorage key of the last chosen mode (SH-1; a per-browser convenience). */
+export const PANE_MODE_STORAGE_KEY = 'heimdall:new-pane-mode';
+
 /**
- * `onLaunched`: called with the new agent instance id instead of navigating to
- * it (a Main new-chat pane puts the new conversation into THAT pane).
+ * Where a bridge problem points the user. With the headline's `on [bridge]` clause
+ * shown, at that token; without it (one bridge, or none online) there is nothing to
+ * pick, so say what is wrong.
  */
-const PANE_MODE_STORAGE_KEY = 'heimdall:new-pane-mode';
-
-function PaneModeSwitch({ value, onChange, mobile }: { value: 'agent' | 'shell'; onChange: (v: 'agent' | 'shell') => void; mobile: boolean }) {
-  const option = (v: 'agent' | 'shell', icon: 'bot' | 'terminal', text: string) => (
-    <button
-      type="button"
-      role="tab"
-      data-debug-id={`new-convo-mode-${v}`}
-      aria-selected={value === v}
-      onClick={() => onChange(v)}
-      className={`inline-flex flex-1 items-center justify-center gap-2 rounded-xl font-semibold transition-colors ${mobile ? 'min-h-11 text-[15px]' : 'min-h-9 text-sm'} ${value === v ? 'bg-surface-raised text-primary shadow-sm' : 'text-muted hover:text-primary'}`}
-    >
-      <Icon name={icon} size={mobile ? 18 : 16} />{text}
-    </button>
-  );
-  return (
-    <div role="tablist" aria-label="Open in this pane" data-debug-id="new-convo-mode-switch" className={`mb-6 flex rounded-2xl border border-subtle bg-surface p-1 ${mobile ? 'w-full' : 'w-72'}`}>
-      {option('agent', 'bot', 'Agent')}
-      {option('shell', 'terminal', 'Shell')}
-    </div>
-  );
+export function bridgeIssueText(mode: LauncherMode, bridgeClauseShown: boolean): string {
+  if (bridgeClauseShown) return 'Choose a connected bridge above.';
+  return mode === 'shell' ? 'No bridge is online. Start a bridge to launch a shell.' : 'No bridge is online. Start a bridge to start a conversation.';
 }
 
 export interface NewConversationPageProps {
   embedded?: boolean;
   footer?: ReactNode;
+  /**
+   * Called with the new agent instance id (or shell session id) instead of
+   * navigating to it (a Main new-chat pane puts the new conversation into THAT pane).
+   */
   onLaunched?: (agentInstanceId: string) => void;
   /** Explicit shortcut intent. It selects the initial mode without rewriting the saved preference. */
   launchIntent?: LauncherIntent;
 }
 
+/**
+ * The new conversation page (spec §3): a sentence headline whose nouns are the
+ * mode / project / bridge controls, the meta line, the shared composer (agent and
+ * provider chips in its footer), and a quiet issues line under it.
+ */
 export default function NewConversationPage({ footer, onLaunched, launchIntent }: NewConversationPageProps) {
-  const user = useAuthUser();
-  const userName = String(user?.display_name || user?.name || '').trim();
-  const [greeting] = useState(() => GREETINGS[Math.floor(Math.random() * GREETINGS.length)]);
   const mobile = useIsMobile();
-  // SH-1: the picker opens an agent conversation OR an interactive shell. The
+  // SH-1: the page opens an agent conversation OR an interactive shell. The
   // choice is a per-browser convenience, so it lives in localStorage.
-  const [paneMode, setPaneModeState] = useState<'agent' | 'shell'>(() => {
+  const [paneMode, setPaneModeState] = useState<LauncherMode>(() => {
     if (launchIntent) return launchIntent;
     try { return localStorage.getItem(PANE_MODE_STORAGE_KEY) === 'shell' ? 'shell' : 'agent'; } catch { return 'agent'; }
   });
   useEffect(() => {
     if (launchIntent) setPaneModeState(launchIntent);
   }, [launchIntent]);
-  const setPaneMode = (next: 'agent' | 'shell') => {
+  const setPaneMode = (next: LauncherMode) => {
     setPaneModeState(next);
     try { localStorage.setItem(PANE_MODE_STORAGE_KEY, next); } catch { /* storage unavailable */ }
   };
-  const openPaneIds = useSelector(selectMainAgentIds);
   const preferences = useGetConversationLaunchPreferencesQuery();
   const agentsQuery = useListAgentIdentitiesQuery({ limit: 200 });
   const projectsQuery = useListProjectsQuery();
   const bridgesQuery = useListBridgesQuery(undefined, { refetchOnMountOrArgChange: true });
   const templatesQuery = useListAgentTemplatesQuery();
+  const experimentsQuery = useFetchExperimentsQuery();
   const [saveSelection] = useSaveConversationLaunchSelectionMutation();
   const [setFavorite, favoriteState] = useSetAgentFavoriteMutation();
   const [createAgent, createAgentState] = useCreateAgentMutation();
@@ -109,13 +103,8 @@ export default function NewConversationPage({ footer, onLaunched, launchIntent }
   const [preferenceFailures, setPreferenceFailures] = useState<Record<string, string>>({});
   const preferenceError = Object.values(preferenceFailures).join(' ');
   const [pendingWrites, setPendingWrites] = useState(0);
-  const [settingsOpen, setSettingsOpen] = useState(false);
-  const [favoritesOpen, setFavoritesOpen] = useState(false);
   const [projectOpen, setProjectOpen] = useState(false);
-  const [favoriteSearch, setFavoriteSearch] = useState('');
-  const [agentName, setAgentName] = useState('');
-  const [agentTemplate, setAgentTemplate] = useState('tmpl_worker');
-  const [agentInstructions, setAgentInstructions] = useState('');
+  const [runtimeMenuOpen, setRuntimeMenuOpen] = useState(false);
   const [projectName, setProjectName] = useState('');
   const [projectDescription, setProjectDescription] = useState('');
   const [managementError, setManagementError] = useState('');
@@ -124,6 +113,7 @@ export default function NewConversationPage({ footer, onLaunched, launchIntent }
   const launchAnimation = useRef<Animation | null>(null);
   useEffect(() => () => launchAnimation.current?.cancel(), []);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const openShellRef = useRef<HTMLButtonElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const submitRef = useRef(false);
   const writeTail = useRef<Promise<unknown>>(Promise.resolve());
@@ -150,10 +140,22 @@ export default function NewConversationPage({ footer, onLaunched, launchIntent }
   const selectedAgent = agents.find(a => a.agent_id === agentId);
   const selectedProject = projects.find((p: any) => p.project_id === projectId);
   const selectedBridgeRow = useMemo(() => bridges.find((b: any) => b.bridge_id === runtime.bridgeId), [bridges, runtime.bridgeId]);
-  // Provider status for the selected bridge only (not every bridge).
-  const selectedProviders = useBridgeProviderStatus(selectedBridgeRow);
+  // Provider status for the selected bridge only (not every bridge); polled live
+  // while the provider menu is open so a sign-in elsewhere shows up.
+  const selectedProviders = useBridgeProviderStatus(selectedBridgeRow, { live: runtimeMenuOpen });
   const selectedBridge = selectedProviders.bridge;
   const capabilities = selectedProviders.capabilities;
+  const bridgeClauseShown = useMemo(() => shouldShowBridgeClause(bridges), [bridges]);
+
+  // The meta line's branch: only with the project VCS experiment on, for a real
+  // project on an online bridge. Unknown -> omitted.
+  const vcsEnabled = resolveProjectExplorerAccess(experimentsQuery.data?.flags, experimentsQuery.isError) === 'enabled';
+  const branchProjectId = selectedProject && !isDefaultConversationProject(selectedProject) ? projectId : '';
+  const vcsStatus = useGetProjectVcsStatusQuery(
+    { projectId: branchProjectId, bridgeId: runtime.bridgeId },
+    { skip: !vcsEnabled || !branchProjectId || !selectedBridgeRow || !composerBridgeIsOnline(selectedBridgeRow) },
+  );
+  const branch = vcsStatus.data?.ok ? vcsStatus.data.branch : '';
 
   // Writes only originate in this page. One field per PATCH plus a serial client
   // queue preserves rapid selections without replacing unrelated preferences.
@@ -200,28 +202,57 @@ export default function NewConversationPage({ footer, onLaunched, launchIntent }
     });
   }, [capabilities]);
 
+  function openLaunched(id: string) {
+    if (onLaunched) onLaunched(id);
+    else window.location.hash = buildRouteHash(`/conversations/${encodeURIComponent(id)}`, '');
+  }
+
+  // Shell mode (SH-1): the launch logic lives in useShellLaunch; the bridge is the
+  // headline's bridge token whenever that bridge is online.
+  const shell = useShellLaunch({ projects, bridges, projectId, initialBridgeId: runtime.bridgeId, onStarted: openLaunched, enabled: paneMode === 'shell' });
+  const { bridgeId: shellBridgeId, setBridgeId: setShellBridgeId, onlineBridges: shellOnlineBridges } = shell;
+  useEffect(() => {
+    if (runtime.bridgeId && runtime.bridgeId !== shellBridgeId && shellOnlineBridges.some(b => b.bridge_id === runtime.bridgeId)) setShellBridgeId(runtime.bridgeId);
+  }, [runtime.bridgeId, shellBridgeId, shellOnlineBridges, setShellBridgeId]);
+  const shellInProjectFolder = Boolean(shell.project && !isDefaultConversationProject(shell.project) && resolveProjectBridgeShellCwd(shell.project, shell.bridgeId));
+
   const issues: string[] = [];
   if (!hydrated) issues.push('Loading your favorite agents and launch selections…');
   if (preferences.isError || agentsQuery.isError || projectsQuery.isError || bridgesQuery.isError || support.isError) issues.push('Launch options could not be verified. Refresh before sending.');
   if (hydrated && (!selectedAgent || selectedAgent.state !== 'active' || !favoriteIds.includes(agentId))) issues.push('Choose an active agent from your favorites.');
   if (hydrated && (!selectedProject || selectedProject.state !== 'active')) issues.push('Selected project is unavailable or archived. Choose an active project.');
-  if (hydrated && (!selectedBridge || selectedBridge.status !== 'online' || selectedBridge.runtime_connected !== true)) issues.push('Choose a connected bridge in Agent settings.');
+  if (hydrated && (!selectedBridge || selectedBridge.status !== 'online' || selectedBridge.runtime_connected !== true)) issues.push(bridgeIssueText('agent', bridgeClauseShown));
   if (selectedBridge?.provider_status_error) issues.push('Provider availability could not be verified on this bridge. Refresh its connection.');
   if (selectedBridge && !selectedProviders.loaded) issues.push('Checking provider availability on the selected bridge…');
   else if (selectedBridge && (!runtime.provider || !capabilities.some(c => c.provider === runtime.provider && (c.profile_id || c.provider) === (runtime.providerProfile || runtime.provider)))) issues.push('Choose a provider available on the selected bridge.');
   else if (selectedBridge && !capabilities.find(c => c.provider === runtime.provider && (c.profile_id || c.provider) === (runtime.providerProfile || runtime.provider))?.models.includes(runtime.model)) issues.push('Choose a model available for this provider on the selected bridge.');
   if (support.data?.entries?.some((row: any) => String(row.bridgeId || row.bridge_id) === runtime.bridgeId && row.enabled === false)) issues.push('This agent is disabled on the selected bridge. Choose another bridge.');
   if (!vaultUnlocked || !getActiveVaultKey()) issues.push("This device's vault keys are not installed yet.");
+
+  // Shell mode has its own, shorter list (no agent/provider); the plan limit shows
+  // the upgrade prompt instead of a line.
+  const shellIssues: string[] = [];
+  if (!hydrated) shellIssues.push('Loading your launch selections…');
+  if (shell.blocked === 'vault') shellIssues.push("This device's vault keys are not installed yet. Shell commands are encrypted.");
+  if (shell.blocked === 'bridge') shellIssues.push(bridgeIssueText('shell', bridgeClauseShown));
+
   const uploading = attachments.some(a => a.status === 'uploading');
   const failedUpload = attachments.some(a => a.status === 'error');
   const sending = launchState.isLoading || transitioning;
   const disabled = sending || issues.length > 0;
   const sendDisabled = disabled || pendingWrites > 0 || Boolean(preferenceError) || support.isLoading || uploading || failedUpload || (!draft.trim() && attachments.length === 0);
+  const openShellDisabled = shellIssues.length > 0 || Boolean(shell.blocked) || !shell.bridgeId || shell.busy;
   useEffect(() => {
     if (launchIntent !== 'agent' || paneMode !== 'agent' || !hydrated || disabled) return;
     const frame = requestAnimationFrame(() => inputRef.current?.focus());
     return () => cancelAnimationFrame(frame);
   }, [disabled, hydrated, launchIntent, paneMode]);
+  // An explicit shell shortcut focuses "Open shell" once it can be pressed.
+  useEffect(() => {
+    if (launchIntent !== 'shell' || paneMode !== 'shell' || openShellDisabled) return;
+    const frame = requestAnimationFrame(() => openShellRef.current?.focus());
+    return () => cancelAnimationFrame(frame);
+  }, [launchIntent, paneMode, openShellDisabled]);
 
   async function upload(file: File, localId: string = crypto.randomUUID()) {
     const name = artifactUploadName(file, 'conversation-attachment');
@@ -250,23 +281,28 @@ export default function NewConversationPage({ footer, onLaunched, launchIntent }
       const id = result.instance?.agent_instance_id || result.conversation?.agent_instance_id;
       if (!id) throw new Error('Launch did not return an agent instance ID.');
       await launchAnimation.current?.finished.catch(() => undefined);
-      if (onLaunched) onLaunched(id);
-      else window.location.hash = buildRouteHash(`/conversations/${encodeURIComponent(id)}`, '');
+      openLaunched(id);
     } catch (e) { launchAnimation.current?.cancel(); launchAnimation.current = null; setTransitioning(false); setError(message(e)); submitRef.current = false; }
   }
-  async function changeFavorite(id: string, favorite: boolean) {
-    setManagementError('');
-    try { await setFavorite({ agentId: id, favorite }).unwrap(); if (!favorite && agentId === id) { setAgentId(''); } }
-    catch (e) { setManagementError(message(e)); }
+  function openShell() {
+    if (openShellDisabled) return;
+    void shell.start();
   }
-  async function addAgent(event: FormEvent) {
-    event.preventDefault(); setManagementError('');
-    if (favoritesFull) { setManagementError('Remove a favorite before creating another. You can have up to 6 favorites.'); return; }
+  /** AgentMenu reselects the first remaining favorite itself; `false` leaves the selection alone. */
+  async function changeFavorite(id: string, favorite: boolean): Promise<boolean> {
+    setManagementError('');
+    try { await setFavorite({ agentId: id, favorite }).unwrap(); return true; }
+    catch (e) { setManagementError(message(e)); return false; }
+  }
+  async function addAgent(agent: NewFavoriteAgent): Promise<boolean> {
+    setManagementError('');
+    if (favoritesFull) { setManagementError('Remove a favorite before creating another. You can have up to 6 favorites.'); return false; }
     try {
-      const created = await createAgent({ name: agentName.trim(), templateId: agentTemplate, instructions: agentInstructions, favorite: true }).unwrap();
-      await preferences.refetch(); setAgentName(''); setAgentInstructions('');
-      chooseAgent(created.agent_id); setFavoritesOpen(false);
-    } catch (e) { setManagementError(message(e)); }
+      const created = await createAgent({ name: agent.name.trim(), templateId: agent.templateId, instructions: agent.instructions, favorite: true }).unwrap();
+      await preferences.refetch();
+      chooseAgent(created.agent_id);
+      return true;
+    } catch (e) { setManagementError(message(e)); return false; }
   }
   async function addProject(event: FormEvent) {
     event.preventDefault(); setManagementError('');
@@ -275,77 +311,116 @@ export default function NewConversationPage({ footer, onLaunched, launchIntent }
       await projectsQuery.refetch(); chooseProject(created.project_id); setProjectOpen(false); setProjectName(''); setProjectDescription('');
     } catch (e) { setManagementError(message(e)); }
   }
-  const actionProps = { debugPrefix: 'new-convo', mobile, provider: runtime.provider, model: runtime.model, onSettings: () => setSettingsOpen(true), onUpload: () => fileRef.current?.click(), uploadDisabled: disabled, sendDisabled };
-  const input = <MessageComposerInput ref={inputRef} mobile={mobile} debugId="new-convo-composer-input" value={draft} disabled={sending} placeholder={mobile ? 'Message the agent…' : 'Message the agent… (Cmd/Ctrl+Enter to send)'} onChange={e => setDraft(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); void submit(e); } }} onPaste={e => { const files = clipboardFilesFromEvent(e); if (files.length && !disabled) { e.preventDefault(); files.forEach(f => void upload(f)); } }} />;
-  return <section data-debug-id="new-conversation-page" className="w-full px-3 sm:px-6">
-    <div className="mx-auto grid h-[calc(var(--app-viewport-height)-4rem)] min-h-min w-full max-w-4xl grid-cols-[minmax(0,1fr)] grid-rows-[minmax(min-content,1fr)_auto_minmax(min-content,1fr)] gap-8 py-6">
-      <div data-debug-id="new-convo-introduction" className="flex items-center justify-center"><div className="w-full">
-      <h1 data-debug-id="new-convo-greeting" className="mb-2 text-left text-2xl font-semibold text-primary"><span lang={greeting.lang}>{greeting.text}</span>{userName ? `, ${userName}` : ''}</h1>
-      <p data-debug-id="new-convo-subtitle" className="mb-5 text-left text-sm text-muted">{paneMode === 'shell' ? 'Open a terminal in this pane' : 'Start a conversation'}</p>
-      <PaneModeSwitch value={paneMode} onChange={setPaneMode} mobile={mobile} />
-      {paneMode === 'agent' ? (<>
-      <div className="mb-2 flex items-center justify-between gap-3">
-        <span data-debug-id="new-convo-favorite-count" className="text-xs text-muted">{favoriteIds.length} / 6 favorites</span>
-        <button type="button" data-debug-id="new-convo-edit-favorites-btn" disabled={!hydrated || sending} onClick={() => { setManagementError(''); setFavoritesOpen(true); }} aria-label="Manage favorite agents" title="Manage favorite agents" className="grid h-10 w-10 place-items-center rounded-xl text-muted hover:bg-neutral-soft hover:text-primary disabled:opacity-40"><Icon name="pencil" size={19} /></button>
-      </div>
-      <div data-debug-id="new-convo-favorite-agents" className="grid grid-cols-3 gap-2 sm:gap-3">{Array.from({ length: favoriteIds.length >= 4 ? 6 : 3 }, (_, index) => {
-        const id = favoriteIds[index];
-        if (!id) return <button key={`empty-${index}`} type="button" data-debug-id={`new-convo-empty-favorite-${index}`} aria-label="Choose a favorite agent" disabled={!hydrated || sending} onClick={() => { setManagementError(''); setFavoritesOpen(true); }} className="flex min-h-20 min-w-0 flex-col items-center justify-center gap-2 rounded-2xl border border-dashed border-subtle px-2 py-3 text-xs text-muted hover:bg-neutral-soft disabled:opacity-40"><Icon name="star" size={20} /><span>Choose agent</span></button>;
-        const agent = agents.find(a => a.agent_id === id); const selected = id === agentId;
-        return <button key={id} type="button" data-debug-id={`new-convo-favorite-agent-${id}`} aria-pressed={selected} disabled={!hydrated || sending || !agent || agent.state !== 'active'} onClick={() => chooseAgent(id)} className={`relative flex min-h-20 min-w-0 flex-col items-start justify-center gap-2 rounded-2xl border px-2 py-3 text-left sm:flex-row sm:items-center sm:gap-3 sm:px-4 ${selected ? 'border-accent bg-accent/10' : 'border-subtle bg-surface hover:bg-neutral-soft'} disabled:opacity-50`}>
-          <Icon name={agent?.slug === 'coordinator' ? 'tasks' : 'bot'} size={20} className={selected ? 'text-accent' : 'text-muted'} />
-          <span className="min-w-0 w-full sm:flex-1"><span className="block truncate text-xs font-medium text-primary sm:text-base"><VaultText value={agent?.name === 'coordinator' ? 'Coordinator' : agent?.name === 'soloist' ? 'Soloist' : agent?.name || id} fallback="Agent" /></span>{workflowLabel(agent) ? <span className="block text-[11px] text-muted sm:text-xs">{workflowLabel(agent)}</span> : null}{agent?.state !== 'active' ? <span className="text-xs text-muted">Unavailable</span> : null}</span>
-          {selected ? <Icon name="check" size={14} className="absolute right-2 top-2 text-accent" /> : null}
-        </button>;
-      })}</div>
-      </>) : null}
-      </div></div>
-      {paneMode === 'shell' ? (
-        <ShellLaunchPanel
-          projects={projects}
-          bridges={bridges}
-          projectId={projectId}
-          onProjectChange={chooseProject}
-          initialBridgeId={runtime.bridgeId}
-          openIds={openPaneIds}
-          isMobile={mobile}
-          disabled={!hydrated}
-          autoFocusStart={launchIntent === 'shell'}
-          onOpenShell={(sessionId) => {
-            if (onLaunched) onLaunched(sessionId);
-            else window.location.hash = buildRouteHash(`/conversations/${encodeURIComponent(sessionId)}`, '');
-          }}
-        />
-      ) : (
+
+  const bridgeName = bridgeDisplayName(selectedBridgeRow, '');
+  const profileId = runtime.providerProfile || runtime.provider;
+  const statusLines = paneMode === 'agent'
+    ? (sending ? [`Creating conversation and starting on ${selectedBridge?.label || 'selected bridge'}…`] : issues)
+    : shellIssues;
+  const alertText = paneMode === 'agent' ? error || preferenceError : shell.errorMessage;
+
+  const attachmentRows = attachments.length ? <ul data-debug-id="new-convo-attachments" className="m-0 flex list-none flex-col gap-2 p-0">{attachments.map(a => (
+    <li key={a.localId} className="flex flex-wrap items-center gap-2 rounded-[var(--radius-md)] border border-strong px-3 py-1">
+      <Text as="span" role="body-sm" className="m-0 min-w-0 flex-1 truncate">{a.name}</Text>
+      <Text as="span" role="body-sm" tone={a.status === 'error' ? 'danger' : 'muted'} className="m-0">{a.error || (a.status === 'uploading' ? 'Uploading…' : 'Uploaded')}</Text>
+      {a.status === 'error' ? <Button variant="ghost" size="sm" data-debug-id={`new-convo-retry-upload-${a.localId}`} disabled={sending || disabled} onClick={() => void upload(a.file, a.localId)}>Retry</Button> : null}
+      <IconButton icon="close" size="sm" label={`Remove ${a.name}`} data-debug-id={`new-convo-remove-upload-${a.localId}`} disabled={sending} onClick={() => setAttachments(rows => rows.filter(row => row.localId !== a.localId))} />
+    </li>
+  ))}</ul> : null;
+
+  return <section data-debug-id="new-conversation-page" className="w-full px-4 sm:px-8">
+    <div className="mx-auto flex w-full max-w-[760px] flex-col gap-6 pb-16 pt-12 md:pt-[120px]">
+      <LaunchHeadline
+        mode={paneMode}
+        onModeChange={setPaneMode}
+        projects={projects}
+        projectId={projectId}
+        onProjectChange={chooseProject}
+        onNewProject={() => { setManagementError(''); setProjectOpen(true); }}
+        newProjectDisabled={sending || !hydrated || !vaultUnlocked}
+        bridges={bridges}
+        runtime={runtime}
+        onRuntimeChange={chooseRuntime}
+        branch={branch}
+        disabled={sending || !hydrated}
+      />
+      {/* Banner slot (spec §3.5): the inline no-bridge Alert goes here. */}
       <div ref={composerRef} data-debug-id="new-convo-launch-dock" className={`relative w-full ${transitioning ? 'z-20' : ''}`}>
-      <div className="flex flex-wrap items-center justify-between gap-2 rounded-t-2xl border border-b-0 border-subtle bg-surface px-4 py-2 sm:max-w-lg">
-        <div className="min-w-0 flex-1"><Combobox debugId="new-convo-project-select" options={[...projects.filter((p: any) => p.state === 'active').map((p: any) => ({ value: p.project_id, title: label(p.name, 'Project') }))]} value={projectId} onChange={chooseProject} placeholder="Choose project" searchPlaceholder="Search projects…" disabled={sending || !hydrated} width="full" /></div>
-        <button type="button" data-debug-id="new-convo-new-project-btn" disabled={sending || !hydrated || !vaultUnlocked} onClick={() => { setManagementError(''); setProjectOpen(true); }} className="inline-flex min-h-10 items-center gap-1.5 rounded-xl px-2 text-sm text-muted hover:bg-neutral-soft hover:text-primary disabled:opacity-40"><Icon name="plus" size={15} />New Project</button>
-      </div>
-      <form onSubmit={submit} data-debug-id="new-convo-composer-shell" className="rounded-b-2xl border border-subtle bg-surface px-3 py-3 focus-within:border-accent sm:rounded-tr-2xl sm:px-4">
-        <button type="button" data-debug-id="new-convo-composer-bridge-btn" aria-haspopup="dialog" aria-expanded={settingsOpen} aria-label="Change bridge, provider or model" disabled={sending} onClick={() => setSettingsOpen(true)} className="mb-2 inline-flex max-w-full items-center gap-1.5 rounded-lg px-1 py-1 text-xs text-muted hover:bg-neutral-soft hover:text-primary disabled:opacity-40"><Icon name="device" size={13} /><span className="truncate">{selectedBridge?.label || selectedBridge?.machine_hostname || 'Choose bridge'}</span><Icon name="chevron-down" size={12} /></button>
-        {issues.length ? <div role="status" data-debug-id="new-convo-launch-issues" className="mb-3 rounded-xl bg-neutral-soft px-3 py-2 text-xs text-muted">{issues.map(issue => <p key={issue}>{issue}</p>)}</div> : null}
-        {error || preferenceError ? <div role="alert" data-debug-id="new-convo-launch-error" className="mb-3 text-sm text-danger">{error || preferenceError}{preferenceError ? <button type="button" data-debug-id="new-convo-retry-preferences-btn" disabled={pendingWrites > 0} onClick={() => { for (const field of Object.keys(preferenceFailures) as ('agent_id' | 'project_id' | 'bridge_id')[]) remember(field, latestSelections.current[field] || ''); }} className="ml-2 rounded-lg border border-danger/30 px-2 py-1 text-xs disabled:opacity-40">Retry saving selections</button> : null}</div> : null}
-        {attachments.length ? <div className="mb-3 space-y-2">{attachments.map(a => <div key={a.localId} className="flex flex-wrap items-center gap-2 rounded-xl border border-subtle px-3 py-2 text-xs"><span className="min-w-0 flex-1 truncate text-primary">{a.name}</span><span className={a.status === 'error' ? 'text-danger' : 'text-muted'}>{a.error || (a.status === 'uploading' ? 'Uploading…' : 'Uploaded')}</span>{a.status === 'error' ? <button type="button" data-debug-id={`new-convo-retry-upload-${a.localId}`} disabled={sending || disabled} onClick={() => void upload(a.file, a.localId)} className="text-accent">Retry</button> : null}<button type="button" data-debug-id={`new-convo-remove-upload-${a.localId}`} disabled={sending} aria-label={`Remove ${a.name}`} onClick={() => setAttachments(rows => rows.filter(row => row.localId !== a.localId))} className="text-muted"><Icon name="close" size={15} /></button></div>)}</div> : null}
+        <LaunchComposer mode={paneMode} onSubmit={paneMode === 'agent' ? submit : (event) => { event.preventDefault(); openShell(); }}>
+          {paneMode === 'agent' ? (
+            <ConversationComposerBody
+              mobile={mobile}
+              inputRef={inputRef}
+              draft={draft}
+              onDraftChange={setDraft}
+              onSubmitShortcut={(event) => void submit(event)}
+              onPaste={e => { const files = clipboardFilesFromEvent(e); if (files.length && !disabled) { e.preventDefault(); files.forEach(f => void upload(f)); } }}
+              inputDisabled={sending}
+              attachments={attachmentRows}
+              onAttach={() => fileRef.current?.click()}
+              attachDisabled={disabled}
+              agentChip={<AgentMenu
+                agents={agents}
+                favoriteIds={favoriteIds}
+                pinnedIds={pinnedIds}
+                selectedId={agentId}
+                onSelect={chooseAgent}
+                onToggleFavorite={changeFavorite}
+                toggling={favoriteState.isLoading}
+                templates={templatesQuery.data?.templates || []}
+                onCreateAgent={addAgent}
+                creating={createAgentState.isLoading}
+                error={managementError}
+                disabled={!hydrated || sending}
+              />}
+              runtimeChip={<RuntimeMenu
+                capabilities={capabilities}
+                bridgeLabel={bridgeName}
+                selection={runtime}
+                onChange={chooseRuntime}
+                disabled={sending}
+                open={runtimeMenuOpen}
+                onOpenChange={setRuntimeMenuOpen}
+                modelFooter={runtime.bridgeId ? <ModelCatalogRefresh key={runtime.bridgeId} bridgeId={runtime.bridgeId} provider={runtime.provider} profileId={profileId} online={Boolean(selectedBridge && String(selectedBridge.status).toLowerCase() === 'online')} disabled={sending} debugPrefix="new-convo" /> : undefined}
+              />}
+              sendDisabled={sendDisabled}
+            />
+          ) : (
+            <ShellComposerBody
+              mobile={mobile}
+              command={shell.command}
+              onCommandChange={shell.setCommand}
+              inputDisabled={shell.busy}
+              inProjectFolder={shellInProjectFolder}
+              bridgeName={bridgeDisplayName(shell.bridge, '')}
+              onOpen={openShell}
+              openDisabled={openShellDisabled}
+              busy={shell.busy}
+              openRef={openShellRef}
+            />
+          )}
+        </LaunchComposer>
         <input ref={fileRef} data-debug-id="new-convo-upload-input" type="file" multiple className="hidden" onChange={e => { if (!disabled) Array.from(e.target.files || []).forEach(f => void upload(f)); e.target.value = ''; }} />
-        {mobile ? <div className="pl-1 pt-1.5">{input}</div> : input}<MessageComposerActions {...actionProps} />
-        {sending ? <p role="status" className="absolute -top-6 left-0 text-xs text-muted">Creating conversation and starting on {selectedBridge?.label || 'selected bridge'}…</p> : null}
-      </form>
       </div>
-      )}
-      <div data-debug-id="new-convo-footer" className={`flex items-center justify-center ${transitioning ? 'pointer-events-none opacity-0' : ''} transition-opacity duration-200`}>{footer}</div>
+      <div data-debug-id="new-convo-launch-status" className={`-mt-3 flex flex-col gap-2 ${transitioning ? 'pointer-events-none opacity-0' : ''}`}>
+        {paneMode === 'shell' && shell.upgradeDetails ? <UpgradePrompt details={shell.upgradeDetails} debugId="shell-launch-upgrade" subtle /> : null}
+        <div role="status" data-debug-id="new-convo-launch-issues" className="flex flex-col gap-1 empty:hidden">
+          {statusLines.map(line => <Text key={line} role="body-sm" tone="muted" className="m-0">{line}</Text>)}
+        </div>
+        {alertText ? <div role="alert" data-debug-id="new-convo-launch-error" className="flex flex-wrap items-center gap-2">
+          <Text as="span" role="body-sm" tone="danger" className="m-0">{alertText}</Text>
+          {paneMode === 'agent' && preferenceError ? <Button size="sm" tone="danger" data-debug-id="new-convo-retry-preferences-btn" disabled={pendingWrites > 0} onClick={() => { for (const field of Object.keys(preferenceFailures) as ('agent_id' | 'project_id' | 'bridge_id')[]) remember(field, latestSelections.current[field] || ''); }}>Retry saving selections</Button> : null}
+        </div> : null}
+      </div>
+      <div data-debug-id="new-convo-footer" className={`flex items-center justify-center ${transitioning ? 'pointer-events-none opacity-0' : ''} transition-opacity duration-base`}>{footer}</div>
     </div>
-    <Modal open={settingsOpen} onOpenChange={setSettingsOpen} title="Agent settings" size="lg" data-debug-id="new-convo-runtime-modal"><Modal.Body><RuntimeConfigurationOptions bridges={bridges} selection={runtime} onChange={chooseRuntime} disabled={sending} debugPrefix="new-convo" /><p className="mt-4 text-xs text-muted">The agent starts when you send your first message.</p></Modal.Body></Modal>
-    <Modal open={favoritesOpen} onOpenChange={setFavoritesOpen} title="Favorite agents" size="lg" data-debug-id="new-convo-favorites-modal"><Modal.Body>
-      <p data-debug-id="new-convo-favorite-limit" className="mb-3 text-xs text-muted">{favoriteIds.length} / 6 favorites. Coordinator and Soloist occupy two permanent slots.{favoritesFull ? ' Remove a favorite to add another.' : ''}</p>
-      {managementError ? <p role="alert" className="mb-3 text-sm text-danger">{managementError}</p> : null}
-      <input data-debug-id="new-convo-favorite-search-input" value={favoriteSearch} onChange={e => setFavoriteSearch(e.target.value)} placeholder="Search existing agents…" className="mb-3 min-h-11 w-full rounded-xl border border-subtle bg-surface px-3 text-base text-primary sm:text-sm" />
-      <div className="max-h-64 space-y-2 overflow-auto">{agents.filter(a => (a.state === 'active' || favoriteIds.includes(a.agent_id)) && label(a.name, a.agent_id).toLowerCase().includes(favoriteSearch.toLowerCase())).map(a => {
-        const favorite = favoriteIds.includes(a.agent_id); const pinned = pinnedIds.includes(a.agent_id);
-        return <div key={a.agent_id} className="flex items-center justify-between gap-3 rounded-xl border border-subtle px-3 py-2"><span className="min-w-0"><span className="block truncate text-sm text-primary"><VaultText value={a.name} fallback="Agent" /></span>{workflowLabel(a) ? <span className="block text-xs text-muted">{workflowLabel(a)}</span> : null}</span><button type="button" data-debug-id={`new-convo-favorite-toggle-${a.agent_id}`} aria-label={pinned ? 'Permanent favorite' : favorite ? 'Remove favorite' : 'Add favorite'} title={pinned ? 'Permanent favorite — cannot be removed' : favorite ? 'Remove favorite' : 'Add favorite'} aria-pressed={favorite} disabled={pinned || favoriteState.isLoading || (!favorite && favoritesFull)} onClick={() => void changeFavorite(a.agent_id, !favorite)} className={`grid h-11 w-11 shrink-0 place-items-center rounded-xl hover:bg-neutral-soft disabled:cursor-default ${favorite ? 'text-accent' : 'text-muted'} ${favoriteState.isLoading ? 'opacity-40' : ''}`}><Icon name={favorite ? 'star-filled' : 'star'} size={20} /></button></div>;
-      })}</div>
-      <form onSubmit={addAgent} className="mt-5 space-y-3 border-t border-subtle pt-4"><h3 className="font-medium text-primary">Create a favorite agent</h3><input data-debug-id="new-convo-agent-name-input" value={agentName} onChange={e => setAgentName(e.target.value)} placeholder="Agent name" required className="min-h-11 w-full rounded-xl border border-subtle bg-surface px-3 text-base text-primary sm:text-sm" /><Combobox debugId="new-convo-agent-template-select" options={(templatesQuery.data?.templates || []).map((t: any) => ({ value: t.template_id, title: label(t.name, t.template_id) }))} value={agentTemplate} onChange={setAgentTemplate} placeholder="Choose template" width="full" /><textarea data-debug-id="new-convo-agent-instructions-input" value={agentInstructions} onChange={e => setAgentInstructions(e.target.value)} placeholder="Additional instructions (optional)" rows={3} className="w-full rounded-xl border border-subtle bg-surface p-3 text-base text-primary sm:text-sm" /><button type="submit" data-debug-id="new-convo-create-favorite-agent-btn" disabled={favoritesFull || createAgentState.isLoading || !agentName.trim() || !agentTemplate} className="min-h-11 rounded-xl bg-accent px-4 text-sm font-semibold text-accent-fg disabled:opacity-40">{createAgentState.isLoading ? 'Creating…' : 'Create and favorite'}</button></form>
+    <Modal open={projectOpen} onOpenChange={setProjectOpen} title="New project" size="md" data-debug-id="new-convo-project-modal"><Modal.Body>
+      <form onSubmit={addProject} className="flex flex-col gap-3">
+        {managementError ? <div role="alert"><Text role="body-sm" tone="danger" className="m-0">{managementError}</Text></div> : null}
+        <Input data-debug-id="new-convo-project-name-input" value={projectName} onChange={setProjectName} placeholder="Project name" aria-label="Project name" required width="full" />
+        <Textarea data-debug-id="new-convo-project-description-input" value={projectDescription} onChange={setProjectDescription} placeholder="Description (optional)" aria-label="Description" rows={3} width="full" />
+        <div><Button type="submit" variant="primary" data-debug-id="new-convo-create-project-btn" loading={createProjectState.isLoading} disabled={!projectName.trim()}>{createProjectState.isLoading ? 'Creating…' : 'Create project'}</Button></div>
+      </form>
     </Modal.Body></Modal>
-    <Modal open={projectOpen} onOpenChange={setProjectOpen} title="New project" size="md" data-debug-id="new-convo-project-modal"><Modal.Body><form onSubmit={addProject} className="space-y-3">{managementError ? <p role="alert" className="text-sm text-danger">{managementError}</p> : null}<input data-debug-id="new-convo-project-name-input" value={projectName} onChange={e => setProjectName(e.target.value)} placeholder="Project name" required className="min-h-11 w-full rounded-xl border border-subtle bg-surface px-3 text-base text-primary sm:text-sm" /><textarea data-debug-id="new-convo-project-description-input" value={projectDescription} onChange={e => setProjectDescription(e.target.value)} placeholder="Description (optional)" rows={3} className="w-full rounded-xl border border-subtle bg-surface p-3 text-base text-primary sm:text-sm" /><button type="submit" data-debug-id="new-convo-create-project-btn" disabled={createProjectState.isLoading || !projectName.trim()} className="min-h-11 rounded-xl bg-accent px-4 text-sm font-semibold text-accent-fg disabled:opacity-40">{createProjectState.isLoading ? 'Creating…' : 'Create project'}</button></form></Modal.Body></Modal>
   </section>;
 }

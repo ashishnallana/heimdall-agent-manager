@@ -42,8 +42,11 @@ import type {
   Size,
 } from '../types';
 
-/** Visual weight of an icon action. */
-export type IconButtonVariant = 'ghost' | 'solid' | 'danger';
+/**
+ * Visual weight of an icon action. `primary` is the accent-filled icon action (a
+ * composer's send): hover brightens, press scales to .96 (no scale under reduced motion).
+ */
+export type IconButtonVariant = 'ghost' | 'solid' | 'danger' | 'primary';
 
 const BASE =
   'inline-flex items-center justify-center rounded-[var(--radius-md)] ' +
@@ -54,6 +57,9 @@ const VARIANT_CLASSES: Record<IconButtonVariant, string> = {
   ghost: 'text-muted hover:text-primary hover:bg-surface-raised',
   solid: 'border border-subtle bg-surface-raised text-primary hover:brightness-125',
   danger: 'text-danger hover:bg-surface-raised hover:brightness-110',
+  primary:
+    'bg-accent text-accent-fg ease-standard hover:brightness-110 active:scale-[.96] ' +
+    'motion-reduce:transition-none motion-reduce:active:scale-100',
 };
 
 /** Box size per size. `md` (44px) meets the AA touch-target minimum. */
