@@ -104,7 +104,7 @@ config/default result and the source becomes `reported`; an override always
 wins. The snapshot then also carries `reported_window` and `window_mismatch`,
 which is true when the reported window differs from the config/default result
 by more than 10% (exactly 10% is not a mismatch; never set under an override).
-The bridge logs the first mismatch, and the Runtime card shows a "reported"
+The Runtime card shows a "reported"
 badge plus an amber note.
 
 The shipped map (first match wins, trying `resolved_model` before the configured model; `src/bridge/context_window_test.odin`
