@@ -65,14 +65,17 @@ test('hidden sidebar renders no rail; the fixed top-left cluster compacts on age
   // Hidden: the workspace's top-left header / other pages reserve the cluster's space.
   assert.match(source, /workspaceLeading=\{isEffectiveCollapsed \? <div aria-hidden="true" data-debug-id="shell-top-left-cluster-spacer"/);
   assert.match(source, /workspaceLeadingWidth=\{isEffectiveCollapsed \? topLeftClusterWidth : 0\}/);
-  // Other pages keep their top bar whether or not the sidebar is open.
-  assert.match(source, /\{!isWorkspaceRoute \? \(\s*<div\s+data-debug-id="shell-top-bar"/);
+  // Other pages draw no top bar. An invisible spacer reserves the floating
+  // cluster's row only while the sidebar is hidden (or in an integrated desktop
+  // window, for dragging), so content is never covered by the toggle.
+  assert.doesNotMatch(source, /shell-top-bar/);
+  assert.match(source, /\{!isWorkspaceRoute && \(isEffectiveCollapsed \|\| windowChromeStyle !== 'native'\) \? \(\s*<div\s+aria-hidden="true"\s+data-debug-id="shell-top-spacer"\s+className="window-drag shrink-0"\s+style=\{\{ height: chromeHeight \}\}/);
   assert.doesNotMatch(source, /shell-sidebar-reopen-bar/);
   // Chromium applies -webkit-app-region in DOM order: the top-left cluster (with the
   // no-drag toggle) must come after every drag strip it overlaps, or a macOS
   // hidden-inset window swallows the toggle's clicks.
   const clusterAt = source.indexOf('data-debug-id="shell-top-left-cluster"');
-  for (const strip of ['<aside', 'data-debug-id="shell-top-bar"', '<RouteOutlet']) {
+  for (const strip of ['<aside', 'data-debug-id="shell-top-spacer"', '<RouteOutlet']) {
     assert.ok(source.indexOf(strip) > 0 && clusterAt > source.indexOf(strip), `top-left cluster renders after ${strip}`);
   }
   // The toggle flips the persisted desktop preference / the mobile drawer.

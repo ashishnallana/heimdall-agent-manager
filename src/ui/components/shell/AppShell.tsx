@@ -1917,7 +1917,7 @@ function AuthenticatedShell({ user }: { user: AuthUser }) {
   const hideTopLeftCluster = isMobile && isWorkspaceRoute && isCurrentAuxPaneOpen;
   const showBrand = !isWorkspaceRoute || !isEffectiveCollapsed;
   // REQ-MAC-CHROME-1: 0 everywhere except the windowed macOS hidden title bar.
-  const { insetLeft: rawControlsInset, insetRight: controlsInsetRight } = useWindowChrome();
+  const { style: windowChromeStyle, insetLeft: rawControlsInset } = useWindowChrome();
   const controlsInset = isMobile ? 0 : rawControlsInset;
   const topLeftClusterWidth = computeTopLeftClusterWidth(isMobile, showBrand, controlsInset);
   const chromeHeight = topChromeHeight(isMobile);
@@ -2138,14 +2138,17 @@ function AuthenticatedShell({ user }: { user: AuthUser }) {
 
       <div className="flex min-w-0 flex-1 flex-col h-full min-h-0 overflow-hidden">
         {/* The fixed top-left cluster floats over the content. On the conversation
-            workspace the top-left chat header reserves its space; other pages get a
-            top bar in BOTH sidebar states (so the page never shifts when the sidebar
-            toggles). */}
-        {!isWorkspaceRoute ? (
+            workspace the top-left chat header reserves its space. Other pages draw no
+            top bar: an invisible spacer reserves the cluster's row only while the
+            sidebar is hidden (the cluster would otherwise cover the page), and always
+            in a desktop window without a native title bar, where it is the content
+            column's drag region and keeps pages clear of the window controls. */}
+        {!isWorkspaceRoute && (isEffectiveCollapsed || windowChromeStyle !== 'native') ? (
           <div
-            data-debug-id="shell-top-bar"
-            className="window-drag flex shrink-0 items-center justify-end gap-2 border-b border-subtle bg-canvas px-3"
-            style={{ height: chromeHeight, paddingRight: controlsInsetRight ? controlsInsetRight + 12 : undefined }}
+            aria-hidden="true"
+            data-debug-id="shell-top-spacer"
+            className="window-drag shrink-0"
+            style={{ height: chromeHeight }}
           />
         ) : null}
         <RouteOutlet

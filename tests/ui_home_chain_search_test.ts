@@ -205,7 +205,7 @@ async function waitFor(predicate: () => boolean, act: any, ms = 3000) {
   }
 }
 
-test('new Main pane and Home route keep the launcher but no longer mount a task-chain list', async () => {
+test('new Main pane and Home route keep the launcher but mount no task-chain list or activity cards', async () => {
   for (const pane of [false, true]) {
     await withDom('#/home', async dom => {
       const { createRoot } = await import('react-dom/client');
@@ -220,7 +220,12 @@ test('new Main pane and Home route keep the launcher but no longer mount a task-
           React.createElement(HomePage, pane ? { pane: { onOpenAgent: () => {} } } : {}))));
         assert.ok(dom.window.document.querySelector('[data-debug-id="new-conversation-page"]'));
         assert.equal(dom.window.document.querySelector('[data-debug-id="home-chain-search"]'), null);
-        assert.equal(Boolean(dom.window.document.querySelector('[data-debug-id="home-section-buttons"]')), !pane);
+        assert.ok(dom.window.document.querySelector(`[data-debug-id="${pane ? 'home-page-pane' : 'home-page'}"]`));
+        // The Recent issues / Pending actions cards and their panel were removed from Home.
+        assert.equal(dom.window.document.querySelector('[data-debug-id="home-section-buttons"]'), null);
+        assert.equal(dom.window.document.querySelector('[data-debug-id^="home-tab-"]'), null);
+        assert.equal(dom.window.document.querySelector('[data-debug-id^="home-panel-"]'), null);
+        assert.equal(dom.window.document.getElementById('home-activity-panel'), null);
       } finally {
         await act(async () => { root.unmount(); store.dispatch(heimdallApi.util.resetApiState()); });
       }
