@@ -13,12 +13,12 @@ import "core:strings"
 // Upper bound for any counter; larger (or negative/non-integer) values are
 // rejected so a misbehaving bridge cannot poison the lifetime totals.
 AGENT_TOKEN_USAGE_MAX :: 1_000_000_000_000
+// context_source value for a figure the bridge estimated from tool traffic.
+AGENT_TOKEN_ESTIMATE_SOURCE :: "estimate"
 // FALLBACK thresholds only. The bridge's shipped config
 // (src/bridge/context_windows.json) is authoritative and rides on every
 // snapshot as warn_pct/rollover_pct; these apply when a snapshot omits them
 // (older bridge). warn = amber meter only, rollover = restart with a fresh context.
-// context_source value for a figure the bridge estimated from tool traffic.
-AGENT_TOKEN_ESTIMATE_SOURCE :: "estimate"
 AGENT_TOKEN_WARN_PCT :: 40
 AGENT_TOKEN_ROLLOVER_PCT :: 70
 
