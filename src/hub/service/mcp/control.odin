@@ -18,13 +18,21 @@ import project "odin_test:hub/service/project"
 import issue "odin_test:hub/service/issue"
 
 Control_Service :: struct {chains:^tc.Taskchain_Service,agents:^agent.Agent_Service,providers:^provider.Provider_Service,bridges:^iface.Bridge_Repository,content:^content.Content_Service,projects:^project.Project_Service,issues:^issue.Issue_Service,resource_ctx:rawptr,resource_page:iface.Resource_Page_Proc}
-Control_Arguments :: struct {chain_id,title,description,cursor,task_id,request_id,body,state,assignee_agent_id,comment_cursor:string,coordinator_agent_id,bridge_id,provider,provider_profile,model:string,limit,timeout_ms,comment_limit:int,task_write:Task_Tool_Arguments,catalog:Catalog_Arguments,runtime:Runtime_Arguments,resource:Resource_Arguments,include_configuration,include_comments:bool}
+Control_Arguments :: struct {chain_id,title,description,cursor,task_id,request_id,body,state,assignee_agent_id,comment_cursor:string,coordinator_agent_id,bridge_id,project_id,provider,provider_profile,model:string,limit,timeout_ms,comment_limit:int,task_write:Task_Tool_Arguments,catalog:Catalog_Arguments,runtime:Runtime_Arguments,resource:Resource_Arguments,include_configuration,include_comments:bool}
 Control_Data :: vault.Control_Data
 control_auth :: proc(owner:string)->contracts.Auth_Context {return {kind=.Internal_User,user_id=owner}}
-control_chain :: proc(c:domain.Task_Chain)->json.Object {
+control_chain :: proc(c:domain.Task_Chain,project_id:string="")->json.Object {
 	status:="active"
 	switch c.status {case .Active: case .Completed:status="completed";case .Cancelled:status="cancelled";case .Archived:status="archived"}
-	return json.Object{"owner_user_id"=json.String(c.owner_user_id),"chain_id"=json.String(c.chain_id),"title"=json.String(c.title),"description"=json.String(c.description),"status"=json.String(status),"kind"=json.String(c.kind),"work_revision"=json.Integer(c.work_revision),"created_at"=json.String(c.created_at),"updated_at"=json.String(c.updated_at)}
+	return json.Object{"owner_user_id"=json.String(c.owner_user_id),"chain_id"=json.String(c.chain_id),"title"=json.String(c.title),"description"=json.String(c.description),"status"=json.String(status),"kind"=json.String(c.kind),"project_id"=json.String(project_id),"work_revision"=json.Integer(c.work_revision),"created_at"=json.String(c.created_at),"updated_at"=json.String(c.updated_at)}
+}
+// A chain's project is the project of its coordinator instance, the same
+// derivation the HTTP chain list and UI project grouping use. "" = no project.
+control_chain_project :: proc(s:^Control_Service,c:domain.Task_Chain)->string {
+	if s==nil || s.agents==nil || c.coordinator_agent_instance_id=="" do return ""
+	inst,found,err:=iface.agent_get_instance(s.agents.agents,c.coordinator_agent_instance_id)
+	if !found || err.code!=.None || inst.owner_user_id!=c.owner_user_id || inst.chain_id!=string(c.chain_id) do return ""
+	return string(inst.project_id)
 }
 control_id_ok :: proc(id:string)->bool {return strings.has_prefix(id,"chain_") && len(id)>6 && len(id)<=256 && vault.valid_id_value(id)}
 // Services authorize every chain/task/comment before any decryption dispatch.
@@ -49,7 +57,7 @@ control_read :: proc(s:^Control_Service,owner,name:string,args:Control_Arguments
 		out:=Control_Data{chains=make([]json.Object,stop-start,context.temp_allocator)}
 		for i in start..<stop {
 			if string(all[i].owner_user_id)!=owner do return {},"request_failed"
-			out.chains[i-start]=control_chain(all[i])
+			out.chains[i-start]=control_chain(all[i],control_chain_project(s,all[i]))
 		}
 		if stop<len(all) do out.next_cursor=fmt.tprintf("%d",stop)
 		return out,""
@@ -58,7 +66,7 @@ control_read :: proc(s:^Control_Service,owner,name:string,args:Control_Arguments
 	if !found || err.code!=.None || string(c.owner_user_id)!=owner do return {},"not_found"
 	tasks,terr:=tc.list_tasks(s.chains,principal,c.chain_id)
 	if terr.code!=.None || len(tasks)>1000 do return {},"result_too_large"
-	out:=Control_Data{chain=control_chain(c),tasks=make([]json.Object,len(tasks),context.temp_allocator),comments=make([]json.Object,0,context.temp_allocator)}
+	out:=Control_Data{chain=control_chain(c,control_chain_project(s,c)),tasks=make([]json.Object,len(tasks),context.temp_allocator),comments=make([]json.Object,0,context.temp_allocator)}
 	if args.include_configuration {
 		configuration_revision,fleet,configured:=control_configuration(s,c)
 		if !configured do return {},"request_failed"

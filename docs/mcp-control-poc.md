@@ -6,7 +6,7 @@ This development-checkout POC exposes exactly four tools over local MCP stdio:
 | --- | --- | --- |
 | `chains.list` | optional `limit` (1–100), `cursor` | Readable owned chains and pagination |
 | `chains.get` | `chain_id` | Chain plus task states and current review verdicts |
-| `chains.create` | `title`, `coordinator_agent_id`, `bridge_id`; optional `description` and provider settings | Draft `mixed_work` chain with fresh coordinator launch; requires instance-control consent |
+| `chains.create` | `title`, `coordinator_agent_id`, `bridge_id`; optional `description`, `project_id` and provider settings | Draft `mixed_work` chain with fresh coordinator launch; requires instance-control consent |
 | `events.wait` | `chain_id`, optional `timeout_ms` (1–30000) | Live change hint or timeout, plus refreshed chain/task state |
 
 The client acts as the authenticated **user**. It never becomes an agent instance,

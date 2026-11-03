@@ -12,9 +12,9 @@ identity. Native APIs retain their existing approved-device gates.
 
 | Tool | Input | Result |
 | --- | --- | --- |
-| `chains.list` | Optional `limit` 1–100 (default 50), offset `cursor` | Readable owned chains, optional next cursor |
-| `chains.get` | `chain_id` | Readable chain, tasks, current-attempt review verdict metadata and comments |
-| `chains.create` | Required `title` (1–500 bytes), `coordinator_agent_id` (`agt_...`), `bridge_id` (`brg_...`); optional `description` (up to 20,000 bytes), `provider`, `provider_profile`, `model` | Encrypted draft chain and fresh coordinator instance; launches on the selected bridge |
+| `chains.list` | Optional `limit` 1–100 (default 50), offset `cursor` | Readable owned chains (each with `project_id`, `""` for none), optional next cursor |
+| `chains.get` | `chain_id` | Readable chain (with `project_id`), tasks, current-attempt review verdict metadata and comments |
+| `chains.create` | Required `title` (1–500 bytes), `coordinator_agent_id` (`agt_...`), `bridge_id` (`brg_...`); optional `description` (up to 20,000 bytes), `project_id` (`proj_...`), `provider`, `provider_profile`, `model` | Encrypted draft chain and fresh coordinator instance; launches on the selected bridge, in the selected project when given; result echoes `project_id` |
 | `chains.message` | Required `chain_id`, stable `request_id`, nonblank `body` (up to 20,000 UTF-8 bytes) | Accepted user message; coordinator instance, conversation and message IDs; optional delivery warning |
 | `events.wait` | `chain_id`, optional `timeout_ms` | `status`, transient `event`, `refresh_required`, fresh `state` |
 
@@ -34,6 +34,16 @@ current vault/epoch. The final credential/grant/directory check and persistence
 share one SQLite transaction and connection; failure rolls back the write. A
 transport failure can still hide a committed creation. Never automatically retry
 an ambiguous `chains.create` call.
+
+A chain's project is its coordinator instance's project, the same derivation the
+web chain list and project grouping use. `project_id` must name a project the
+connected user owns that is active; unknown and foreign projects both return
+`project_not_found`, archived ones `project_archived`. Both are checked before
+the chain row, coordinator instance, conversation or runtime reservation exist,
+so a rejected create leaves nothing behind. Omitting `project_id` keeps the
+previous no-project behavior. `chains.create` takes no `request_id`, so there is
+no replay key to bind the project to; the no-automatic-retry rule above applies
+unchanged.
 
 Creation requires the existing `mcp:instances:control` consent capability because
 it launches an agent. Legacy `mcp:chains` connections retain reads but cannot

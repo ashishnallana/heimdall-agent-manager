@@ -94,6 +94,9 @@ mcp_arguments :: proc(name:string,value:json.Value)->(mcp.Control_Arguments,bool
 			case "provider_profile":args.provider_profile=string(s)
 			case "model":args.model=string(s)
 			}
+		case "project_id":
+			s,typed:=v.(json.String);if !typed || name!="chains.create" || len(s)<=5 || len(s)>256 || !strings.has_prefix(string(s),"proj_") || !vault.valid_id_value(string(s)) do return {},false
+			args.project_id=string(s)
 		case "task_id":
 			s,typed:=v.(json.String);if !typed || (name!="tasks.comment" && name!="tasks.get") || len(s)<=5 || len(s)>256 || !strings.has_prefix(string(s),"task_") || !vault.valid_id_value(string(s)) do return {},false
 			args.task_id=string(s)
@@ -230,7 +233,7 @@ mcp_control_handler :: proc(ctx:rawptr,req:Request)->(response:Response) {
 		for text in args.task_write.acceptance do if text!="" do crypto.zero_explicit(raw_data(text),len(text))
 	}
 	if !nok || !args_ok {
-		if nok && string(name)=="chains.create" do return mcp_rpc_error(id,-32602,"chains.create requires title, coordinator_agent_id (agt_...), bridge_id (brg_...) and valid optional provider settings")
+		if nok && string(name)=="chains.create" do return mcp_rpc_error(id,-32602,"chains.create requires title, coordinator_agent_id (agt_...), bridge_id (brg_...) and valid optional project_id (proj_...) and provider settings")
 		return mcp_rpc_error(id,-32602,"Unknown tool or invalid arguments")
 	}
 	if !mcp.scope_allows_tool(view.scope,string(name)) do return mcp_tool_result(id,"scope_missing",true)
@@ -319,7 +322,7 @@ mcp_control_handler :: proc(ctx:rawptr,req:Request)->(response:Response) {
 		chain_id,instance_id,code:=h.create(h.create_ctx,raw,view,args,title,description)
 		if code=="invalid_token" do return mcp_unauthorized(h)
 		if code!="" && chain_id=="" do return mcp_tool_result(id,code,true)
-		encoded,_:=json.marshal(struct {chain_id,title,description,status,coordinator_agent_id,coordinator_agent_instance_id,error:string}{chain_id,args.title,args.description,"draft",args.coordinator_agent_id,instance_id,code},allocator=context.temp_allocator)
+		encoded,_:=json.marshal(struct {chain_id,title,description,status,project_id,coordinator_agent_id,coordinator_agent_instance_id,error:string}{chain_id,args.title,args.description,"draft",args.project_id,args.coordinator_agent_id,instance_id,code},allocator=context.temp_allocator)
 		defer if len(encoded)>0 do crypto.zero_explicit(raw_data(encoded),len(encoded))
 		return mcp_tool_result(id,string(encoded),code!="")
 	}

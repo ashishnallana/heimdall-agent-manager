@@ -1648,6 +1648,20 @@ select_bridge_for_agent :: proc(service: ^Agent_Service, auth: contracts.Auth_Co
 	return best, true, domain.Domain_Error{}
 }
 
+// validate_launch_project applies the launch-time project rule (owned by the
+// caller, active, path resolvable for bridge_id) without creating anything, so
+// chain-create adapters can reject a bad project_id before the chain row,
+// coordinator instance or runtime reservation exist. It is the same rule
+// prepare_instance enforces later through resolve_project_path_for_launch.
+validate_launch_project :: proc(service: ^Agent_Service, auth: contracts.Auth_Context, project_id: domain.Project_ID, bridge_id: string) -> domain.Domain_Error {
+	if project_id == "" do return domain.Domain_Error{}
+	owner, owner_ok, owner_err := ownership.owner_from_auth(auth)
+	if !owner_ok do return owner_err
+	_, ok, err := resolve_project_path_for_launch(service, owner, project_id, strings.trim_space(bridge_id))
+	if !ok do return err
+	return domain.Domain_Error{}
+}
+
 resolve_project_path_for_launch :: proc(service: ^Agent_Service, owner: domain.User_ID, project_id: domain.Project_ID, bridge_id: string) -> (string, bool, domain.Domain_Error) {
 	if service.projects == nil do return "", false, domain.domain_error(.Internal_Error, "project repository is not configured")
 	project, ok, err := iface.project_get(service.projects, project_id)
