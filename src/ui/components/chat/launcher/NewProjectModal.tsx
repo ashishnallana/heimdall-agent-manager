@@ -12,6 +12,7 @@ import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { Alert, Button, FormField, Input, Modal, Select, Text, Textarea } from '@ui';
 import { apiErrorText } from '../../../api/cookieFetch';
 import { useCreateProjectMutation } from '../../../api/endpoints/projects';
+import { deriveProjectSlug } from '../../../utils/slug';
 import BridgeDirectoryPicker from '../../BridgeDirectoryPicker';
 import {
   folderBaseName,
@@ -26,7 +27,7 @@ export const VCS_KIND_OPTIONS: { value: ProjectVcsKind; text: string }[] = [
   { value: 'none', text: 'No version control' },
 ];
 
-export type NewProjectPayload = { name: string; description: string; default_path: string; vcs_kind: ProjectVcsKind };
+export type NewProjectPayload = { name: string; slug: string; description: string; default_path: string; vcs_kind: ProjectVcsKind };
 
 export type NewProjectModalProps = {
   open: boolean;
@@ -114,7 +115,9 @@ export function NewProjectModal({ open, onOpenChange, bridgeId, bridgeLabel, bri
     event.preventDefault();
     if (!canCreate) return;
     setError('');
-    const payload: NewProjectPayload = { name: name.trim(), description, default_path: folder.trim(), vcs_kind: vcsKind };
+    // The slug is sent explicitly (from the plaintext name, else the folder name)
+    // so it never depends on the hub's fallback, which only sees the sealed name.
+    const payload: NewProjectPayload = { name: name.trim(), slug: deriveProjectSlug(name, folder.trim()), description, default_path: folder.trim(), vcs_kind: vcsKind };
     try {
       const created = await createProject(payload).unwrap();
       await onCreated(String(created?.project_id || ''));

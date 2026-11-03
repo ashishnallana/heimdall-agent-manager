@@ -189,6 +189,7 @@ test('Browse picks a folder on the selected bridge; name, colocated jj and paylo
     assert.equal(body.default_path, `${ROOT}/heimdall`);
     assert.equal(body.vcs_kind, 'jj');
     assert.equal(await ctx.decrypt(body.name), 'heimdall');
+    assert.equal(body.slug, 'heimdall', 'the slug is sent explicitly, in plaintext (T17)');
     assert.deepEqual(ctx.created, ['proj_new']);
   });
 });
@@ -296,6 +297,7 @@ test('typed name and description are never overwritten; auto values follow a new
     const body = lastCreate(ctx)!.body;
     assert.equal(body.default_path, `${ROOT}/three`);
     assert.equal(body.vcs_kind, 'none');
+    assert.equal(body.slug, 'three');
     assert.ok(!body.description || (await ctx.decrypt(body.description)) === '', 'another folder\'s notes are not sent');
   });
   // The same when the new folder's instruction file cannot be read, or the

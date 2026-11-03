@@ -70,7 +70,6 @@ import {
 
 interface FormState {
   name: string;
-  slug: string;
   description: string;
   repoUrl: string;
   vcsKind: string;
@@ -79,7 +78,6 @@ interface FormState {
 
 const EMPTY_FORM: FormState = {
   name: '',
-  slug: '',
   description: '',
   repoUrl: '',
   vcsKind: '',
@@ -195,7 +193,6 @@ export default function ProjectFormPage({ projectId }: { projectId?: string }) {
     if (!record) return;
     const next: FormState = {
       name: record.name,
-      slug: record.slug,
       description: record.description,
       repoUrl: record.repoUrl,
       vcsKind: record.vcsKind,
@@ -231,7 +228,6 @@ export default function ProjectFormPage({ projectId }: { projectId?: string }) {
       const original = originalRef.current;
       if (original.description.trim() && !form.description.trim()) next.description = CANNOT_CLEAR_MESSAGE;
       if (original.repoUrl.trim() && !form.repoUrl.trim()) next.repoUrl = CANNOT_CLEAR_MESSAGE;
-      if (original.slug.trim() && !form.slug.trim()) next.slug = CANNOT_CLEAR_MESSAGE;
       if (original.vcsKind.trim() && !form.vcsKind.trim()) next.vcsKind = CANNOT_CLEAR_MESSAGE;
     }
 
@@ -256,7 +252,6 @@ export default function ProjectFormPage({ projectId }: { projectId?: string }) {
     setSaving(true);
     const payload = {
       name: form.name.trim(),
-      slug: form.slug.trim(),
       description: form.description.trim(),
       repo_url: form.repoUrl.trim(),
       vcs_kind: form.vcsKind.trim(),
@@ -375,17 +370,8 @@ export default function ProjectFormPage({ projectId }: { projectId?: string }) {
           </Select>
         </FormField>
 
-        <FormField label="Slug" error={errors.slug} hint="Optional. Defaults to the name. Used in search and in generated paths.">
-          <Input
-            value={form.slug}
-            onChange={(next) => update('slug', next)}
-            width="full"
-            invalid={Boolean(errors.slug)}
-            data-debug-id="project-form-slug"
-            className="font-mono"
-          />
-        </FormField>
-
+        {/* No Slug field (T17): the slug is derived from the name when the project
+            is created (createProject) and is never shown or edited in the UI. */}
         {editing && record ? (
           <FormField label="Project ID" hint="Set when the project was created and never changes.">
             <Input value={record.projectId} onChange={() => undefined} width="full" disabled readOnly data-debug-id="project-form-id" className="font-mono" />

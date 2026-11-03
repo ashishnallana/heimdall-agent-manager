@@ -122,13 +122,43 @@ bridge_reply_refusal :: proc(reply, bridge_id: string) -> (ok: bool, err: domain
 }
 
 
+// default_project_slug picks the slug for a create request that sent none. A
+// plaintext name is kept as before. A vault-armored name (the UI encrypts the name
+// client-side when the vault is unlocked) is ciphertext, so it is never copied into
+// the slug: the slug comes from the last segment of default_path instead, lowercased
+// with every run outside [a-z0-9] turned into '-', or "project" when that is empty.
+default_project_slug :: proc(name, default_path: string, allocator := context.allocator) -> string {
+	if !domain.is_vault_armored(name) do return name
+	trimmed := strings.trim_right(default_path, "/\\")
+	last := trimmed
+	if idx := strings.last_index_any(trimmed, "/\\"); idx >= 0 do last = trimmed[idx + 1:]
+	b := strings.builder_make(allocator)
+	pending_dash := false
+	for ch in last {
+		c := ch
+		if c >= 'A' && c <= 'Z' do c += 'a' - 'A'
+		if (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') {
+			if pending_dash && strings.builder_len(b) > 0 do strings.write_byte(&b, '-')
+			pending_dash = false
+			strings.write_rune(&b, c)
+		} else {
+			pending_dash = true
+		}
+	}
+	if strings.builder_len(b) == 0 {
+		strings.builder_destroy(&b)
+		return "project"
+	}
+	return strings.to_string(b)
+}
+
 create :: proc(service: ^Project_Service, auth: contracts.Auth_Context, input: Create_Project_Input) -> (domain.Project, bool, domain.Domain_Error) {
 	owner, ok, err := ownership.owner_from_auth(auth)
 	if !ok do return domain.Project{}, false, err
 	if input.name == "" do return domain.Project{}, false, domain.domain_error(.Validation_Failed, "project name is required")
 	if input.default_path == "" do return domain.Project{}, false, domain.domain_error(.Validation_Failed, "default_path is required")
 	now := platform.clock_now(service.clock)
-	slug := input.slug; if slug == "" do slug = input.name
+	slug := input.slug; if slug == "" do slug = default_project_slug(input.name, input.default_path)
 	project := domain.Project{project_id = domain.Project_ID(platform.generate_id(service.ids, "proj_")), owner_user_id = owner, name = input.name, slug = slug, description = input.description, repo_url = input.repo_url, vcs_kind = input.vcs_kind, default_path = input.default_path, created_at = now, updated_at = now}
 	return iface.project_save(service.projects, project)
 }

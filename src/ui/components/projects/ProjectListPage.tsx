@@ -379,7 +379,7 @@ export default function ProjectListPage({ selectedId = '' }: { selectedId?: stri
           // Says what IS searched, so a miss reads as a miss rather than as a
           // broken search: the index covers name, id, slug, repo URL and vcs kind
           // — but NOT the description (`search_repo_sqlite.odin:708-722`).
-          description="Search covers project names, paths, slugs and repository URLs — not descriptions."
+          description="Search covers project names, paths and repository URLs — not descriptions."
           action={<Button variant="secondary" onClick={() => { setQueryInput(''); applyUrlState({ ...urlState, q: '' }); }}>Clear search</Button>}
         />
       );
