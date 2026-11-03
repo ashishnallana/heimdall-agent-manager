@@ -402,3 +402,120 @@ test_rollover_ingest_stop_triggers_request_and_withholds_idle :: proc(t: ^testin
 	_, _, pct := bridge_ext_context_window_for(id)
 	testing.expect_value(t, pct, -1)
 }
+
+// Antigravity-style stream: tool.end with metrics only, no usage block. The
+// estimate (x1.5) drives the state machine to Pending at >= 70% of 200K.
+@(test)
+test_rollover_pending_from_estimate_only_stream :: proc(t: ^testing.T) {
+	roll_begin()
+	id := "inst_test_roll_estimate"
+	defer roll_end(id)
+	bridge_runtime_mark_start_success(id)
+	now := bridge_runtime_now_ms()
+	ev :: proc(est: string) -> string {
+		return strings.concatenate({`{"schema":"ham.ext.v1","provider":"antigravity","ext_version":"0.1.0","event":"tool.end","ts":"2026-11-02T06:00:00Z","session_id":"s","tool":{"name":"Read","use_id":"tu"},"metrics":{"input_bytes":1,"response_bytes":1,"est_tokens":`, est, `}}`}, context.temp_allocator)
+	}
+	for raw in ([]string{ev("50000"), ev("30000")}) { // 80K * 1.5 = 120K = 60%
+		res := bridge_ext_ingest(Bridge_Local_Agent_Token_Record{agent_instance_id = id, instance_token = "tok_test", role = .Agent}, raw, now)
+		bridge_ext_ingest_result_destroy(&res)
+	}
+	testing.expect_value(t, bridge_rollover_phase_of(id), Bridge_Rollover_Phase.Normal)
+	res := bridge_ext_ingest(Bridge_Local_Agent_Token_Record{agent_instance_id = id, instance_token = "tok_test", role = .Agent}, ev("15000"), now + 1) // 95K*1.5 = 142.5K = 71%
+	bridge_ext_ingest_result_destroy(&res)
+	_, _, pct := bridge_ext_context_window_for(id)
+	testing.expect(t, pct >= 70, "estimate pct >= 70")
+	testing.expect_value(t, bridge_rollover_phase_of(id), Bridge_Rollover_Phase.Pending)
+}
+
+// pane_diff idle (no extension, e.g. Pi) drives Pending -> Requested -> restart.
+@(test)
+test_rollover_pane_diff_idle_advances_rollover :: proc(t: ^testing.T) {
+	roll_begin()
+	id := "inst_test_roll_pane"
+	defer roll_end(id)
+	now := bridge_runtime_now_ms()
+	roll_event(id, 85, false, now)
+	testing.expect_value(t, bridge_rollover_phase_of(id), Bridge_Rollover_Phase.Pending)
+	bridge_rollover_on_activity(id, "working", "pane_diff", now + 1)
+	testing.expect_value(t, len(roll_rec.requests), 0)
+	// Only pane_diff is handled here; other sources go through their own path.
+	bridge_rollover_on_activity(id, "idle", "wrapper", now + 2)
+	testing.expect_value(t, len(roll_rec.requests), 0)
+	bridge_rollover_on_activity(id, "idle", "pane_diff", now + 3)
+	testing.expect_value(t, bridge_rollover_phase_of(id), Bridge_Rollover_Phase.Requested)
+	testing.expect_value(t, len(roll_rec.requests), 1)
+
+	rec := Bridge_Local_Agent_Token_Record{agent_instance_id = id, instance_token = "itok", role = .Agent}
+	resp := bridge_local_handle_agent_method("req_p", "agent.chat.send", strings.concatenate({`{"to":"`, id, `","body":"handoff"}`}, context.temp_allocator), rec)
+	testing.expect(t, strings.contains(resp, "msg_pctx_1"), resp)
+	testing.expect_value(t, bridge_rollover_phase_of(id), Bridge_Rollover_Phase.Restarting)
+	bridge_rollover_on_activity(id, "idle", "pane_diff", now + 4)
+	testing.expect_value(t, len(roll_rec.restarts), 1)
+}
+
+// waiting_user / waiting_approval are blocked prompts (the presentation layer
+// maps them to idle), so they must never deliver the handoff or restart.
+@(test)
+test_rollover_pane_diff_waiting_is_not_idle :: proc(t: ^testing.T) {
+	roll_begin()
+	id := "inst_test_roll_pane_wait"
+	defer roll_end(id)
+	now := bridge_runtime_now_ms()
+	roll_event(id, 85, false, now)
+	testing.expect_value(t, bridge_rollover_phase_of(id), Bridge_Rollover_Phase.Pending)
+	bridge_rollover_on_activity(id, "waiting_user", "pane_diff", now + 1)
+	bridge_rollover_on_activity(id, "waiting_approval", "pane_diff", now + 2)
+	testing.expect_value(t, bridge_rollover_phase_of(id), Bridge_Rollover_Phase.Pending)
+	testing.expect_value(t, len(roll_rec.requests), 0)
+	bridge_rollover_on_activity(id, "idle", "pane_diff", now + 3)
+	testing.expect_value(t, bridge_rollover_phase_of(id), Bridge_Rollover_Phase.Requested)
+	testing.expect_value(t, len(roll_rec.requests), 1)
+
+	rec := Bridge_Local_Agent_Token_Record{agent_instance_id = id, instance_token = "itok", role = .Agent}
+	_ = bridge_local_handle_agent_method("req_w", "agent.chat.send", strings.concatenate({`{"to":"`, id, `","body":"handoff"}`}, context.temp_allocator), rec)
+	testing.expect_value(t, bridge_rollover_phase_of(id), Bridge_Rollover_Phase.Restarting)
+	bridge_rollover_on_activity(id, "waiting_user", "pane_diff", now + 4)
+	testing.expect_value(t, len(roll_rec.restarts), 0)
+	bridge_rollover_on_activity(id, "idle", "pane_diff", now + 5)
+	testing.expect_value(t, len(roll_rec.restarts), 1)
+}
+
+// ext + pane_diff both reporting idle in one tick yield a single request/restart.
+@(test)
+test_rollover_duplicate_idle_from_two_sources_acts_once :: proc(t: ^testing.T) {
+	roll_begin()
+	id := "inst_test_roll_dup"
+	defer roll_end(id)
+	now := bridge_runtime_now_ms()
+	roll_event(id, 85, false, now)
+	bridge_rollover_on_ext_event(id, true, now + 1)
+	bridge_rollover_on_activity(id, "idle", "pane_diff", now + 1)
+	testing.expect_value(t, len(roll_rec.requests), 1)
+
+	rec := Bridge_Local_Agent_Token_Record{agent_instance_id = id, instance_token = "itok", role = .Agent}
+	_ = bridge_local_handle_agent_method("req_d", "agent.chat.send", strings.concatenate({`{"to":"`, id, `","body":"handoff"}`}, context.temp_allocator), rec)
+	bridge_rollover_on_activity(id, "idle", "pane_diff", now + 2)
+	bridge_rollover_on_ext_event(id, true, now + 2)
+	bridge_rollover_on_activity(id, "idle", "pane_diff", now + 2)
+	testing.expect_value(t, len(roll_rec.restarts), 1)
+	testing.expect_value(t, len(roll_rec.requests), 1)
+}
+
+// An idle withheld from pane_diff during a rollover is re-reported with its
+// source once the rollover ends without a restart.
+@(test)
+test_rollover_pane_diff_idle_withheld_then_rereported :: proc(t: ^testing.T) {
+	roll_begin()
+	id := "inst_test_roll_pane_withheld"
+	defer roll_end(id)
+	now := bridge_runtime_now_ms()
+	roll_event(id, 85, true, now) // Pending -> Requested
+	testing.expect_value(t, bridge_rollover_phase_of(id), Bridge_Rollover_Phase.Requested)
+	testing.expect_value(t, bridge_rollover_filter_activity(id, "idle", "pane_diff"), "active")
+	// Request times out twice -> alert, finish; the withheld idle is re-reported.
+	roll_tick(now + 10 * 60 * 1000)
+	roll_tick(now + 20 * 60 * 1000)
+	testing.expect_value(t, bridge_rollover_phase_of(id), Bridge_Rollover_Phase.Normal)
+	testing.expect_value(t, len(roll_rec.idles), 1)
+	testing.expect(t, strings.has_suffix(roll_rec.idles[0], "|pane_diff"), roll_rec.idles[0])
+}

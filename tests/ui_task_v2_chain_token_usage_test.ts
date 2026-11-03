@@ -158,3 +158,25 @@ test('contexts use their own snapshot thresholds, not the first/historical pair'
   assert.equal(u.agents[0].instances[1].context!.tone, 'warning');
   assert.equal(u.agents[1].context!.tone, 'danger');
 });
+
+test('chain context carries estimate provenance and effective tokens', async () => {
+  const fig0 = fig(1000, 10, 10, 1);
+  const payload = {
+    has_data: true, total: fig0,
+    agents: [{
+      agent_id: 'a1', agent_name: 'a1', has_data: true, live_instances: 1, lifetime: fig0,
+      context: { pct: 75, tokens: 150000, window: 200000, context_source: 'estimate', agent_instance_id: 'e1' },
+      instances: [{ agent_instance_id: 'e1', display_name: 'e1', runtime_status: 'running', live: true, has_data: true, snapshot_counted: false, lifetime: fig0,
+        usage_supported: false, context_pct: 75, context_source: 'estimate', estimated_context_tokens: 150000, context_window: 200000 }],
+    }],
+  };
+  const u = model.normalizeChainTokenUsage(payload)!;
+  assert.equal(u.agents[0].context!.isEstimate, true);
+  assert.equal(u.agents[0].context!.tokens, 150000);
+  assert.equal(u.agents[0].instances[0].context!.isEstimate, true);
+  assert.equal(u.agents[0].instances[0].context!.tokens, 150000);
+  const html = await render(view.ChainTokenUsageView({ usage: u }));
+  assert.match(html, /~75%/);
+  assert.match(html, /estimated from tool traffic/);
+  assert.match(html, /~150K/);
+});

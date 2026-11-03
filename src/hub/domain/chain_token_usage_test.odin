@@ -125,3 +125,25 @@ test_chain_token_usage_per_row_thresholds :: proc(t: ^testing.T) {
 	testing.expect_value(t, usage.warn_pct, 60)
 	testing.expect_value(t, usage.rollover_pct, 80)
 }
+
+// An estimate-only live instance (Antigravity: metrics, no usage block) drives
+// the "now" context with effective tokens and estimate provenance; the raw
+// provider lifetime accounting stays untouched.
+@(test)
+test_chain_token_usage_estimate_context :: proc(t: ^testing.T) {
+	usage := chain_token_usage_aggregate([]Agent_Instance{
+		{agent_instance_id = "inst_est", agent_id = "agt_a", runtime_status = "running",
+		 token_usage_json = `{"tool_calls":5,"est_tokens_total":100000,"context_source":"estimate","estimated_context_tokens":150000,"context_window":200000,"run_count":1,"compactions":0,"updated_at_ms":1}`},
+	}, nil, context.temp_allocator)
+	a := usage.agents[0]
+	row := a.instances[0]
+	testing.expect_value(t, row.context_pct, 75)
+	testing.expect_value(t, row.context_tokens, 150000)
+	testing.expect(t, row.context_estimate)
+	testing.expect_value(t, a.context_pct, 75)
+	testing.expect_value(t, a.context_tokens, 150000)
+	testing.expect(t, a.context_estimate)
+	// Lifetime context is provider-only: the estimate is not added.
+	testing.expect_value(t, a.lifetime.context_tokens, 0)
+	testing.expect_value(t, a.lifetime.est_tool_tokens, 100000)
+}

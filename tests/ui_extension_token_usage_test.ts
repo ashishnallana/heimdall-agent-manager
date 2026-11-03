@@ -150,3 +150,35 @@ test('usage_supported: unavailable copy when false, "waiting for signal" when tr
   // Unknown capability without a figure stays hidden.
   assert.equal(view.ContextUsageBadge({ instance: { token_usage: base }, instanceId: 'inst_x' }), null);
 });
+
+test('estimate-only snapshot renders a "~" prefix and the estimate tooltip', async () => {
+  const est = { tool_calls: 5, est_tokens_total: 100000, context_source: 'estimate', estimated_context_tokens: 150000, context_window: 200000, context_pct: 75, compactions: 0, updated_at_ms: 1 };
+  const u = model.normalizeTokenUsage(est)!;
+  assert.equal(u.isEstimate, true);
+  assert.equal(u.contextTokens, null);
+  assert.equal(u.contextPct, 75);
+  const badge = model.contextBadge({ token_usage: est })!;
+  assert.equal(badge.label, 'ctx ~75%');
+  assert.equal(badge.state, 'value');
+  assert.match(badge.tooltip, /estimated from tool traffic/);
+  const meter = await render(view.ContextMeter({ instance: { token_usage: est } }));
+  assert.match(meter, /~75%/);
+  assert.match(meter, /estimated from tool traffic/);
+  // Provider figure wins: no "~".
+  const real = model.normalizeTokenUsage({ ...est, context_tokens: 40000, context_pct: 20 })!;
+  assert.equal(real.isEstimate, false);
+  assert.equal(model.contextBadge({ token_usage: { ...est, context_tokens: 40000, context_pct: 20 } })!.label, 'ctx 20%');
+  assert.doesNotMatch(await render(view.ContextMeter({ instance: { token_usage: { ...est, context_tokens: 40000, context_pct: 20 } } })), /~75|estimated from/);
+});
+
+test('estimate renders even when the provider has no usage capability (Antigravity)', async () => {
+  const est = { tool_calls: 5, est_tokens_total: 100000, context_source: 'estimate', estimated_context_tokens: 150000, context_window: 200000, context_pct: 75, usage_supported: false, compactions: 0, updated_at_ms: 1 };
+  const badge = model.contextBadge({ provider: 'antigravity', token_usage: est })!;
+  assert.equal(badge.state, 'value');
+  assert.equal(badge.label, 'ctx ~75%');
+  const meter = await render(view.ContextMeter({ instance: { provider: 'antigravity', token_usage: est } }));
+  assert.match(meter, /~75%/);
+  assert.doesNotMatch(meter, /unavailable/);
+  // Without any figure it is still unsupported.
+  assert.equal(model.contextBadge({ token_usage: { ...est, context_source: undefined, estimated_context_tokens: undefined, context_pct: undefined } })!.state, 'unsupported');
+});

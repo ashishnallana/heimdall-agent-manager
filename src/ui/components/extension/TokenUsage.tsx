@@ -6,6 +6,7 @@ import { ProgressBar, StatusPill } from '@ui';
 import {
   resolveThresholds,
   CONTEXT_WAITING_TEXT,
+  CONTEXT_ESTIMATE_TEXT,
   contextBadge,
   contextTrackingState,
   contextUnavailableText,
@@ -60,11 +61,11 @@ export function ContextMeter({ instance }: { instance: any }) {
         value={usage.contextPct}
         tone={METER_TONE[tone]}
         size="sm"
-        label={`Context ${usage.contextPct}% of window`}
+        label={`Context ${usage.isEstimate ? '~' : ''}${usage.contextPct}% of window`}
       />
       <div className="flex flex-wrap items-center justify-between gap-x-3 text-body-sm">
-        <span className="text-primary" data-debug-id="live-instance-context-pct">
-          {usage.contextPct}% · {formatTokens(usage.contextTokens ?? 0)}{window ? ` / ${window}` : ''} tokens
+        <span className="text-primary" data-debug-id="live-instance-context-pct" data-context-estimate={usage.isEstimate ? 'true' : undefined} title={usage.isEstimate ? CONTEXT_ESTIMATE_TEXT : undefined}>
+          {usage.isEstimate ? '~' : ''}{usage.contextPct}% · {usage.isEstimate ? '~' : ''}{formatTokens(usage.effectiveContextTokens ?? 0)}{window ? ` / ${window}` : ''} tokens
         </span>
         <span className="text-muted" data-debug-id="live-instance-context-source">
           {source ? `window: ${source}` : ''}

@@ -17,6 +17,8 @@ AGENT_TOKEN_USAGE_MAX :: 1_000_000_000_000
 // (src/bridge/context_windows.json) is authoritative and rides on every
 // snapshot as warn_pct/rollover_pct; these apply when a snapshot omits them
 // (older bridge). warn = amber meter only, rollover = restart with a fresh context.
+// context_source value for a figure the bridge estimated from tool traffic.
+AGENT_TOKEN_ESTIMATE_SOURCE :: "estimate"
 AGENT_TOKEN_WARN_PCT :: 40
 AGENT_TOKEN_ROLLOVER_PCT :: 70
 
@@ -25,6 +27,10 @@ Agent_Token_Usage :: struct {
 	est_tokens_total:    i64,
 	has_context:         bool,
 	context_tokens:      i64,
+	// Bridge tool-traffic estimate (context_source "estimate"): only set when the
+	// provider reported no context_tokens; it never replaces a reported figure.
+	has_estimate:        bool,
+	estimated_context_tokens: i64,
 	context_window:      i64, // 0 = not reported
 	warn_pct:            int, // 0 = not reported (use AGENT_TOKEN_WARN_PCT)
 	rollover_pct:        int, // 0 = not reported (use AGENT_TOKEN_ROLLOVER_PCT)
@@ -79,6 +85,9 @@ agent_token_usage_from_json :: proc(raw: string) -> (Agent_Token_Usage, bool) {
 	if u.tool_calls, _, ok = token_int(obj, "tool_calls", true); !ok do return {}, false
 	if u.est_tokens_total, _, ok = token_int(obj, "est_tokens_total", true); !ok do return {}, false
 	if u.context_tokens, u.has_context, ok = token_int(obj, "context_tokens", false); !ok do return {}, false
+	if source, is_str := obj["context_source"].(json.String); is_str && string(source) == AGENT_TOKEN_ESTIMATE_SOURCE && !u.has_context {
+		if u.estimated_context_tokens, u.has_estimate, ok = token_int(obj, "estimated_context_tokens", false); !ok do return {}, false
+	}
 	if u.context_window, _, ok = token_int(obj, "context_window", false); !ok do return {}, false
 	if u.output_tokens_total, u.has_output_total, ok = token_int(obj, "output_tokens_total", false); !ok do return {}, false
 	if u.compactions, _, ok = token_int(obj, "compactions", false); !ok do return {}, false
@@ -97,11 +106,20 @@ agent_token_usage_from_json :: proc(raw: string) -> (Agent_Token_Usage, bool) {
 	return u, true
 }
 
-// agent_token_usage_context_pct is context_tokens as a whole percentage of the
-// window (floor), or -1 when either is unknown.
+// agent_token_usage_effective_context is the figure context_pct is computed
+// from: the provider-reported context_tokens, else the bridge's estimate.
+agent_token_usage_effective_context :: proc(u: Agent_Token_Usage) -> (tokens: i64, is_estimate: bool, ok: bool) {
+	if u.has_context do return u.context_tokens, false, true
+	if u.has_estimate do return u.estimated_context_tokens, true, true
+	return 0, false, false
+}
+
+// agent_token_usage_context_pct is the effective context as a whole percentage
+// of the window (floor), or -1 when either is unknown.
 agent_token_usage_context_pct :: proc(u: Agent_Token_Usage) -> i64 {
-	if !u.has_context || u.context_window <= 0 do return -1
-	return u.context_tokens * 100 / u.context_window
+	tokens, _, ok := agent_token_usage_effective_context(u)
+	if !ok || u.context_window <= 0 do return -1
+	return tokens * 100 / u.context_window
 }
 
 // agent_token_usage_json renders the canonical snapshot the hub stores and
@@ -110,6 +128,7 @@ agent_token_usage_json :: proc(u: Agent_Token_Usage, allocator := context.alloca
 	b := strings.builder_make(context.temp_allocator)
 	strings.write_string(&b, fmt.tprintf("{{\"tool_calls\":%d,\"est_tokens_total\":%d", u.tool_calls, u.est_tokens_total))
 	if u.has_context do strings.write_string(&b, fmt.tprintf(",\"context_tokens\":%d", u.context_tokens))
+	if u.has_estimate && !u.has_context do strings.write_string(&b, fmt.tprintf(",\"context_source\":\"%s\",\"estimated_context_tokens\":%d", AGENT_TOKEN_ESTIMATE_SOURCE, u.estimated_context_tokens))
 	if u.context_window > 0 do strings.write_string(&b, fmt.tprintf(",\"context_window\":%d", u.context_window))
 	if u.window_source != "" do strings.write_string(&b, fmt.tprintf(",\"window_source\":\"%s\"", u.window_source))
 	if u.warn_pct > 0 do strings.write_string(&b, fmt.tprintf(",\"warn_pct\":%d", u.warn_pct))

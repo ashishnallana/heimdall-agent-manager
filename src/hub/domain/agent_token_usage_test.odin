@@ -54,3 +54,20 @@ test_agent_token_usage_thresholds_round_trip :: proc(t: ^testing.T) {
 	testing.expect_value(t, u.warn_pct, 0)
 	testing.expect_value(t, u.rollover_pct, 0)
 }
+
+@(test)
+test_agent_token_usage_estimate_fields :: proc(t: ^testing.T) {
+	// Estimate only: accepted, pct recomputed from the estimate.
+	u, ok := agent_token_usage_from_json(`{"tool_calls":3,"est_tokens_total":100000,"context_source":"estimate","estimated_context_tokens":150000,"context_window":200000,"context_pct":1,"compactions":0,"updated_at_ms":9}`)
+	testing.expect(t, ok)
+	testing.expect_value(t, agent_token_usage_context_pct(u), i64(75))
+	testing.expect_value(t, agent_token_usage_json(u, context.temp_allocator), `{"tool_calls":3,"est_tokens_total":100000,"context_source":"estimate","estimated_context_tokens":150000,"context_window":200000,"context_pct":75,"compactions":0,"updated_at_ms":9}`)
+	// Provider-reported tokens win over a stale estimate.
+	u, ok = agent_token_usage_from_json(`{"tool_calls":3,"est_tokens_total":100000,"context_tokens":20000,"context_source":"estimate","estimated_context_tokens":150000,"context_window":200000,"compactions":0,"updated_at_ms":9}`)
+	testing.expect(t, ok)
+	testing.expect_value(t, agent_token_usage_context_pct(u), i64(10))
+	testing.expect(t, !strings.contains(agent_token_usage_json(u, context.temp_allocator), "estimate"))
+	// Invalid estimate rejected.
+	_, ok = agent_token_usage_from_json(`{"tool_calls":3,"est_tokens_total":1,"context_source":"estimate","estimated_context_tokens":-1,"compactions":0,"updated_at_ms":9}`)
+	testing.expect(t, !ok)
+}

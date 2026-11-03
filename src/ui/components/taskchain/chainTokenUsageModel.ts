@@ -25,6 +25,8 @@ export interface ChainTokenContext {
   tokens: number;
   window: number | null;
   tone: ContextTone;
+  /** True when tokens/pct come from the bridge's tool-traffic estimate. */
+  isEstimate: boolean;
 }
 
 export interface ChainTokenInstance {
@@ -98,12 +100,11 @@ export function normalizeFigures(raw: unknown): ChainTokenFigures {
   };
 }
 
-
-function makeContext(pct: number | null, tokens: unknown, window: unknown, row: Record<string, any>, summary: Thresholds): ChainTokenContext | null {
+function makeContext(pct: number | null, tokens: unknown, window: unknown, row: Record<string, any>, summary: Thresholds, estimate = false): ChainTokenContext | null {
   if (pct === null) return null;
   // The row's own snapshot thresholds win; the summary pair is only the fallback for rows that carry none.
   const th = row.warn_pct != null && row.rollover_pct != null ? resolveThresholds(count(row.warn_pct), count(row.rollover_pct)) : summary;
-  return { pct, tokens: count(tokens) ?? 0, window: count(window) || null, tone: contextTone(pct, th.warnPct, th.rolloverPct) };
+  return { pct, tokens: count(tokens) ?? 0, window: count(window) || null, tone: contextTone(pct, th.warnPct, th.rolloverPct), isEstimate: estimate };
 }
 
 function normalizeInstance(raw: unknown, th: Thresholds): ChainTokenInstance | null {
@@ -120,7 +121,10 @@ function normalizeInstance(raw: unknown, th: Thresholds): ChainTokenInstance | n
     hasData: raw.has_data === true,
     lifetime: normalizeFigures(raw.lifetime),
     runCount: count(raw.run_count),
-    context: live ? makeContext(count(raw.context_pct), raw.context_tokens, raw.context_window, raw, th) : null,
+    context: live ? (() => {
+      const est = raw.context_source === 'estimate' && count(raw.context_tokens) === null;
+      return makeContext(count(raw.context_pct), est ? raw.estimated_context_tokens : raw.context_tokens, raw.context_window, raw, th, est);
+    })() : null,
     usageSupported: typeof raw.usage_supported === 'boolean' ? raw.usage_supported : null,
   };
 }
@@ -143,7 +147,7 @@ function normalizeAgent(raw: unknown, th: Thresholds): ChainTokenAgent | null {
     .filter((i: ChainTokenInstance | null): i is ChainTokenInstance => i !== null);
   if (!agentId && instances.length === 0) return null;
   const ctx = isObject(raw.context) ? raw.context : null;
-  const context = ctx ? makeContext(count(ctx.pct), ctx.tokens, ctx.window, ctx, th) : null;
+  const context = ctx ? makeContext(count(ctx.pct), ctx.tokens, ctx.window, ctx, th, ctx.context_source === 'estimate') : null;
   return {
     agentId,
     name: String(raw.agent_name || '').trim() || agentId || 'Unknown agent',

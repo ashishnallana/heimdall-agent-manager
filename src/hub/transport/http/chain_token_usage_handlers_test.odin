@@ -71,6 +71,31 @@ test_task_chain_token_usage_handler :: proc(t: ^testing.T) {
 	testing.expect(t, missing.status >= 400, "unknown chain is rejected")
 }
 
+// Estimate-only live snapshot: the chain payload carries context_source,
+// the effective (estimated) tokens and the pct, never a raw 0 context_tokens.
+@(test)
+test_task_chain_token_usage_handler_estimate :: proc(t: ^testing.T) {
+	f := wire_setup(t, "token_usage_est")
+	defer wire_teardown(f)
+	path := fmt.tprintf("/api/v1/task-chains/%s/token-usage", f.chain_id)
+	_, _ = iface.agent_update_token_usage(&f.ag_repo, f.instance_id, f.bridge_pin,
+		`{"tool_calls":5,"est_tokens_total":100000,"context_source":"estimate","estimated_context_tokens":150000,"context_window":200000,"run_count":1,"compactions":0,"updated_at_ms":1}`, "2026-11-02T10:00:00Z")
+	resp := task_chain_token_usage_handler(&f.th, wire_cookie_request(f, "GET", path, ""))
+	testing.expect_value(t, resp.status, 200)
+	data := token_usage_data(t, resp.body)
+	agent := data["agents"].(json.Array)[0].(json.Object)
+	ctx := agent["context"].(json.Object)
+	testing.expect_value(t, ctx["pct"].(json.Integer), 75)
+	testing.expect_value(t, ctx["tokens"].(json.Integer), 150000)
+	testing.expect_value(t, ctx["context_source"].(json.String), "estimate")
+	inst := agent["instances"].(json.Array)[0].(json.Object)
+	testing.expect_value(t, inst["context_pct"].(json.Integer), 75)
+	testing.expect_value(t, inst["context_source"].(json.String), "estimate")
+	testing.expect_value(t, inst["estimated_context_tokens"].(json.Integer), 150000)
+	_, raw := inst["context_tokens"]
+	testing.expect(t, !raw, "raw provider context_tokens stays absent")
+}
+
 @(private = "file")
 token_usage_data :: proc(t: ^testing.T, body: string) -> json.Object {
 	v, err := json.parse_string(body, json.DEFAULT_SPECIFICATION, true, context.temp_allocator)

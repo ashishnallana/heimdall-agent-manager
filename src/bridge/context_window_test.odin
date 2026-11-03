@@ -376,3 +376,33 @@ test_ctxwin_snapshot_thresholds_match_shipped_config :: proc(t: ^testing.T) {
 	testing.expect_value(t, root["warn_pct"].(json.Integer), json.Integer(c.warn_pct))
 	testing.expect_value(t, root["rollover_pct"].(json.Integer), json.Integer(c.rollover_pct))
 }
+
+@(test)
+@(test)
+test_ctxwin_usage_dark_log_state_survives_relaunch :: proc(t: ^testing.T) {
+	sync.mutex_lock(&bridge_test_config_mutex); defer sync.mutex_unlock(&bridge_test_config_mutex)
+	saved, scratch := ctxwin_scratch_begin("inst")
+	defer ctxwin_scratch_end(saved, scratch)
+
+	id := "inst_test_usage_dark_relaunch"
+	bridge_runtime_mark_start_success(id)
+	rec := Bridge_Local_Agent_Token_Record{agent_instance_id = id, instance_token = "tok_test", role = .Agent}
+	raw := `{"schema":"ham.ext.v1","provider":"claude","ext_version":"0.1.0","event":"tool.end","ts":"2026-11-02T06:00:00Z","session_id":"s-dark","tool":{"name":"Read"},"usage_unavailable":true}`
+	logged :: proc(id: string) -> string {
+		sync.mutex_lock(&bridge_ext_mutex); defer sync.mutex_unlock(&bridge_ext_mutex)
+		for s in bridge_ext_states do if s.agent_instance_id == id do return strings.clone(s.usage_dark_logged_session, context.temp_allocator)
+		return "?"
+	}
+	now := bridge_runtime_now_ms()
+	bridge_ext_note_launch(id, "claude", "sonnet", "")
+	res := bridge_ext_ingest(rec, raw, now)
+	bridge_ext_ingest_result_destroy(&res)
+	testing.expect_value(t, logged(id), "s-dark")
+	// Relaunch clears the marker (no dangling string), repeated launch is safe.
+	bridge_ext_note_launch(id, "claude", "sonnet", "")
+	testing.expect_value(t, logged(id), "")
+	bridge_ext_note_launch(id, "claude", "sonnet", "")
+	res = bridge_ext_ingest(rec, raw, now + 1)
+	bridge_ext_ingest_result_destroy(&res)
+	testing.expect_value(t, logged(id), "s-dark")
+}

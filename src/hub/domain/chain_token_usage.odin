@@ -54,6 +54,10 @@ Chain_Token_Instance :: struct {
 	lifetime:          Chain_Token_Figures,
 	// context_pct: current % of window, -1 unless live with a known context.
 	context_pct:       i64,
+	// Tokens behind context_pct (provider figure, else the bridge estimate) and
+	// whether that figure is an estimate.
+	context_tokens:    i64,
+	context_estimate:  bool,
 }
 
 Chain_Token_Agent :: struct {
@@ -67,6 +71,7 @@ Chain_Token_Agent :: struct {
 	// and the instance/window it belongs to.
 	context_pct:          i64,
 	context_tokens:       i64,
+	context_estimate:     bool,
 	context_window:       i64,
 	context_instance_id:  string,
 	// Thresholds of the snapshot that supplied context_* (0 = absent -> fallback).
@@ -130,7 +135,10 @@ chain_token_instance_from :: proc(inst: Agent_Instance) -> Chain_Token_Instance 
 				if u.has_output_total do live_run.output_tokens = u.output_tokens_total
 				chain_token_figures_add(&row.lifetime, live_run)
 			}
-			if row.live do row.context_pct = agent_token_usage_context_pct(u)
+			if row.live {
+				row.context_pct = agent_token_usage_context_pct(u)
+				row.context_tokens, row.context_estimate, _ = agent_token_usage_effective_context(u)
+			}
 		}
 	}
 	row.has_data = row.has_snapshot || row.has_counted
@@ -176,7 +184,8 @@ chain_token_usage_aggregate :: proc(instances: []Agent_Instance, agent_names: ma
 		chain_token_figures_add(&out.total, row.lifetime)
 		if row.context_pct > agent.context_pct {
 			agent.context_pct = row.context_pct
-			agent.context_tokens = row.snapshot.context_tokens
+			agent.context_tokens = row.context_tokens
+			agent.context_estimate = row.context_estimate
 			agent.context_window = row.snapshot.context_window
 			agent.context_instance_id = row.agent_instance_id
 			agent.context_warn_pct = row.snapshot.warn_pct
