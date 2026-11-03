@@ -16,6 +16,12 @@
  * or `renderMenu` for a custom body (the provider + model split, the agent
  * list/edit views). Either way the token owns open state, focus and motion.
  *
+ * `appearance="chip"` renders the same trigger + menu as a composer footer chip
+ * (32px, bg-300 fill, border-strong hairline, a 14px chevron that is always
+ * shown) for the provider + model and agent pickers (§3.3, §3.4). `side="top"`
+ * opens the desktop menu above the trigger; `menuMode="dialog"` hosts ordinary
+ * controls instead of menu items (the agent menu's edit view).
+ *
  * Keyboard: Enter/Space open; ArrowUp/Down/Home/End move; Esc closes and returns
  * focus to the token; typing in the search field filters the options.
  *
@@ -25,7 +31,7 @@
  * renders, and not at all under reduced motion.
  */
 import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
-import { Drawer, Icon, Input, Menu, useIsMobile } from '@ui';
+import { Drawer, Icon, Input, Menu, useIsMobile, type MenuMode } from '@ui';
 
 export interface SentenceTokenOption<V extends string = string> {
   value: V;
@@ -96,6 +102,16 @@ export interface SentenceTokenProps<V extends string = string> {
   onOpenChange?: (open: boolean) => void;
   disabled?: boolean;
   className?: string;
+  /** `token` (default): the dotted headline noun. `chip`: a composer footer chip. */
+  appearance?: 'token' | 'chip';
+  /** Desktop menu side. Default `bottom`; `top` for triggers near the viewport bottom. */
+  side?: 'bottom' | 'top';
+  /** `dialog` when the menu body holds ordinary controls rather than menu items. Default `menu`. */
+  menuMode?: MenuMode;
+  /** Extra classes on the desktop popup / sheet panel (e.g. `p-0` for a split layout). */
+  menuClassName?: string;
+  /** Accessible name of the trigger when its visible text is not enough (chips). */
+  triggerLabel?: string;
 }
 
 /** Case-insensitive match over the label, description text and keywords. */
@@ -111,7 +127,8 @@ export function filterSentenceTokenOptions<V extends string>(
   });
 }
 
-function prefersReducedMotion(): boolean {
+/** True when the user asked for reduced motion; animation classes are then left off entirely. */
+export function prefersReducedMotion(): boolean {
   return typeof window !== 'undefined' && !!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
 }
 
@@ -135,7 +152,13 @@ export function SentenceToken<V extends string = string>({
   onOpenChange,
   disabled = false,
   className,
+  appearance = 'token',
+  side = 'bottom',
+  menuMode = 'menu',
+  menuClassName,
+  triggerLabel,
 }: SentenceTokenProps<V>) {
+  const chip = appearance === 'chip';
   const isMobile = useIsMobile();
   const isControlled = openProp !== undefined;
   const [openState, setOpenState] = useState(false);
@@ -242,13 +265,23 @@ export function SentenceToken<V extends string = string>({
     <button
       ref={triggerRef}
       type="button"
-      aria-haspopup="menu"
+      aria-haspopup={menuMode === 'dialog' ? 'dialog' : 'menu'}
       aria-expanded={open}
+      aria-label={triggerLabel}
       disabled={disabled}
       data-debug-id={debugId}
       data-state={open ? 'open' : 'closed'}
       onClick={isMobile ? () => setOpen(!open) : undefined}
-      className={cx(
+      className={chip ? cx(
+        // Composer chip (DESIGN.md control height 32; 44px touch target on mobile).
+        'inline-flex max-w-full items-center gap-1.5 rounded-[var(--radius-md)] border border-strong bg-neutral-soft px-2.5 text-body-sm font-medium text-primary',
+        'transition-colors duration-fast ease-standard motion-reduce:transition-none hover:bg-strong',
+        open && 'bg-strong',
+        'focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus',
+        'disabled:cursor-not-allowed disabled:opacity-[.45]',
+        isMobile ? 'h-11' : 'h-8',
+        className,
+      ) : cx(
         // Rest (§3.2): inherits the headline type; radius 10px and padding 0 8px 2px are the spec's exact values.
         'group/tok -mx-0.5 inline-flex items-center gap-1.5 rounded-[10px] bg-transparent px-2 pb-0.5 text-primary',
         'underline decoration-faint decoration-dotted decoration-2 underline-offset-8',
@@ -267,11 +300,19 @@ export function SentenceToken<V extends string = string>({
       <span
         key={`v:${swap.count}`}
         data-token-value=""
-        className={cx('inline-block', animateSwap && 'animate-tok-swap')}
+        className={cx(chip ? 'inline-flex min-w-0 items-center gap-1.5 truncate' : 'inline-block', animateSwap && 'animate-tok-swap')}
       >
         {display}
       </span>
-      <span
+      {chip ? (
+        <span
+          aria-hidden="true"
+          data-token-chevron=""
+          className={cx('inline-flex flex-none text-muted transition-transform duration-base ease-standard motion-reduce:transition-none', open && 'rotate-180')}
+        >
+          <Icon name="chevron-down" size={14} />
+        </span>
+      ) : <span
         aria-hidden="true"
         data-token-chevron=""
         className={cx(
@@ -283,7 +324,7 @@ export function SentenceToken<V extends string = string>({
         )}
       >
         <Icon name="chevron-down" size={isMobile ? 16 : 18} />
-      </span>
+      </span>}
     </button>
   );
 
@@ -309,9 +350,10 @@ export function SentenceToken<V extends string = string>({
             onClose={close}
             header={searchField}
             variant="sheet"
+            mode={menuMode}
             autoFocus={open}
             data-debug-id={`${debugId}-menu`}
-            className="px-2 pb-4 pt-1 text-left font-sans text-body font-normal normal-case tracking-normal"
+            className={cx('px-2 pb-4 pt-1 text-left font-sans text-body font-normal normal-case tracking-normal', menuClassName)}
           >
             {body}
           </Menu.Panel>
@@ -330,11 +372,14 @@ export function SentenceToken<V extends string = string>({
       }}
       label={label}
       align={align}
+      side={side}
       variant="picker"
+      mode={menuMode}
       width={menuWidth}
       header={searchField}
       animated
       popupDebugId={`${debugId}-menu`}
+      className={menuClassName}
     >
       {body}
     </Menu>

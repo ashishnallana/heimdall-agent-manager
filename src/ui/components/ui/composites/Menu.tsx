@@ -28,6 +28,11 @@
  *     fast duration on close, then unmount (motion spec #5/#6).
  *   - `Menu.Panel`: the same keyboarded list without a trigger or popup
  *     positioning, for hosts such as a `Drawer` bottom sheet.
+ *   - `mode="dialog"`: the popup holds controls that are not menu items (toggle
+ *     buttons, a search field, a form), e.g. the launcher's "Edit favorites"
+ *     view. The popup becomes `role="dialog"`, the trigger `aria-haspopup="dialog"`,
+ *     Tab moves between its controls instead of closing it, and focus leaving it
+ *     closes it. Esc, outside-click and focus restore are unchanged.
  *
  * Accessibility (built in): trigger gets `aria-haspopup`/`aria-expanded`; the
  * list is `role="menu"`; items are `menuitem` or `menuitemradio` (+`aria-checked`)
@@ -54,6 +59,9 @@ import { Icon } from '../primitives/Icon';
 
 /** `default` keeps the original compact menu; `picker` is the DESIGN.md menu surface; `sheet` is a bottom-sheet list (48px rows). */
 export type MenuVariant = 'default' | 'picker' | 'sheet';
+
+/** `menu` (default) is the ARIA menu pattern; `dialog` is a non-modal popup of ordinary controls. */
+export type MenuMode = 'menu' | 'dialog';
 
 interface MenuCtx {
   close: (restoreFocus?: boolean) => void;
@@ -89,6 +97,8 @@ export interface MenuPanelProps extends RootClassNameProps {
   autoFocus?: boolean;
   /** Extra classes on the `role="menu"` list (the outer panel takes `className`). */
   listClassName?: string;
+  /** `dialog`: a popup of ordinary controls (see the file header). Default `menu`. */
+  mode?: MenuMode;
   style?: React.CSSProperties;
   children?: React.ReactNode;
 }
@@ -96,7 +106,7 @@ export interface MenuPanelProps extends RootClassNameProps {
 /** The roving-focus `role="menu"` list behind `Menu`. Hosts own placement and dismissal. */
 export const MenuPanel = React.forwardRef<HTMLDivElement, MenuPanelProps & Omit<React.HTMLAttributes<HTMLDivElement>, 'className' | 'children' | 'style'>>(
   function MenuPanel(
-    { label, onClose, header, variant = 'default', autoFocus = true, className, listClassName, style, children, ...rest },
+    { label, onClose, header, variant = 'default', autoFocus = true, mode = 'menu', className, listClassName, style, children, ...rest },
     forwardedRef,
   ) {
     const outerRef = useRef<HTMLDivElement | null>(null);
@@ -130,7 +140,8 @@ export const MenuPanel = React.forwardRef<HTMLDivElement, MenuPanelProps & Omit<
         return;
       }
       if (event.key === 'Tab') {
-        onClose(false);
+        // A dialog keeps native Tab order between its controls; leaving it closes (onBlur).
+        if (mode !== 'dialog') onClose(false);
         return;
       }
       const list = items();
@@ -177,6 +188,15 @@ export const MenuPanel = React.forwardRef<HTMLDivElement, MenuPanelProps & Omit<
     };
 
     const ctx = { close: onClose, variant };
+    const dialog = mode === 'dialog';
+    const onBlur = (event: React.FocusEvent<HTMLDivElement>) => {
+      rest.onBlur?.(event);
+      const next = event.relatedTarget as Node | null;
+      if (!dialog || !next || outerRef.current?.contains(next)) return;
+      // Inside a modal host (the mobile sheet) the host owns dismissal.
+      if (outerRef.current?.closest('[aria-modal="true"]')?.contains(next)) return;
+      onClose(false);
+    };
     const list = (
       <MenuContext.Provider value={ctx}>{children}</MenuContext.Provider>
     );
@@ -190,9 +210,10 @@ export const MenuPanel = React.forwardRef<HTMLDivElement, MenuPanelProps & Omit<
             setOuter(node);
             listRef.current = node;
           }}
-          role="menu"
+          role={dialog ? 'dialog' : 'menu'}
           aria-label={label}
           onKeyDown={onKeyDown}
+          onBlur={onBlur}
           style={style}
           className={cx(className, listClassName)}
         >
@@ -201,9 +222,9 @@ export const MenuPanel = React.forwardRef<HTMLDivElement, MenuPanelProps & Omit<
       );
     }
     return (
-      <div {...rest} ref={setOuter} onKeyDown={onKeyDown} style={style} className={className}>
+      <div {...rest} ref={setOuter} role={dialog ? 'dialog' : undefined} aria-label={dialog ? label : undefined} onKeyDown={onKeyDown} onBlur={onBlur} style={style} className={className}>
         {header}
-        <div ref={listRef} role="menu" aria-label={label} className={listClassName}>
+        <div ref={listRef} role={dialog ? 'group' : 'menu'} aria-label={label} className={listClassName}>
           {list}
         </div>
       </div>
@@ -244,6 +265,8 @@ export interface MenuProps extends RootClassNameProps {
   animated?: boolean;
   /** `data-debug-id` for the popup. */
   popupDebugId?: string;
+  /** `dialog`: a popup of ordinary controls (see the file header). Default `menu`. */
+  mode?: MenuMode;
 }
 
 const MenuRoot: React.FC<MenuProps> = ({
@@ -259,6 +282,7 @@ const MenuRoot: React.FC<MenuProps> = ({
   header,
   animated = false,
   popupDebugId,
+  mode = 'menu',
   className,
 }) => {
   const isControlled = openProp !== undefined;
@@ -320,7 +344,7 @@ const MenuRoot: React.FC<MenuProps> = ({
 
   // Clone the trigger to wire aria + toggle + ref.
   const triggerEl = React.cloneElement(trigger, {
-    'aria-haspopup': 'menu',
+    'aria-haspopup': mode === 'dialog' ? 'dialog' : 'menu',
     'aria-expanded': open,
     onClick: (e: React.MouseEvent) => {
       (trigger.props as { onClick?: (e: React.MouseEvent) => void }).onClick?.(e);
@@ -364,6 +388,7 @@ const MenuRoot: React.FC<MenuProps> = ({
           onClose={close}
           header={header}
           variant={variant}
+          mode={mode}
           autoFocus={open}
           data-debug-id={popupDebugId}
           data-state={open ? 'open' : 'closing'}

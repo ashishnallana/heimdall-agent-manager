@@ -1,10 +1,10 @@
 import ModelCatalogRefresh from '../providers/ModelCatalogRefresh';
-import { useState } from 'react';
 import { Combobox, Icon } from '@ui';
 import ProviderIcon from '../providers/ProviderIcon';
 import { useBridgeProviderStatus } from '../../api/endpoints/bridgeSupport';
 import { COMPOSER_BRIDGE_STATUS_LABEL, composerBridgeOptions } from '../../utils/composerBridgeOptions';
-export type RuntimeSelection = { bridgeId: string; provider: string; providerProfile?: string; model: string };
+import { useRuntimeProviderModels, type RuntimeSelection } from './useRuntimeProviderModels';
+export type { RuntimeSelection } from './useRuntimeProviderModels';
 export default function RuntimeConfigurationOptions({ bridges, selection, onChange, disabled, debugPrefix, requireReconfiguration = false }: { bridges: any[]; selection: RuntimeSelection; onChange: (next: RuntimeSelection) => void; disabled?: boolean; debugPrefix: string; requireReconfiguration?: boolean }) {
   // Archived bridges are not offered at all; offline ones are listed but disabled.
   const bridgeOptions = composerBridgeOptions(bridges, requireReconfiguration);
@@ -12,27 +12,9 @@ export default function RuntimeConfigurationOptions({ bridges, selection, onChan
   // Mounted only while the picker is open: provider status for the SELECTED bridge,
   // kept fresh while it stays open.
   const { capabilities: caps, loaded } = useBridgeProviderStatus(bridge, { live: true });
-  const selectedId = selection.providerProfile || selection.provider;
-  const providers = Array.from(new Set([...caps.map(c => c.profile_id || c.provider), selectedId].filter(Boolean)));
-  const capFor = (id: string) => caps.find(c => (c.profile_id || c.provider) === id);
-  const driverFor = (id: string) => capFor(id)?.provider || (id === selectedId ? selection.provider : '');
-
-  const modelsFor = (p: string) => capFor(p)?.models || [];
-  // Per-provider model picks for rows that are not the active selection, so a
-  // provider row keeps the model last chosen in it when it is re-selected.
-  const [rowModels, setRowModels] = useState<Record<string, string>>({});
-  const rowModel = (p: string) => p === selectedId ? selection.model : rowModels[p] || '';
-  const rememberCurrent = () => { if (selection.provider) setRowModels(prev => ({ ...prev, [selectedId]: selection.model })); };
-  const chooseProvider = (p: string) => {
-    if (p === selectedId) return;
-    rememberCurrent();
-    const remembered = rowModels[p];
-    onChange({ ...selection, provider: driverFor(p), ...(p !== driverFor(p) || selection.providerProfile ? { providerProfile: p } : {}), model: remembered && modelsFor(p).includes(remembered) ? remembered : modelsFor(p)[0] || '' });
-  };
-  const chooseModel = (p: string, m: string) => {
-    if (p !== selectedId) rememberCurrent();
-    onChange({ ...selection, provider: driverFor(p), ...(p !== driverFor(p) || selection.providerProfile ? { providerProfile: p } : {}), model: m });
-  };
+  // Provider list, per-provider model memory and pick handling are shared with
+  // the launcher's provider chip menu (launcher/RuntimeMenu).
+  const { selectedId, providers, capFor, driverFor, modelsFor, rowModel, chooseProvider, chooseModel } = useRuntimeProviderModels(caps, selection, onChange);
   return <div className="space-y-4">
     <section><h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted">Bridge</h3><div className="grid gap-2 sm:grid-cols-2">{bridgeOptions.map(({ id, bridge: b, disabledReason }) => {
       const selected = id === selection.bridgeId;
