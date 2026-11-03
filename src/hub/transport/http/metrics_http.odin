@@ -102,6 +102,7 @@ format_db_slow_request :: proc(route, method, status_class: string, request_ns: 
 		if slash := strings.last_index_any(file, "/\\"); slash >= 0 do file = file[slash + 1:]
 		fmt.sbprintf(&b, " top%d=%s/%s/%s:%d/exec_ns=%d/wait_ns=%d", i + 1, top.conn, top.op, file, top.line, top.exec_ns, top.wait_ns)
 	}
+	dbt.format_phases(&b, t.phase)
 	return strings.to_string(b)
 }
 

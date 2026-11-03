@@ -209,3 +209,26 @@ test('MCP job deadline window: 20 s only for html-bundle capable artifact jobs (
   assert.equal(mcpJobDeadlineMaxMs('read', 'chains.get'), 5000);
   assert.equal(mcpJobDeadlineMaxMs('seal'), 5000);
 });
+
+test('coordinator messages require dedicated signed consent and seal as user-message text', async () => {
+  const f = await mcpWorkerFixture(Date.now(), 'mcp:chains mcp:chains:message');
+  const job = { ...f.job, tool: 'chains.message', operation: 'seal_message' as const, payload: JSON.stringify({ body: 'Private coordinator text' }) };
+  job.digest = await mcpJobDigest(job);
+  await verifyMcpWorkerJob(job, f.identity, f.chain, job.resource, f.now);
+  const sealed = JSON.parse(await transformMcpWorkerJob(job, f.keyring));
+  assert.deepEqual(Object.keys(sealed), ['body']);
+  const opened = await decryptVaultBytes(sealed.body, f.keyring);
+  assert.equal(opened.status, 'ok');
+  if (opened.status === 'ok') {
+    assert.equal(new TextDecoder().decode(opened.bytes), 'Private coordinator text');
+    opened.bytes.fill(0);
+  }
+  for (const scope of ['mcp:chains', 'mcp:chains mcp:tasks:write', 'mcp:chains mcp:instances:control']) {
+    assert.equal(mcpJobScopeAllowed(scope, 'chains.message', 'seal_message'), false);
+  }
+  assert.equal(mcpJobScopeAllowed('mcp:chains mcp:chains:message', 'tasks.comment', 'seal_message'), false);
+  await assert.rejects(verifyMcpWorkerJob({ ...job, operation: 'seal_comment' }, f.identity, f.chain, job.resource, f.now));
+  for (const body of ['', '   ', 'é'.repeat(10001)]) {
+    await assert.rejects(transformMcpWorkerJob({ ...job, payload: JSON.stringify({ body }) }, f.keyring));
+  }
+});

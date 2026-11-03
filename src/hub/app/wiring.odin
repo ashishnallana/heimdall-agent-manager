@@ -364,7 +364,6 @@ build_graph :: proc(graph: ^App_Graph, config: Hub_Config) -> (bool, string) {
 	}
 	graph.bridges.catalog = &graph.bridge_update_catalog
 	graph.bridge_update_catalog.release_get = bridge_service.bridge_catalog_http_get
-	graph.bridge_update_catalog.cache_enabled = true
 	graph.agents = agent_service.new_agent_service_with_runtime(&graph.repos.agents, &graph.repos.bridges, &graph.repos.projects, &graph.repos.content, &graph.repos.taskchains, bridge_command_sink, &graph.bridge_runtime_registry, &graph.clock, &graph.ids)
 	graph.agents.event_bus = &graph.event_bus
 	graph.agents.entitlements = billing_service.entitlement_lookup(&graph.billing)
@@ -643,7 +642,7 @@ shutdown_graph :: proc(graph: ^App_Graph) {
 	delete(graph.action_bridge_versions)
 	billing_service.service_free(&graph.billing)
 	sqlite.close(&graph.sqlite_actions.snapshot_conn)
-	sqlite.close(&graph.sqlite_billing.conn)
+	sqlite.close_billing_repository(&graph.sqlite_billing)
 	sqlite.close(&graph.sqlite_bridge_commit.conn)
 	if graph.config.mcp_oauth_spike || graph.config.mcp_oauth_key_file != "" do mcp_service.free(&graph.mcp_spike)
 	free_mcp_delegation(graph)
@@ -850,6 +849,9 @@ register_routes :: proc(graph: ^App_Graph) {
 	http.router_add(&graph.router, "POST", "/api/v1/task-chains/*/tasks/*/release", rawptr(&graph.taskchain_handlers), http.hold_task_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/task-chains/*/tasks/*/recheck", rawptr(&graph.taskchain_handlers), http.recheck_task_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/tasks/*/recheck", rawptr(&graph.taskchain_handlers), http.recheck_task_handler)
+	http.router_add(&graph.router, "POST", "/api/v1/tasks/*/placement-recovery", rawptr(&graph.taskchain_handlers), http.recover_task_placement_handler)
+	http.router_add(&graph.router, "POST", "/api/v1/task-chains/*/tasks/*/placement-recovery", rawptr(&graph.taskchain_handlers), http.recover_task_placement_handler)
+	http.router_add(&graph.router, "POST", "/api/v1/cards/*/placement-recovery", rawptr(&graph.card_handlers), http.recover_card_placement_handler)
 	http.router_add(&graph.router, "GET", "/api/v1/task-chains/*/tasks/*/fetch", rawptr(&graph.taskchain_handlers), http.fetch_task_ref_handler)
 	http.router_add(&graph.router, "GET", "/api/v1/task-chains/*/tasks/*/readiness", rawptr(&graph.taskchain_handlers), http.task_readiness_handler)
 	http.router_add(&graph.router, "GET", "/api/v1/task-chains/*/tasks/*/events", rawptr(&graph.taskchain_handlers), http.list_task_events_handler)

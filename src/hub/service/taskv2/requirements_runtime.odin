@@ -115,7 +115,7 @@ requirements_review_binding :: proc(svc: ^Service, task: domain.Task, payload: ^
 requirements_reconcile_in_uow :: proc(svc: ^Service, u: ^Uow, task_in: domain.Task) -> (bool, domain.Domain_Error) {
 	task := task_in
 	if domain.task_state_is_terminal(task.state) do return true, {}
-	events, err := iface.taskchain_list_events_by_task(svc.repo, task.task_id, task.owner_user_id)
+	events, err := task_fold_events(svc, task)
 	if err.code != .None do return false, err
 	state := requirements_state(events)
 	if state.revision == 1 do return true, {}

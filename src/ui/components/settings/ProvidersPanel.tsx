@@ -72,7 +72,7 @@ export function ProvidersPanel({ bridgeId: routeBridgeId = '', onHeadingChange }
     window.addEventListener('hashchange', changed);
     return () => window.removeEventListener('hashchange', changed);
   }, []);
-  const query = useListBridgesQuery(undefined, { pollingInterval: 120000, refetchOnMountOrArgChange: true });
+  const query = useListBridgesQuery(undefined, { refetchOnMountOrArgChange: true });
   const bridges = useMemo(() => (query.data?.bridges || []).filter(
     (bridge: any) => String(bridge?.status || '').toLowerCase() !== 'revoked' && !bridge?.revoked_at,
   ), [query.data]);

@@ -180,14 +180,46 @@ task_dependencies_ready :: proc(svc: ^Service, task: domain.Task, all_tasks: []d
 		if err.code != .None do return false, err
 		tasks = loaded
 	}
-	if deps == nil {
+	have_deps := deps != nil
+	if !have_deps do deps, have_deps = fold_cache_deps(task.chain_id, task.owner_user_id)
+	if !have_deps {
 		loaded, err := iface.taskchain_list_dependencies_by_chain(svc.repo, task.chain_id, task.owner_user_id)
 		if err.code != .None do return false, err
 		deps = loaded
 	}
 	if !deps_done_for(task.task_id, tasks, deps) do return false, domain.Domain_Error{}
 	if task.stage_key != "" || task.kind != .Task do return true, domain.Domain_Error{}
+	// refold_chain loaded the edges for its pass; `task` is a ticket of that
+	// chain, so only its own incoming edges need checking.
+	if edges, cached := fold_cache_work_edges(task.chain_id, task.owner_user_id); cached {
+		item := domain.Work_Item_Ref{kind = domain.WORK_ITEM_TASK, id = string(task.task_id)}
+		for edge in edges {
+			if edge.removed_at != "" || edge.dependent != item do continue
+			// A ticket prerequisite is read from the pass's rows (kept current
+			// by refold_chain), exactly as work_item_snapshot judges it.
+			if pre, found := ticket_in(tasks, edge.prerequisite); found {
+				if pre.state != .Done do return false, domain.Domain_Error{}
+				merge := task_merge_status(svc, pre)
+				if merge.state != "none" && merge.state != "merged" do return false, domain.Domain_Error{}
+				continue
+			}
+			provider, pok, perr := work_item_snapshot(svc, task.chain_id, task.owner_user_id, edge.prerequisite)
+			if !pok do return false, perr
+			if !provider.succeeded do return false, domain.Domain_Error{}
+		}
+		return true, domain.Domain_Error{}
+	}
 	return work_dependencies_ready_in_uow(svc, task.chain_id, task.owner_user_id, domain.Work_Item_Ref{kind = domain.WORK_ITEM_TASK, id = string(task.task_id)})
+}
+
+@(private = "file")
+ticket_in :: proc(tasks: []domain.Task, ref: domain.Work_Item_Ref) -> (domain.Task, bool) {
+	if ref.kind != domain.WORK_ITEM_TASK do return {}, false
+	for t in tasks {
+		if string(t.task_id) != ref.id do continue
+		return t, t.stage_key == "" && t.kind == .Task
+	}
+	return {}, false
 }
 
 // task_unblocks_dependents: whether this ticket satisfies a work-dependency

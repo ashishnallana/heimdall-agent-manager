@@ -4,6 +4,7 @@ import "core:fmt"
 import "core:thread"
 import metrics "odin_test:lib/metrics"
 import http "odin_test:hub/transport/http"
+import bridge_service "odin_test:hub/service/bridge"
 import taskv2 "odin_test:hub/service/taskv2"
 
 run :: proc(config: Hub_Config) -> (bool, string) {
@@ -21,6 +22,9 @@ run :: proc(config: Hub_Config) -> (bool, string) {
 	// this graph's own fields, so a copy would alias the original anyway.
 	// thread-spawn: startup (caller's allocator is the process heap)
 	thread.run_with_data(rawptr(&graph), reaper_thread_entry)
+	// Promoted bridge releases: fetched now and every 30 min off the request path;
+	// GET /bridges and update checks read only the in-memory snapshot.
+	bridge_service.bridge_catalog_refresher_start(&graph.bridge_update_catalog)
 	// Task System v2: rebuild timers from the columns, heal lease-less
 	// in_progress rows, match every Active chain once, then run the thin timer
 	// thread (1 s probe of the in-memory heap; the columns stay the truth).
@@ -37,6 +41,7 @@ run :: proc(config: Hub_Config) -> (bool, string) {
 		preview_ctx = rawptr(&graph.shell_session_stream_handlers),
 		preview_handler = http.preview_origin_handler,
 	})
+	bridge_service.bridge_catalog_refresher_stop(&graph.bridge_update_catalog)
 	if !served do return false, "hub server failed"
 	return true, "hub server stopped"
 }

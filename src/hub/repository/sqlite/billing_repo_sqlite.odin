@@ -8,10 +8,15 @@ import dbt "odin_test:hub/platform/dbtelemetry"
 import iface "odin_test:hub/repository/iface"
 
 // A dedicated connection and mutex keep billing transactions isolated from
-// unrelated hub requests using the main repository connection.
+// unrelated hub requests using the main repository connection. Reads use a
+// separate query_only connection: entitlement lookups run inside callers' main
+// write transactions, so they must never take a write lock or wait behind a
+// billing write that is itself waiting for the main connection (busy_timeout).
 Billing_Repo_SQLite :: struct {
 	conn: Conn,
 	mutex: sync.Mutex,
+	read_conn: Conn,
+	read_mutex: sync.Mutex,
 }
 
 billing_error :: proc() -> domain.Domain_Error {
@@ -19,8 +24,12 @@ billing_error :: proc() -> domain.Domain_Error {
 }
 
 billing_prepare :: proc(impl: ^Billing_Repo_SQLite, query: string, args: []string = nil) -> sqlite3_stmt {
+	return billing_prepare_on(&impl.conn, query, args)
+}
+
+billing_prepare_on :: proc(conn: ^Conn, query: string, args: []string = nil) -> sqlite3_stmt {
 	stmt: sqlite3_stmt
-	if sqlite3_prepare_v2(impl.conn.db, cstring(raw_data(query)), -1, &stmt, nil) != SQLITE_OK do return nil
+	if sqlite3_prepare_v2(conn.db, cstring(raw_data(query)), c.int(len(query)), &stmt, nil) != SQLITE_OK do return nil
 	for arg, i in args do bind_text(stmt, i+1, arg)
 	return stmt
 }
@@ -67,10 +76,28 @@ new_billing_repository :: proc(impl: ^Billing_Repo_SQLite, path, environment, ho
 	if !billing_write(impl, "UPDATE billing_plans SET price_id = NULLIF(?, '') WHERE plan_id = 'hobbyist';", {hobbyist_price}) {
 		close(&impl.conn); return {}, billing_error()
 	}
+	read_conn, read_ok, read_err := open(path, .Billing)
+	if !read_ok {
+		close(&impl.conn); return {}, read_err
+	}
+	impl.read_conn = read_conn
+	// WAL readers take no lock; the timeout only covers WAL recovery/checkpoint
+	// races. query_only makes any accidental write on the read path fail loudly.
+	if !exec(&impl.read_conn, "PRAGMA busy_timeout = 5000;") || !exec(&impl.read_conn, "PRAGMA query_only = ON;") {
+		close_billing_repository(impl); return {}, billing_error()
+	}
 	return iface.Billing_Repository{ctx = impl, get_account = billing_get_account, list_plans = billing_list_plans,
 		reserve_checkout = billing_reserve_checkout, finish_checkout = billing_finish_checkout, apply_event = billing_apply_event}, {}
 }
 
+close_billing_repository :: proc(impl: ^Billing_Repo_SQLite) {
+	close(&impl.read_conn)
+	close(&impl.conn)
+}
+
+// Materialize the effective parameters for write paths that change billing
+// data. Reads never depend on this snapshot: billing_get_account computes the
+// same values with BILLING_ENTITLED_PLAN_SQL.
 billing_refresh_parameters :: proc(impl: ^Billing_Repo_SQLite, user_id, now: string) -> bool {
 	// Explicit 0/false overrides survive COALESCE and all subscription updates.
 	return billing_write(impl, `UPDATE account_entitlements SET
@@ -88,29 +115,40 @@ billing_ensure_account :: proc(impl: ^Billing_Repo_SQLite, user_id, now: string)
 		billing_refresh_parameters(impl, user_id, now)
 }
 
+// Keep in sync with billing_refresh_parameters and effective_plan_label: paid
+// plans apply while active, trialing, custom, or past_due inside grace.
+BILLING_ENTITLED_PLAN_SQL :: "CASE WHEN a.status IN ('active', 'trialing', 'custom') OR (a.status = 'past_due' AND a.grace_until > ?2) THEN a.plan_id ELSE 'free' END"
+
+// Read-only: one statement (one snapshot), no transaction, no writes. A user
+// without account rows resolves to the free plan; explicit overrides win.
+BILLING_GET_ACCOUNT_SQL :: `WITH a AS (SELECT u.user_id, COALESCE(b.plan_id, 'free') AS plan_id, COALESCE(b.status, 'free') AS status, b.customer_id, b.subscription_id,
+		COALESCE(b.price_id, '') AS price_id, COALESCE(b.renews_at, '') AS renews_at, COALESCE(b.cancels_at, '') AS cancels_at, COALESCE(b.grace_until, '') AS grace_until,
+		COALESCE(b.last_event_ns, 0) AS last_event_ns, COALESCE(b.created_at, '') AS created_at, COALESCE(b.updated_at, '') AS updated_at
+		FROM (SELECT ?1 AS user_id) u LEFT JOIN account_billing b ON b.user_id = u.user_id)
+	SELECT a.user_id, a.plan_id, p.plan_label, a.status, a.customer_id, a.subscription_id, a.price_id, a.renews_at, a.cancels_at, a.grace_until, a.last_event_ns,
+		COALESCE(e.override_max_bridges, ep.max_bridges), COALESCE(e.override_terminal_streaming_enabled, ep.terminal_streaming_enabled), a.created_at, a.updated_at,
+		COALESCE(e.override_terminal_input_enabled, ep.terminal_input_enabled), COALESCE(e.override_max_concurrent_streams, ep.max_concurrent_streams),
+		COALESCE(e.override_shells_enabled, ep.shells_enabled),
+		EXISTS (SELECT 1 FROM billing_checkouts c WHERE c.user_id = a.user_id AND c.expires_at > ?2)
+	FROM a JOIN billing_plans p ON p.plan_id = a.plan_id
+	JOIN billing_plans ep ON ep.plan_id = ` + BILLING_ENTITLED_PLAN_SQL + `
+	LEFT JOIN account_entitlements e ON e.user_id = a.user_id;`
+
 billing_get_account :: proc(ctx: rawptr, user_id, now: string) -> (domain.Account_Billing, domain.Domain_Error) {
 	impl := (^Billing_Repo_SQLite)(ctx)
-	lock_tok := dbt.timed_lock(&impl.mutex, .Billing); defer dbt.timed_unlock(&impl.mutex, .Billing, lock_tok)
-	if !exec(&impl.conn, "BEGIN IMMEDIATE;") do return {}, billing_error()
-	committed := false
-	defer if !committed do _ = exec(&impl.conn, "ROLLBACK;")
-	if !billing_ensure_account(impl, user_id, now) do return {}, billing_error()
-	stmt := billing_prepare(impl, `SELECT b.user_id, b.plan_id, p.plan_label, b.status, b.customer_id, b.subscription_id, b.price_id, b.renews_at, b.cancels_at, b.grace_until, b.last_event_ns, e.max_bridges, e.terminal_streaming_enabled, b.created_at, b.updated_at, e.terminal_input_enabled, e.max_concurrent_streams, e.shells_enabled
-		FROM account_billing b JOIN billing_plans p ON p.plan_id = b.plan_id JOIN account_entitlements e ON e.user_id = b.user_id WHERE b.user_id = ?;`, {user_id})
+	lock_tok := dbt.timed_lock(&impl.read_mutex, .Billing); defer dbt.timed_unlock(&impl.read_mutex, .Billing, lock_tok)
+	stmt := billing_prepare_on(&impl.read_conn, BILLING_GET_ACCOUNT_SQL, {user_id, now})
 	if stmt == nil do return {}, billing_error()
 	defer sqlite3_finalize(stmt)
 	if sqlite3_step(stmt) != SQLITE_ROW do return {}, billing_error()
-	account := domain.Account_Billing{user_id = column_text(stmt, 0), plan_id = column_text(stmt, 1), plan_label = column_text(stmt, 2), status = column_text(stmt, 3), customer_id = column_text(stmt, 4), subscription_id = column_text(stmt, 5), price_id = column_text(stmt, 6), renews_at = column_text(stmt, 7), cancels_at = column_text(stmt, 8), grace_until = column_text(stmt, 9), last_event_ns = i64(int_v(column_text_unowned(stmt, 10))), entitlements = {max_bridges = int_v(column_text_unowned(stmt, 11)), terminal_streaming_enabled = column_text_unowned(stmt, 12) == "1", terminal_input_enabled = column_text_unowned(stmt, 15) == "1", max_concurrent_streams = int_v(column_text_unowned(stmt, 16)), shells_enabled = column_text_unowned(stmt, 17) == "1"}, created_at = column_text(stmt, 13), updated_at = column_text(stmt, 14)}
-	_, account.checkout_pending = billing_scalar(impl, "SELECT reference FROM billing_checkouts WHERE user_id = ? AND expires_at > ? LIMIT 1;", {user_id, now})
-	committed = exec(&impl.conn, "COMMIT;")
-	if !committed do return {}, billing_error()
+	account := domain.Account_Billing{user_id = column_text(stmt, 0), plan_id = column_text(stmt, 1), plan_label = column_text(stmt, 2), status = column_text(stmt, 3), customer_id = column_text(stmt, 4), subscription_id = column_text(stmt, 5), price_id = column_text(stmt, 6), renews_at = column_text(stmt, 7), cancels_at = column_text(stmt, 8), grace_until = column_text(stmt, 9), last_event_ns = i64(int_v(column_text_unowned(stmt, 10))), entitlements = {max_bridges = int_v(column_text_unowned(stmt, 11)), terminal_streaming_enabled = column_text_unowned(stmt, 12) == "1", terminal_input_enabled = column_text_unowned(stmt, 15) == "1", max_concurrent_streams = int_v(column_text_unowned(stmt, 16)), shells_enabled = column_text_unowned(stmt, 17) == "1"}, created_at = column_text(stmt, 13), updated_at = column_text(stmt, 14), checkout_pending = column_text_unowned(stmt, 18) == "1"}
 	return account, {}
 }
 
 billing_list_plans :: proc(ctx: rawptr) -> ([]domain.Billing_Plan, domain.Domain_Error) {
 	impl := (^Billing_Repo_SQLite)(ctx)
-	lock_tok := dbt.timed_lock(&impl.mutex, .Billing); defer dbt.timed_unlock(&impl.mutex, .Billing, lock_tok)
-	stmt := billing_prepare(impl, "SELECT plan_id, plan_label, price_id, max_bridges, terminal_streaming_enabled, terminal_input_enabled, max_concurrent_streams, shells_enabled FROM billing_plans ORDER BY plan_id;")
+	lock_tok := dbt.timed_lock(&impl.read_mutex, .Billing); defer dbt.timed_unlock(&impl.read_mutex, .Billing, lock_tok)
+	stmt := billing_prepare_on(&impl.read_conn, "SELECT plan_id, plan_label, price_id, max_bridges, terminal_streaming_enabled, terminal_input_enabled, max_concurrent_streams, shells_enabled FROM billing_plans ORDER BY plan_id;")
 	if stmt == nil do return nil, billing_error()
 	defer sqlite3_finalize(stmt)
 	plans := make([dynamic]domain.Billing_Plan, context.temp_allocator)
@@ -129,6 +167,9 @@ billing_reserve_checkout :: proc(ctx: rawptr, checkout: domain.Billing_Checkout,
 	if !exec(&impl.conn, "BEGIN IMMEDIATE;") do return {}, false, billing_error()
 	committed := false
 	defer if !committed do _ = exec(&impl.conn, "ROLLBACK;")
+	// Reads no longer create account rows; the checkout FK and the webhook
+	// mapping need them, so a checkout materializes the account here.
+	if !billing_ensure_account(impl, checkout.user_id, now) do return {}, false, billing_error()
 	_, allowed := billing_scalar(impl, "SELECT user_id FROM account_billing WHERE user_id = ? AND status != 'custom' AND (subscription_id IS NULL OR status = 'canceled');", {checkout.user_id})
 	if !allowed do return {}, false, domain.domain_error(.Conflict, "account already has a subscription")
 	// The write transaction also protects reservations across hub processes.
@@ -185,7 +226,7 @@ billing_apply_event :: proc(ctx: rawptr, event: domain.Billing_Event, now: strin
 			existing_grace, already_past_due := billing_scalar(impl, "SELECT grace_until FROM account_billing WHERE user_id = ? AND status = 'past_due';", {owner})
 			if already_past_due do grace_until = existing_grace
 		}
-		if !billing_write(impl, `UPDATE account_billing SET plan_id = ?, status = ?, customer_id = ?, subscription_id = ?, price_id = ?, renews_at = ?, cancels_at = ?, grace_until = ?, last_event_ns = ?, updated_at = ? WHERE user_id = ?;`, {plan_id, event.status, event.customer_id, event.subscription_id, event.price_id, event.renews_at, event.cancels_at, grace_until, fmt.tprintf("%d", event.occurred_ns), now, owner}) || !billing_refresh_parameters(impl, owner, now) do return billing_error()
+		if !billing_write(impl, `UPDATE account_billing SET plan_id = ?, status = ?, customer_id = ?, subscription_id = ?, price_id = ?, renews_at = ?, cancels_at = ?, grace_until = ?, last_event_ns = ?, updated_at = ? WHERE user_id = ?;`, {plan_id, event.status, event.customer_id, event.subscription_id, event.price_id, event.renews_at, event.cancels_at, grace_until, fmt.tprintf("%d", event.occurred_ns), now, owner}) || !billing_ensure_account(impl, owner, now) do return billing_error()
 		if !billing_write(impl, "UPDATE billing_checkouts SET expires_at = ? WHERE user_id = ?;", {now, owner}) do return billing_error()
 	}
 	if !billing_write(impl, "INSERT INTO billing_events VALUES (?, ?, ?, ?, ?);", {event.event_id, event.event_type, fmt.tprintf("%d", event.occurred_ns), event.subscription_id, now}) do return billing_error()

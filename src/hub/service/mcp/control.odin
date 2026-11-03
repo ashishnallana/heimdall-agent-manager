@@ -18,7 +18,7 @@ import project "odin_test:hub/service/project"
 import issue "odin_test:hub/service/issue"
 
 Control_Service :: struct {chains:^tc.Taskchain_Service,agents:^agent.Agent_Service,providers:^provider.Provider_Service,bridges:^iface.Bridge_Repository,content:^content.Content_Service,projects:^project.Project_Service,issues:^issue.Issue_Service,resource_ctx:rawptr,resource_page:iface.Resource_Page_Proc}
-Control_Arguments :: struct {chain_id,title,description,cursor,task_id,request_id,body,state,assignee_agent_id,comment_cursor:string,limit,timeout_ms,comment_limit:int,task_write:Task_Tool_Arguments,catalog:Catalog_Arguments,runtime:Runtime_Arguments,resource:Resource_Arguments,include_configuration,include_comments:bool}
+Control_Arguments :: struct {chain_id,title,description,cursor,task_id,request_id,body,state,assignee_agent_id,comment_cursor:string,coordinator_agent_id,bridge_id,provider,provider_profile,model:string,limit,timeout_ms,comment_limit:int,task_write:Task_Tool_Arguments,catalog:Catalog_Arguments,runtime:Runtime_Arguments,resource:Resource_Arguments,include_configuration,include_comments:bool}
 Control_Data :: vault.Control_Data
 control_auth :: proc(owner:string)->contracts.Auth_Context {return {kind=.Internal_User,user_id=owner}}
 control_chain :: proc(c:domain.Task_Chain)->json.Object {
@@ -185,11 +185,12 @@ control_hosted_transform :: proc(ctx:rawptr,kr:^vault.Vault_Keyring)->(string,bo
 	if op.resource_fields!=nil do return vault.control_seal_resource_fields(kr,op.tool,op.resource_fields)
 	if op.agent_fields!=nil do return vault.control_seal_agent_fields(kr,op.agent_fields)
 	if op.task_fields!=nil do return vault.control_seal_task_fields(kr,op.task_fields)
-	if op.tool=="tasks.comment" {
+	if op.tool=="tasks.comment" || op.tool=="chains.message" {
 		payload,err:=json.marshal(struct {body:string}{op.body},allocator=context.temp_allocator)
 		if err!=nil do return "",false
 		defer if len(payload)>0 do crypto.zero_explicit(raw_data(payload),len(payload))
-		return vault.control_job_transform({operation="seal_comment",payload=string(payload)},kr)
+		operation:="seal_comment";if op.tool=="chains.message" do operation="seal_message"
+		return vault.control_job_transform({operation=operation,payload=string(payload)},kr)
 	}
 	if !op.seal {
 		if !vault.control_catalog_data_ok(op.tool,op.data) do return "",false

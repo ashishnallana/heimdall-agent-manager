@@ -9,12 +9,39 @@ import domain "odin_test:hub/domain"
 import platform "odin_test:hub/platform"
 import auth_service "odin_test:hub/service/auth"
 import card_service "odin_test:hub/service/card"
+import taskv2 "odin_test:hub/service/taskv2"
 import jsonx "odin_test:lib/jsonx"
 
 Card_Handlers :: struct {
 	auth:  ^auth_service.Auth_Service,
 	cards: ^card_service.Card_Service,
 	clock: ^platform.Clock,
+}
+
+// Typed request only; generic operation envelopes and instance IDs never flow
+// into placement mutation. Presence matters for attempt zero/empty assignment.
+placement_recovery_input :: proc(body: string) -> (taskv2.Placement_Recovery_Input, domain.Domain_Error) {
+	input: taskv2.Placement_Recovery_Input
+	if json.unmarshal(transmute([]u8)body, &input, allocator = context.temp_allocator) != nil {
+		return {}, domain.domain_error(.Validation_Failed, "invalid placement recovery request")
+	}
+	for key in ([]string{"expected_attempt", "expected_assignment", "phase", "agent_id", "role", "fingerprint", "configuration", "scope", "action"}) {
+		if !json_key_present(body, key) do return {}, domain.domain_error(.Validation_Failed, fmt.tprintf("%s is required", key))
+	}
+	return input, {}
+}
+
+recover_card_placement_handler :: proc(ctx: rawptr, req: Request) -> Response {
+	h := (^Card_Handlers)(ctx)
+	auth, ok, resp := require_auth(h.auth, req)
+	if !ok do return resp
+	input, err := placement_recovery_input(req.body)
+	if err.code != .None do return respond_error(err, req.request_id)
+	task, repaired, rerr := card_service.recover_card_placement(h.cards, auth, domain.Card_ID(path_part(req.path, 4)), input)
+	if !repaired do return respond_error(rerr, req.request_id)
+	b := strings.builder_make()
+	write_task_json(&b, task)
+	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req))
 }
 
 write_card_json :: proc(b: ^strings.Builder, c: domain.Card) {

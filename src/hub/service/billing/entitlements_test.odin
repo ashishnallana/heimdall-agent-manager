@@ -165,8 +165,10 @@ reconcile_test_callback :: proc(ctx: rawptr, user_id: string, entitlements: doma
 	return {}
 }
 
+// Launch gates look entitlements up inside the main write UoW, so a cache fill
+// must not reconcile bridges; only the account settings refresh still does.
 @(test)
-test_entitlements_reconciliation_failure_is_retried_before_caching :: proc(t: ^testing.T) {
+test_entitlements_cache_fill_does_not_reconcile :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	fixture: Fixture; repo: iface.Billing_Repository; clock: platform.Clock
 	service := fixture_setup(&fixture, &repo, &clock)
@@ -174,19 +176,17 @@ test_entitlements_reconciliation_failure_is_retried_before_caching :: proc(t: ^t
 	state := Reconcile_Test_State{fail = true}
 	service.plan_change_ctx = &state
 	service.on_entitlements = reconcile_test_callback
-	_, failed := effective_entitlements(&service, "alice")
-	testing.expect_value(t, failed.code, domain.Error_Code.Internal_Error)
-	testing.expect_value(t, len(service.entitlements_cache), 0)
+	_, filled := effective_entitlements(&service, "alice")
+	testing.expect_value(t, filled.code, domain.Error_Code.None)
+	testing.expect_value(t, len(service.entitlements_cache), 1)
+	invalidate_entitlements(&service, "alice")
+	_, refilled := effective_entitlements(&service, "alice")
+	testing.expect_value(t, refilled.code, domain.Error_Code.None)
+	testing.expect_value(t, state.calls, 0)
 	state.fail = false
-	_, recovered := effective_entitlements(&service, "alice")
-	testing.expect_value(t, recovered.code, domain.Error_Code.None)
-	testing.expect_value(t, state.calls, 2)
-	_, cached := effective_entitlements(&service, "alice")
-	testing.expect_value(t, cached.code, domain.Error_Code.None)
-	testing.expect_value(t, state.calls, 2)
 	_, refreshed := account_view(&service, "alice")
 	testing.expect_value(t, refreshed.code, domain.Error_Code.None)
-	testing.expect_value(t, state.calls, 3)
+	testing.expect_value(t, state.calls, 1)
 }
 
 @(test)

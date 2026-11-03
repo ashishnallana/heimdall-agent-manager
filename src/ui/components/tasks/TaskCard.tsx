@@ -10,6 +10,8 @@ import {
   getTaskStatusLines,
   inProgressSentenceRest,
   normalizeTaskState,
+  reviewLeaseHolders,
+  reviewingSentenceRest,
   uiToneForBadge,
   workLeaseHolder,
   uiToneForPriority,
@@ -100,6 +102,7 @@ export const TaskCard: React.FC<TaskCardProps> = ({
   // people line, so those badges are dropped here.
   const badges = getTaskBadges(task, chainFleets, now, names).filter((b) => b.kind !== 'lease' && b.kind !== 'bridge');
   const holderLease = workLeaseHolder(task, now);
+  const reviewing = reviewLeaseHolders(task, now);
   const people = getTaskPeople(task, chainFleets);
   // Instance ids nothing maps yet are looked up, so votes match by durable id (REQ-TV2-6).
   const reviewNames = useLookupNames(names, reviewParticipantIds(task, people.reviewers));
@@ -255,6 +258,18 @@ export const TaskCard: React.FC<TaskCardProps> = ({
             {holderLease ? (
               <>
                 <HolderName instanceId={holderLease.instanceId} names={names} /> {inProgressSentenceRest(holderLease.leftMins)}
+              </>
+            ) : reviewing.length ? (
+              // Same as getTaskStatusLines' in-review sentence, but each holder
+              // resolves through <HolderName> (non-member/JIT instances too).
+              <>
+                {reviewing.map((h, i) => (
+                  <React.Fragment key={`${h.instanceId}-${h.role}-${i}`}>
+                    {i > 0 ? '; ' : ''}
+                    <HolderName instanceId={h.instanceId} names={names} /> {reviewingSentenceRest(h.role, h.leftMins)}
+                  </React.Fragment>
+                ))}
+                {task.requires_user_approval ? '; then you' : ''}
               </>
             ) : (
               sentence

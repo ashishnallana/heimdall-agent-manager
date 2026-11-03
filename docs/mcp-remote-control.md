@@ -1,6 +1,6 @@
 # Remote MCP chain control
 
-This implements the four-tool remote control plane. It does not activate a
+This documents the core remote chain control tools. It does not activate a
 deployment. The separate synthetic OAuth probe is not a real-data endpoint.
 
 Configure the integrated Hub using [mcp-delegated-oauth.md](mcp-delegated-oauth.md),
@@ -14,7 +14,8 @@ identity. Native APIs retain their existing approved-device gates.
 | --- | --- | --- |
 | `chains.list` | Optional `limit` 1–100 (default 50), offset `cursor` | Readable owned chains, optional next cursor |
 | `chains.get` | `chain_id` | Readable chain, tasks, current-attempt review verdict metadata and comments |
-| `chains.create` | Plain `title` (1–500 bytes), optional `description` (up to 20,000 bytes) | Encrypted draft chain; no assignment or agent launch |
+| `chains.create` | Required `title` (1–500 bytes), `coordinator_agent_id` (`agt_...`), `bridge_id` (`brg_...`); optional `description` (up to 20,000 bytes), `provider`, `provider_profile`, `model` | Encrypted draft chain and fresh coordinator instance; launches on the selected bridge |
+| `chains.message` | Required `chain_id`, stable `request_id`, nonblank `body` (up to 20,000 UTF-8 bytes) | Accepted user message; coordinator instance, conversation and message IDs; optional delivery warning |
 | `events.wait` | `chain_id`, optional `timeout_ms` | `status`, transient `event`, `refresh_required`, fresh `state` |
 
 Pagination is a current-state offset, not a snapshot or replay cursor. A get is
@@ -33,6 +34,20 @@ current vault/epoch. The final credential/grant/directory check and persistence
 share one SQLite transaction and connection; failure rolls back the write. A
 transport failure can still hide a committed creation. Never automatically retry
 an ambiguous `chains.create` call.
+
+Creation requires the existing `mcp:instances:control` consent capability because
+it launches an agent. Legacy `mcp:chains` connections retain reads but cannot
+create chains; reconnect with instance-control consent to enable creation.
+Choose an owned active durable agent and an owned online bridge. An instance ID
+is not accepted as `coordinator_agent_id`; an existing running instance is not
+required. Provider settings use the same defaults as native instance creation.
+
+Chain, conversation, instance, and canonical coordinator membership are prepared
+in one transaction. Launch dispatch occurs after commit. The response reports
+`status: "draft"`, `chain_id`, and `coordinator_agent_instance_id`. A
+`coordinator_launch_unconfirmed` error includes committed identifiers: inspect
+that instance before taking a recovery action. Do not resend creation to recover
+a launch; doing so creates another chain and coordinator.
 
 ## Decryption modes
 
@@ -111,3 +126,32 @@ revocation, default-mode unavailability, proved browser replies, cache exclusion
 and an actual URL-only HTTP round trip. Real Claude read/create/wait, a new
 conversation and a cold deployed-process restart remain deployment acceptance
 checks; local tests do not mean the public real-data service is live.
+
+
+## Messages to coordinators
+
+Request the explicit `mcp:chains:message` consent capability and reconnect to
+approve it. This permission sends messages as the connected user and can wake
+the coordinator on an owned machine; task-write and instance-control scopes do
+not imply it. Legacy grants cannot list or invoke `chains.message`.
+
+The tool routes through the current canonical coordinator membership of the
+owned chain. It never chooses a coordinator from the mirror column or accepts a
+caller-selected sender/conversation. Text is sealed in hosted and device modes
+and appears in normal chat as a user message. Message, encrypted conversation
+preview and idempotency receipt commit together before owner UI events, attention
+updates, native stopped-session restart and user notice delivery.
+
+Reuse `request_id` with the same chain and body after ambiguous results.
+An identical retry returns the original target/message, even if the coordinator
+has changed, and does not notify it twice. Different arguments with the same
+request ID return `idempotency_conflict`. A sealing device must still be
+available for device-mode calls, including retries.
+
+`status: "accepted"` means durable persistence, not agent readiness or execution.
+A post-commit runtime failure returns `delivery_warning: "bridge_offline"` or
+`"delivery_unavailable"` with the saved IDs. The message remains readable in chat.
+Retries do not resend its notification; repair the session through normal
+controls if needed. No new durable delivery queue or background replay is added.
+The tool does not return the message body, attachments, review controls, or
+general chat access.

@@ -7,6 +7,7 @@ import "core:mem"
 import "base:runtime"
 import "core:strings"
 import "core:sync"
+import "core:thread"
 import "core:time"
 import httpc "odin_test:lib/httpc"
 
@@ -65,7 +66,30 @@ bridge_catalog_request :: proc(base: string, path: []string, query: []httpc.Quer
 		timeout_ms = 5_000, connect_timeout_ms = 2_000, max_redirects = 5, max_response_bytes = 4 * 1024 * 1024}
 }
 
-bridge_catalog_fetch_release :: proc(get: Bridge_Catalog_Get, target, pin: string) -> (info: Bridge_Update_Info, reachable: bool) {
+// Bridge_Catalog_Memo dedupes identical GETs within one refresh: every target
+// reads the same release list, pin and SHA256SUMS documents, so a refresh costs a
+// handful of GitHub calls instead of one list per target (unauthenticated GitHub
+// allows 60 requests per hour). Entries live in the temp allocator.
+Bridge_Catalog_Memo_Entry :: struct {
+	body, reason: string,
+	ok: bool,
+}
+Bridge_Catalog_Memo :: struct {
+	get: Bridge_Catalog_Get,
+	seen: map[string]Bridge_Catalog_Memo_Entry,
+}
+
+bridge_catalog_memo_get :: proc(memo: ^Bridge_Catalog_Memo, req: httpc.Request) -> (body: string, ok: bool, reason: string) {
+	key, err := httpc.build_url(req.url, req.path, req.query, allocator = context.temp_allocator)
+	if err != .None do return memo.get(req)
+	if memo.seen == nil do memo.seen = make(map[string]Bridge_Catalog_Memo_Entry, context.temp_allocator)
+	if hit, found := memo.seen[key]; found do return hit.body, hit.ok, hit.reason
+	body, ok, reason = memo.get(req)
+	memo.seen[key] = {body = body, ok = ok, reason = reason}
+	return
+}
+
+bridge_catalog_fetch_release :: proc(memo: ^Bridge_Catalog_Memo, target, pin: string) -> (info: Bridge_Update_Info, reachable: bool) {
 	info.target, info.latest_source = target, "promoted"
 	req := bridge_catalog_request("https://api.github.com", {"repos", "tanmayv", "heimdall-agent-manager", "releases"}, {{"per_page", "30"}})
 	if pin != "" {
@@ -76,7 +100,7 @@ bridge_catalog_fetch_release :: proc(get: Bridge_Catalog_Get, target, pin: strin
 		tag := pin if strings.has_prefix(pin, "v") else fmt.tprintf("v%s", pin)
 		req = bridge_catalog_request("https://api.github.com", {"repos", "tanmayv", "heimdall-agent-manager", "releases", "tags", tag})
 	}
-	doc, ok, reason := get(req)
+	doc, ok, reason := bridge_catalog_memo_get(memo, req)
 	if !ok {
 		info.fallback_reason = fmt.tprintf("cannot resolve promoted releases: %s", reason)
 		return info, false
@@ -106,7 +130,7 @@ bridge_catalog_fetch_release :: proc(get: Bridge_Catalog_Get, target, pin: strin
 		}
 		if !has_bundle || !has_sums do continue
 		path := []string{"tanmayv", "heimdall-agent-manager", "releases", "download", release.tag_name, "SHA256SUMS"}
-		sums, fetched, detail := get(bridge_catalog_request("https://github.com", path))
+		sums, fetched, detail := bridge_catalog_memo_get(memo, bridge_catalog_request("https://github.com", path))
 		if !fetched {
 			info.fallback_reason = fmt.tprintf("cannot fetch SHA256SUMS for %s: %s", release.tag_name, detail)
 			return info, false
@@ -130,7 +154,18 @@ bridge_catalog_fetch_release :: proc(get: Bridge_Catalog_Get, target, pin: strin
 	return info, true
 }
 
-Bridge_Catalog_Cache_Entry :: struct {
+// BRIDGE_CATALOG_REFRESH_INTERVAL is how often the background refresher re-reads
+// the promoted releases. Request handlers never call GitHub (GET /bridges used to
+// spend seconds on a cold per-target cache), so a promotion reaches the UI and the
+// bridges within this interval of its publication, or on a hub restart.
+BRIDGE_CATALOG_REFRESH_INTERVAL :: 30 * time.Minute
+
+// Every target with release artifacts (canonical_bridge_platform); the snapshot
+// holds one latest slot and one pinned slot per target.
+BRIDGE_CATALOG_TARGETS :: [7]string{"linux-amd64", "linux-arm64", "darwin-amd64", "darwin-arm64", "termux-arm64", "windows-amd64", "windows-arm64"}
+BRIDGE_CATALOG_SLOTS :: 2 * len(BRIDGE_CATALOG_TARGETS)
+
+Bridge_Catalog_Entry :: struct {
 	at: time.Time,
 	populated, reachable: bool,
 	pin: string,
@@ -150,7 +185,7 @@ bridge_catalog_copy_info :: proc(info: Bridge_Update_Info, allocator: mem.Alloca
 	return result
 }
 
-bridge_catalog_cache_entry_destroy :: proc(entry: ^Bridge_Catalog_Cache_Entry) {
+bridge_catalog_entry_destroy :: proc(entry: ^Bridge_Catalog_Entry) {
 	if !entry.populated do return
 	context.allocator = runtime.default_allocator()
 	delete(entry.pin)
@@ -165,33 +200,127 @@ bridge_catalog_cache_entry_destroy :: proc(entry: ^Bridge_Catalog_Cache_Entry) {
 	entry^ = {}
 }
 
+// bridge_update_catalog_destroy stops the refresher, then frees the snapshot.
 bridge_update_catalog_destroy :: proc(catalog: ^Bridge_Update_Catalog) {
-	for &entry in catalog.cache do bridge_catalog_cache_entry_destroy(&entry)
+	if catalog == nil do return
+	bridge_catalog_refresher_stop(catalog)
+	sync.mutex_lock(&catalog.snapshot_mutex)
+	defer sync.mutex_unlock(&catalog.snapshot_mutex)
+	for &entry in catalog.snapshot do bridge_catalog_entry_destroy(&entry)
 }
 
-bridge_catalog_release :: proc(catalog: ^Bridge_Update_Catalog, target, pin: string) -> (Bridge_Update_Info, bool) {
-	if catalog == nil || catalog.release_get == nil {
-		return Bridge_Update_Info{target = target, latest_source = "promoted", fallback_reason = "release source is not configured"}, false
-	}
-	index := -1
-	targets := [7]string{"linux-amd64", "linux-arm64", "darwin-amd64", "darwin-arm64", "termux-arm64", "windows-amd64", "windows-arm64"}
+bridge_catalog_slot :: proc(target, pin: string) -> int {
+	targets := BRIDGE_CATALOG_TARGETS
 	for candidate, i in targets {
-		if candidate == target do index = i * 2
+		if candidate == target do return i * 2 + (1 if pin != "" else 0)
 	}
-	if !catalog.cache_enabled || index < 0 do return bridge_catalog_fetch_release(catalog.release_get, target, pin)
-	if pin != "" do index += 1
-	// Serialize cold lookups as well: many bridge rows must not stampede GitHub.
-	// Cold targets share this lock across bounded HTTP calls; the five-minute
-	// cache includes failures so outages do not repeat the delay for every row.
-	sync.mutex_lock(&catalog.cache_mutex)
-	defer sync.mutex_unlock(&catalog.cache_mutex)
-	entry := &catalog.cache[index]
-	if entry.populated && entry.pin == pin && time.since(entry.at) < 5 * time.Minute {
-		return bridge_catalog_copy_info(entry.info, context.temp_allocator), entry.reachable
+	return -1
+}
+
+// bridge_catalog_release serves the in-memory snapshot only: no request path
+// reaches GitHub. Strings use context.temp_allocator. Before the first refresh
+// lands the result is unreachable, so callers fall back to the manifest.
+bridge_catalog_release :: proc(catalog: ^Bridge_Update_Catalog, target, pin: string) -> (Bridge_Update_Info, bool) {
+	miss := Bridge_Update_Info{target = target, latest_source = "promoted"}
+	if catalog == nil || catalog.release_get == nil {
+		miss.fallback_reason = "release source is not configured"
+		return miss, false
 	}
-	info, reachable := bridge_catalog_fetch_release(catalog.release_get, target, pin)
-	bridge_catalog_cache_entry_destroy(entry)
-	entry^ = {at = time.now(), populated = true, reachable = reachable,
-		pin = strings.clone(pin, runtime.default_allocator()), info = bridge_catalog_copy_info(info, runtime.default_allocator())}
-	return info, reachable
+	index := bridge_catalog_slot(target, pin)
+	if index < 0 {
+		miss.fallback_reason = fmt.tprintf("no promoted releases are published for target %s", target)
+		return miss, false
+	}
+	sync.mutex_lock(&catalog.snapshot_mutex)
+	defer sync.mutex_unlock(&catalog.snapshot_mutex)
+	entry := &catalog.snapshot[index]
+	if !entry.populated || entry.pin != pin {
+		miss.fallback_reason = "promoted releases have not been loaded yet"
+		return miss, false
+	}
+	return bridge_catalog_copy_info(entry.info, context.temp_allocator), entry.reachable
+}
+
+// bridge_catalog_refresh fetches every target (and the operator pin, if set)
+// outside the snapshot lock, then swaps the results in under it. An unreachable
+// result never replaces a reachable one: an outage keeps serving the last good
+// promotion. Temp allocations are the caller's to reset.
+bridge_catalog_refresh :: proc(catalog: ^Bridge_Update_Catalog) -> (reachable, total: int) {
+	if catalog == nil || catalog.release_get == nil do return 0, 0
+	memo := Bridge_Catalog_Memo{get = catalog.release_get}
+	targets := BRIDGE_CATALOG_TARGETS
+	pins := [2]string{"", catalog.override_version}
+	pin_count := 1 if catalog.override_version == "" else 2
+	fresh: [BRIDGE_CATALOG_SLOTS]Bridge_Catalog_Entry
+	now := time.now()
+	failure := ""
+	for target in targets {
+		for pin in pins[:pin_count] {
+			info, ok := bridge_catalog_fetch_release(&memo, target, pin)
+			fresh[bridge_catalog_slot(target, pin)] = {at = now, populated = true, reachable = ok,
+				pin = strings.clone(pin, runtime.default_allocator()), info = bridge_catalog_copy_info(info, runtime.default_allocator())}
+			total += 1
+			if ok {
+				reachable += 1
+			} else if failure == "" {
+				failure = info.fallback_reason
+			}
+		}
+	}
+	sync.mutex_lock(&catalog.snapshot_mutex)
+	for &entry, i in fresh {
+		if !entry.populated do continue
+		current := &catalog.snapshot[i]
+		if !entry.reachable && current.populated && current.reachable && current.pin == entry.pin do continue
+		// Swap: the old entry leaves the lock in `fresh` and is freed below.
+		current^, entry = entry, current^
+	}
+	sync.mutex_unlock(&catalog.snapshot_mutex)
+	for &entry in fresh do bridge_catalog_entry_destroy(&entry)
+	if reachable < total {
+		fmt.eprintfln("hub: promoted bridge release refresh: %d/%d lookups failed, keeping the last good snapshot: %s", total - reachable, total, failure)
+	}
+	return
+}
+
+// bridge_catalog_refresher_start refreshes at once and then every interval on
+// its own thread, which inherits the caller's context. Startup never waits on it.
+bridge_catalog_refresher_start :: proc(catalog: ^Bridge_Update_Catalog) {
+	if catalog == nil || catalog.release_get == nil || catalog.refresher != nil do return
+	catalog.refresher_stop = false
+	// thread-spawn: startup (caller's allocator is the process heap)
+	catalog.refresher = thread.create_and_start_with_data(rawptr(catalog), bridge_catalog_refresher_entry, init_context = context)
+}
+
+// bridge_catalog_refresher_stop wakes the refresher and joins it. A refresh in
+// flight finishes first; each GitHub call is bounded by its request timeout.
+bridge_catalog_refresher_stop :: proc(catalog: ^Bridge_Update_Catalog) {
+	if catalog == nil || catalog.refresher == nil do return
+	sync.mutex_lock(&catalog.refresher_mutex)
+	catalog.refresher_stop = true
+	sync.cond_broadcast(&catalog.refresher_cond)
+	sync.mutex_unlock(&catalog.refresher_mutex)
+	thread.join(catalog.refresher)
+	thread.destroy(catalog.refresher)
+	catalog.refresher = nil
+}
+
+@(private = "file")
+bridge_catalog_refresher_entry :: proc(data: rawptr) {
+	catalog := (^Bridge_Update_Catalog)(data)
+	interval := catalog.refresh_interval if catalog.refresh_interval > 0 else BRIDGE_CATALOG_REFRESH_INTERVAL
+	for {
+		_, _ = bridge_catalog_refresh(catalog)
+		free_all(context.temp_allocator)
+		started := time.tick_now()
+		sync.mutex_lock(&catalog.refresher_mutex)
+		for !catalog.refresher_stop {
+			left := interval - time.tick_since(started)
+			if left <= 0 do break
+			_ = sync.cond_wait_with_timeout(&catalog.refresher_cond, &catalog.refresher_mutex, left)
+		}
+		stopping := catalog.refresher_stop
+		sync.mutex_unlock(&catalog.refresher_mutex)
+		if stopping do return
+	}
 }

@@ -47,6 +47,10 @@ export function useDialogA11y(
     document.body.style.overflow = 'hidden';
 
     const onKeyDown = (event: KeyboardEvent) => {
+      // A child overlay can be portaled beside this panel. Its own dialog hook
+      // owns focus and Esc while the event originates inside that overlay.
+      const target = event.target as HTMLElement | null;
+      if (panel && target?.closest?.('[role="dialog"]') && !panel.contains(target)) return;
       if (event.key === 'Escape') {
         event.stopPropagation();
         onCloseRef.current();

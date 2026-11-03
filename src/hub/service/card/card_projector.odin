@@ -126,7 +126,8 @@ project_task_card :: proc(s: ^Card_Service, owner: domain.User_ID, task_id: doma
 	qualifies := kind != .None
 	desired: domain.Card
 	if qualifies do desired = build_task_card(s, task, kind, badge)
-	return apply_attention_projection(s, owner, attention_task_card_id(task_id), desired, qualifies)
+	if ok, err := apply_attention_projection(s, owner, attention_task_card_id(task_id), desired, qualifies); !ok do return false, err
+	return project_placement_card(s, owner, task_id, task, found)
 }
 
 // build_task_card renders one task's attention card. A review card advertises
@@ -738,6 +739,17 @@ reconcile_attention_owner :: proc(s: ^Card_Service, owner: domain.User_ID, stats
 			id := string(c.card_id)
 			if !strings.has_prefix(id, ATTENTION_TASK_CARD_PREFIX) do continue
 			ok, err := project_task_card(s, owner, domain.Task_ID(id[len(ATTENTION_TASK_CARD_PREFIX):]))
+			project_result(stats, ok, err)
+		}
+	}
+	live_placements, placement_err := iface.attention_list_live_cards(s.attention_repo, owner, CARD_PROVIDER_TASK_PLACEMENT)
+	if placement_err.code != .None {
+		query_failed(stats, "list placement cards", placement_err)
+	} else {
+		for c in live_placements {
+			id := placement_task_id_from_card(c.card_id)
+			if id == "" do continue
+			ok, err := project_task_card(s, owner, id)
 			project_result(stats, ok, err)
 		}
 	}

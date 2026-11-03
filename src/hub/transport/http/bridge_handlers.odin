@@ -1947,6 +1947,7 @@ bridge_ws_disconnect :: proc(
 	// A replacement already published its newer generation; do not publish old
 	// status summaries after its connection has started.
 	if project_service.bridge_runtime_registry_generation(h.bridge_runtime_registry, bridge_id) != 0 do return
+	taskv2.on_bridge_placement_changed(h.task_engine)
 	if changed {
 		summary := bridge_status_summary_json(domain.bridge_status_string(bridge.status))
 		events.publish_resource_changed(h.event_bus, string(bridge.owner_user_id), "bridge", bridge.bridge_id, "status_changed", summary)
