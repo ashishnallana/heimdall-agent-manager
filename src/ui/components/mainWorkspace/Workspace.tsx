@@ -333,15 +333,19 @@ export function Workspace({ focusMessageId, isMobile = false, leading, leadingWi
     const params = new URLSearchParams(getRouteSearch() || '');
     const panel = params.get('panel') || params.get('sidebar');
     if (!panel) return;
+    const taskId = params.get('task') || params.get('taskId');
+    // A ticket link resolves to the ticket's own tab, which needs the chain id.
+    if (taskId && !ctx.isResolved) return;
     const key = `${routeAgentInstanceId}:${params.toString()}`;
     if (consumedPanelRef.current === key) return;
     consumedPanelRef.current = key;
     const content = resolveLegacyPanelToAuxContent(panel, {
       filePath: params.get('file') || params.get('path'),
-      taskId: params.get('task') || params.get('taskId'),
+      taskId,
+      chainId: ctx.chainId,
     });
     if (content) dispatch(openAuxTab({ treeId: auxTreeId, content, hasChain }));
-  }, [auxTreeId, dispatch, hasChain, routeAgentInstanceId]);
+  }, [auxTreeId, ctx.chainId, ctx.isResolved, dispatch, hasChain, routeAgentInstanceId]);
 
   const openAuxFromPane = useCallback(
     (paneAgentId: string, content: AuxContent, title?: string) => {

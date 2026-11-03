@@ -1757,6 +1757,7 @@ export const {
   useCreateTaskChainMutation,
   useUpdateTaskChainMutation,
   useUpdateTaskDetailMutation,
+  useUpdateTaskPriorityMutation,
   useCancelTaskDetailMutation,
   useAddChainDirectoryMutation,
   useCreateTaskMutation,

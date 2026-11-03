@@ -17,6 +17,7 @@ export const AUX_TAB_ICONS: Record<AuxTabKind, IconName> = {
   preview: 'eye',
   subagentChat: 'chat',
   artifact: 'file',
+  ticket: 'tasks',
 };
 
 export const AUX_TAB_DRAG_MIME = 'application/x-heimdall-aux-tab';
