@@ -90,17 +90,26 @@ If any step fails, stop what has already started and exit non-zero.
 Seeding goes through the public REST API behind the dev proxy, signed in like a browser (the real OIDC flow against the mock; `--user` picks the account) and sending `Origin: $HEIMDALL_LOCAL_UI_ORIGIN` (the hub's `--ui-origin`) for the CSRF check:
 
 - `POST /api/v1/agents`: definitions only, nothing is launched.
-- `POST /api/v1/task-chains` without `coordinator_agent_id`, then tasks with `POST .../tasks`.
 - `POST /api/v1/memories`, then `.../approve`.
 
-A fixture is skipped when `seed.json` records its key, or when an item with the same name or title exists. Existing items are adopted into the record. Nothing is ever updated, so user edits, renames and deletions survive a restart. The script prints `seed: N created, M skipped`.
+A fixture is skipped when `seed.json` records its key, or when an item with the same name or title exists. Existing items are adopted into the record. Nothing is ever updated, so user edits, renames and deletions survive a restart. The script prints `seed: N created, M skipped`. Hub start seeds no task chains: each enrolled bridge gets its own (below). Chains seeded by older versions (`Sample: onboarding walkthrough`, `Sample: bug triage`) are left as they are.
+
+### Bridge sample chain (`bridge-chain.mjs`, shared)
+
+When `local-bridge` knows its local hub (`--hub <name>`), it runs, after `enroll` and on every `start` once the bridge is enrolled, `node scripts/local-runtime/bridge-chain.mjs --api <proxy-url> --hub-dir <hub-dir> --bridge-id <daemon_id> --dev-user <hub DEV_USER>`. It is data only: no `launch_agent` is sent and no provider process starts. A failure is a warning; the bridge still starts.
+
+1. The bridge's owner and label are read from `<hub-dir>/hub.db`. The owner's record is `seed.json` (the hub's dev user) or `seed-<owner>.json` (a seeded paid account). No record (the hub ran with `--no-seed`) means skip.
+2. The chain `Sample: <bridge label>` and two sample tasks are created through the REST API, signed in as the owner like `seed.mjs`, without a coordinator. A chain with that title is adopted.
+3. The coordinator is written into `hub.db` directly, because the API only adds a coordinator by launching one (`create_instance` needs the bridge online and sends `launch_agent`): one transaction inserts an instance of the recorded `sample-coordinator` agent with `bridge_id=<this bridge>`, `chain_id` set, no provider, `runtime_status`/`startup_status` `stopped` and `run_count` 0; a `task_chain_members` row with role `coordinator`; and `task_chains.coordinator_agent_instance_id` (only while empty), as the hub's `set_chain_coordinator` writes them. Resuming the coordinator is the normal UI flow.
+
+The record gains `bridge:<bridge-id>` (chain) and `bridge:<bridge-id>:coordinator` (instance). A recorded key is never redone, so re-enrolling or restarting creates no duplicates, and a chain or coordinator the user deleted or changed is not put back. A chain that already has a coordinator is adopted, not rewritten; a missing sample agent is retried on the next run.
 
 ## Accounts
 
 The dev proxy's default user (`--user`) stays on the free plan. Each seeded paid account (today `paid` on `hobbyist`; it must be in the dev proxy's default roster) gets, in order:
 
 1. `seed.mjs --api <proxy-url> --record <dir>/seed-<user>.json --user <user>`. Its first request creates the account.
-2. `node scripts/local-runtime/plans.mjs --db <dir>/hub.db --user <user> --plan <plan>`. It sets `account_billing.plan_id` with status `custom` (`free` resets to the default). This is the only direct database write, because no payment provider runs locally. The hub picks it up within its 30s entitlement cache.
+2. `node scripts/local-runtime/plans.mjs --db <dir>/hub.db --user <user> --plan <plan>`. It sets `account_billing.plan_id` with status `custom` (`free` resets to the default). Apart from the bridge coordinator (Bridge sample chain), this is the only direct database write, because no payment provider runs locally. The hub picks it up within its 30s entitlement cache.
 3. `approver.mjs init --key <dir>/approver/users/<user>/device.json --user <user>`. Exit 3 means: warn and continue.
 
 `--no-seed` skips all three. The browser switches accounts with `/_dev/login?user=<user>`. `local-bridge --hub <name> --auto-enroll --user <user>` approves with that account's approver, so the bridge belongs to that user.

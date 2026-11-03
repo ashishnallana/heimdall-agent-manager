@@ -18,6 +18,12 @@
 #   --user NAME                 with --auto-enroll, approve as that seeded account of
 #                               the --hub (e.g. paid), so the bridge is that user's
 #                               (default: the hub's dev proxy user)
+#
+# With --hub NAME, once the bridge is enrolled (enroll, and every start) its owner
+# on that seeded hub gets a sample task chain "Sample: <bridge label>" whose
+# coordinator is the seeded Sample Coordinator bound to this bridge. Data only:
+# the coordinator is recorded stopped and is never launched
+# (scripts/local-runtime/bridge-chain.mjs). Seeded once per bridge.
 #   --build MODE                nix | odin | none (default nix)
 #   --bin-dir DIR               take ham-bridge/ham-ctl/ham-pty-host from DIR
 #   --pty-host-bin PATH         ham-pty-host to run agents with (default: built, else PATH)
@@ -204,6 +210,18 @@ seed_approve() {
 }
 
 # enroll_flow <auto 0|1>: the supported device flow (ham-bridge enroll --headless).
+# seed_bridge_chain: the bridge's sample chain and stopped coordinator on a local
+# hub (scripts/local-runtime/bridge-chain.mjs). A failure warns; the bridge still runs.
+seed_bridge_chain() {
+  [ -n "$HUB_NAME" ] || return 0
+  local hdir id; hdir="$(lr_instance_dir hub "$HUB_NAME")"
+  id="$(sed -n 's/^daemon_id = "\(brg_[0-9a-f]*\)"$/\1/p' "$CFG" | head -1)"
+  [ -n "$id" ] || { lr_log "WARN: no enrolled bridge id in $CFG; sample chain not seeded"; return 0; }
+  (cd "$LR_ROOT" && node "$LR_HELPERS/bridge-chain.mjs" --api "$APPROVE_URL" --hub-dir "$hdir" --bridge-id "$id" \
+    --dev-user "$(lr_env_get "$hdir/instance.env" DEV_USER)") 2>&1 | sed 's/^/  /'
+  [ "${PIPESTATUS[0]}" = 0 ] || lr_log "WARN: seeding the sample chain for bridge $id failed"
+}
+
 enroll_flow() {
   local auto="$1" log="$DIR/logs/enroll.log"
   if [ "$auto" = 1 ] && { [ -z "$HUB_NAME" ] || [ ! -s "$APPROVER_KEY" ]; }; then
@@ -269,6 +287,7 @@ start() {
     [ "$AUTO" = 1 ] || lr_die "bridge '$NAME' is not enrolled; run '$0 enroll --name $NAME' or pass --auto-enroll"
     enroll_flow "$AUTO"
   fi
+  seed_bridge_chain
   lr_log "starting bridge on 127.0.0.1:$PORT -> $HUB_URL"
   lr_spawn "$DIR" bridge "$DIR/logs/bridge.log" env ${ISO_ENV[@]+"${ISO_ENV[@]}"} \
     "HEIMDALL_HAM_CTL_BIN=$CTL_BIN" "HEIMDALL_BRIDGE_PTY_HOST=1" "HEIMDALL_HAM_PTY_HOST_BIN=$PTY_BIN" \
@@ -291,6 +310,7 @@ enroll() {
   lr_owned_pid "$DIR" bridge >/dev/null && lr_die "stop bridge '$NAME' before re-enrolling"
   prepare
   enroll_flow "$AUTO"
+  seed_bridge_chain
 }
 
 reseed_auth() {
