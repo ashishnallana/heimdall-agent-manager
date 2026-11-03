@@ -65,7 +65,10 @@ do not (`test_rollover_pane_diff_idle_advances_rollover`,
 once (`test_rollover_duplicate_idle_from_two_sources_acts_once`) and idle that
 was withheld is acted on when re-reported
 (`test_rollover_pane_diff_idle_withheld_then_rereported`). An estimate-only
-stream reaches the pending state (`test_rollover_pending_from_estimate_only_stream`).
+stream (Antigravity-shaped `tool.end` metrics) reaches the pending state
+(`test_rollover_pending_from_estimate_only_stream`). Pane idle can only advance a
+rollover that is already pending; it does not detect the threshold, so Pi (no
+usage or metrics source) is not rolled over automatically.
 
 ### Thresholds: one source
 
@@ -143,16 +146,18 @@ Pi and Antigravity rows come from dawnstar's `provider_models.json` and
 `<provider>/<model>`, and pi's own registry gives the windows, so those rows
 are authoritative. Antigravity does not document its in-app limit: the rows are
 set low so rollover fires before the platform compacts. Pi has no Heimdall
-extension yet, so the bridge gets no `context_tokens` for a Pi agent; its rows
-apply to the tool-traffic estimate described below until a Pi usage source
-exists (Pi therefore rolls over on the estimate). Copilot is not in the map (no models were listed; it needed
+extension yet, so the bridge receives neither a `usage` block nor the
+`tool.end` metrics the estimate is built from: a Pi agent has no context figure
+and **automatic threshold detection is unavailable for Pi** until a usage or
+metrics source exists. Its window rows only take effect once such a source exists. Copilot is not in the map (no models were listed; it needed
 authentication on dawnstar).
 
 ### Estimate fallback (`context_source: "estimate"`)
 
-A provider that reports no context size (no `usage` block: Antigravity sends
-tool metrics only, Pi has no extension events) would otherwise never reach the
-rollover threshold. While no provider `usage.context_tokens` has been seen, the
+A provider that reports no context size but does emit `tool.end` metrics
+(Antigravity: tool metrics only) would otherwise never reach the rollover
+threshold. The estimate is built only from those metrics, so a provider with
+neither (Pi, which has no extension) gets no figure. While no provider `usage.context_tokens` has been seen, the
 bridge uses `estimated_context_tokens = (est_tokens_total since last reset) *
 BRIDGE_EXT_ESTIMATE_MULTIPLIER` (`src/bridge/extension_token_usage.odin`,
 default **1.5**: tool traffic understates the real context, so the estimate is
