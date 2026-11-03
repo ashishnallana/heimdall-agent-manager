@@ -2,6 +2,7 @@ package http
 
 import "core:encoding/json"
 import "core:fmt"
+import "core:strings"
 import "core:testing"
 import domain "odin_test:hub/domain"
 import iface "odin_test:hub/repository/iface"
@@ -77,4 +78,28 @@ token_usage_data :: proc(t: ^testing.T, body: string) -> json.Object {
 	root, _ := v.(json.Object)
 	data, _ := root["data"].(json.Object)
 	return data
+}
+
+// Per-instance and per-agent-context thresholds are emitted from each row's own snapshot.
+@(test)
+test_chain_token_usage_json_per_row_thresholds :: proc(t: ^testing.T) {
+	instances := []domain.Agent_Instance{
+		{agent_instance_id = "inst_old", agent_id = "agt_a", runtime_status = "stopped", kind = "agent",
+		 token_usage_json = `{"tool_calls":1,"est_tokens_total":1,"context_tokens":10,"context_window":200000,"warn_pct":40,"rollover_pct":70,"run_count":1,"compactions":0,"updated_at_ms":1}`},
+		{agent_instance_id = "inst_live", agent_id = "agt_a", runtime_status = "running", kind = "agent",
+		 token_usage_json = `{"tool_calls":1,"est_tokens_total":1,"context_tokens":150000,"context_window":200000,"warn_pct":60,"rollover_pct":80,"run_count":2,"compactions":0,"updated_at_ms":1}`},
+	}
+	usage := domain.chain_token_usage_aggregate(instances, nil, context.temp_allocator)
+	b := strings.builder_make(context.temp_allocator)
+	write_chain_token_usage_json(&b, "chain_x", usage)
+	v, err := json.parse(transmute([]u8)strings.to_string(b), json.DEFAULT_SPECIFICATION, true, context.temp_allocator)
+	testing.expect_value(t, err, json.Error.None)
+	agent := v.(json.Object)["agents"].(json.Array)[0].(json.Object)
+	insts := agent["instances"].(json.Array)
+	testing.expect_value(t, insts[0].(json.Object)["warn_pct"].(json.Integer), 40)
+	testing.expect_value(t, insts[1].(json.Object)["warn_pct"].(json.Integer), 60)
+	testing.expect_value(t, insts[1].(json.Object)["rollover_pct"].(json.Integer), 80)
+	ctx := agent["context"].(json.Object)
+	testing.expect_value(t, ctx["warn_pct"].(json.Integer), 60)
+	testing.expect_value(t, ctx["rollover_pct"].(json.Integer), 80)
 }

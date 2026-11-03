@@ -84,6 +84,9 @@ write_chain_token_usage_json :: proc(b: ^strings.Builder, chain_id: string, usag
 		if agent.context_pct >= 0 {
 			strings.write_string(b, fmt.tprintf(",\"context\":{{\"pct\":%d,\"tokens\":%d,\"window\":%d", agent.context_pct, agent.context_tokens, agent.context_window))
 			write_json_str_field(b, "agent_instance_id", agent.context_instance_id)
+			if agent.context_warn_pct > 0 && agent.context_rollover_pct > 0 {
+				strings.write_string(b, fmt.tprintf(",\"warn_pct\":%d,\"rollover_pct\":%d", agent.context_warn_pct, agent.context_rollover_pct))
+			}
 			strings.write_byte(b, '}')
 		}
 		strings.write_string(b, ",\"instances\":[")
@@ -116,6 +119,7 @@ write_chain_token_instance_json :: proc(b: ^strings.Builder, row: domain.Chain_T
 		if s.has_context do strings.write_string(b, fmt.tprintf(",\"context_tokens\":%d", s.context_tokens))
 		if s.context_window > 0 do strings.write_string(b, fmt.tprintf(",\"context_window\":%d", s.context_window))
 		if s.window_source != "" do write_json_str_field(b, "window_source", s.window_source)
+		if s.warn_pct > 0 && s.rollover_pct > 0 do strings.write_string(b, fmt.tprintf(",\"warn_pct\":%d,\"rollover_pct\":%d", s.warn_pct, s.rollover_pct))
 	}
 	strings.write_byte(b, '}')
 }

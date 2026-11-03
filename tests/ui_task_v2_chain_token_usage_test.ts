@@ -135,3 +135,26 @@ test('chain rows: waiting / unavailable(provider) come from LIVE instances only'
   assert.match(cell('chain-token-usage-instance-context-o1'), /unavailable for antigravity/);
   assert.match(cell('chain-token-usage-instance-context-w1'), /data-context-state="waiting"/);
 });
+
+test('contexts use their own snapshot thresholds, not the first/historical pair', () => {
+  const inst = (id: string, live: boolean, th: [number, number] | null) => ({
+    agent_instance_id: id, display_name: id, runtime_status: live ? 'running' : 'stopped', live, has_data: true,
+    snapshot_counted: false, lifetime: fig(1000, 10, 10, 1), ...(live ? { context_pct: 75, context_tokens: 150000, context_window: 200000 } : {}),
+    ...(th ? { warn_pct: th[0], rollover_pct: th[1] } : {}),
+  });
+  const payload = {
+    has_data: true, warn_pct: 40, rollover_pct: 70, total: fig(1000, 10, 10, 1),
+    agents: [
+      { agent_id: 'a1', agent_name: 'a1', has_data: true, live_instances: 1, lifetime: fig(1, 1, 1, 1),
+        context: { pct: 75, tokens: 150000, window: 200000, agent_instance_id: 'live', warn_pct: 60, rollover_pct: 80 },
+        instances: [inst('old', false, [40, 70]), inst('live', true, [60, 80])] },
+      // no per-row pair -> summary pair (40/70) applies: 75% is danger
+      { agent_id: 'a2', agent_name: 'a2', has_data: true, live_instances: 1, lifetime: fig(1, 1, 1, 1),
+        context: { pct: 75, tokens: 150000, window: 200000, agent_instance_id: 'x' }, instances: [inst('x', true, null)] },
+    ],
+  };
+  const u = model.normalizeChainTokenUsage(payload)!;
+  assert.equal(u.agents[0].context!.tone, 'warning');
+  assert.equal(u.agents[0].instances[1].context!.tone, 'warning');
+  assert.equal(u.agents[1].context!.tone, 'danger');
+});

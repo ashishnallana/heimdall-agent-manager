@@ -69,6 +69,9 @@ Chain_Token_Agent :: struct {
 	context_tokens:       i64,
 	context_window:       i64,
 	context_instance_id:  string,
+	// Thresholds of the snapshot that supplied context_* (0 = absent -> fallback).
+	context_warn_pct:     int,
+	context_rollover_pct: int,
 }
 
 Chain_Token_Usage :: struct {
@@ -77,7 +80,7 @@ Chain_Token_Usage :: struct {
 	has_data:            bool,
 	instances:           int,
 	instances_with_data: int,
-	warn_pct:            int, // from the first snapshot that reports them; 0 = none (use fallback)
+	warn_pct:            int, // summary only: first LIVE snapshot reporting them, else first any; per-row values are authoritative; 0 = none
 	rollover_pct:        int,
 }
 
@@ -142,6 +145,7 @@ chain_token_instance_from :: proc(inst: Agent_Instance) -> Chain_Token_Instance 
 chain_token_usage_aggregate :: proc(instances: []Agent_Instance, agent_names: map[string]string, allocator := context.allocator) -> Chain_Token_Usage {
 	out := Chain_Token_Usage{agents = make([dynamic]Chain_Token_Agent, allocator)}
 	index := make(map[string]int, 8, context.temp_allocator)
+	summary_live := false
 	for inst in instances {
 		if inst.kind != "" && inst.kind != "agent" do continue
 		row := chain_token_instance_from(inst)
@@ -158,8 +162,13 @@ chain_token_usage_aggregate :: proc(instances: []Agent_Instance, agent_names: ma
 		out.instances += 1
 		if row.live do agent.live_instances += 1
 		if !row.has_data do continue
-		if out.warn_pct == 0 && row.snapshot.warn_pct > 0 do out.warn_pct = row.snapshot.warn_pct
-		if out.rollover_pct == 0 && row.snapshot.rollover_pct > 0 do out.rollover_pct = row.snapshot.rollover_pct
+		if row.has_snapshot && row.snapshot.warn_pct > 0 && row.snapshot.rollover_pct > 0 {
+			if row.live && !summary_live {
+				out.warn_pct, out.rollover_pct, summary_live = row.snapshot.warn_pct, row.snapshot.rollover_pct, true
+			} else if out.warn_pct == 0 {
+				out.warn_pct, out.rollover_pct = row.snapshot.warn_pct, row.snapshot.rollover_pct
+			}
+		}
 		agent.has_data = true
 		out.has_data = true
 		out.instances_with_data += 1
@@ -170,6 +179,8 @@ chain_token_usage_aggregate :: proc(instances: []Agent_Instance, agent_names: ma
 			agent.context_tokens = row.snapshot.context_tokens
 			agent.context_window = row.snapshot.context_window
 			agent.context_instance_id = row.agent_instance_id
+			agent.context_warn_pct = row.snapshot.warn_pct
+			agent.context_rollover_pct = row.snapshot.rollover_pct
 		}
 	}
 	slice.sort_by(out.agents[:], proc(a, b: Chain_Token_Agent) -> bool {

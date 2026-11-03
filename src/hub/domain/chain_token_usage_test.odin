@@ -103,3 +103,25 @@ test_chain_token_usage_missing_and_partial_data :: proc(t: ^testing.T) {
 	testing.expect_value(t, b.context_pct, -1)
 	testing.expect_value(t, b.live_instances, 1)
 }
+
+// Per-row thresholds: a stopped/historical 40/70 snapshot listed first must not
+// leak onto a live 60/80 instance; the agent context carries the selected
+// instance's own pair, and the summary prefers a live snapshot.
+@(test)
+test_chain_token_usage_per_row_thresholds :: proc(t: ^testing.T) {
+	instances := []Agent_Instance{
+		{agent_instance_id = "inst_old", agent_id = "agt_a", runtime_status = "stopped", kind = "agent",
+		 token_usage_json = `{"tool_calls":1,"est_tokens_total":1,"context_tokens":150000,"context_window":200000,"warn_pct":40,"rollover_pct":70,"run_count":1,"compactions":0,"updated_at_ms":1}`},
+		{agent_instance_id = "inst_live", agent_id = "agt_a", runtime_status = "running", kind = "agent",
+		 token_usage_json = `{"tool_calls":1,"est_tokens_total":1,"context_tokens":150000,"context_window":200000,"warn_pct":60,"rollover_pct":80,"run_count":2,"compactions":0,"updated_at_ms":1}`},
+	}
+	usage := chain_token_usage_aggregate(instances, nil, context.temp_allocator)
+	a := usage.agents[0]
+	testing.expect_value(t, a.instances[0].snapshot.warn_pct, 40)
+	testing.expect_value(t, a.instances[1].snapshot.warn_pct, 60)
+	testing.expect_value(t, a.context_instance_id, "inst_live")
+	testing.expect_value(t, a.context_warn_pct, 60)
+	testing.expect_value(t, a.context_rollover_pct, 80)
+	testing.expect_value(t, usage.warn_pct, 60)
+	testing.expect_value(t, usage.rollover_pct, 80)
+}
