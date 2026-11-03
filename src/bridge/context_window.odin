@@ -1,8 +1,8 @@
 package main
 
 // Context window per agent instance (chain "Estimate agent tokens via
-// extensions", T2b). The window is NEVER detected at runtime (no Codex
-// model_context_window, no CLI model-list fields). It resolves, in order:
+// extensions", T2b). bridge_context_window_resolve never probes a provider; it
+// resolves, in order:
 //   1. a user override persisted on this bridge, keyed by provider + model;
 //   2. the read-only config shipped inside the bridge binary
 //      (context_windows.json: ordered {provider, model_regex, context_window},
@@ -13,6 +13,10 @@ package main
 // The model id tried is the resolved_model when discovery knows it, then the
 // configured model (which may be an alias such as `default` or `opus`); an alias
 // with no known resolved id resolves small (200K), never large.
+// A window the provider itself reports (Codex model_context_window) is layered on
+// top in extension_token_usage.odin: it replaces the config/default result
+// (source "reported") but never a user override, and a >10% disagreement with
+// the config/default result raises window_mismatch.
 // The hub reaches this through the `context_window_op` frame (list/set/clear).
 
 import "base:runtime"
@@ -37,11 +41,15 @@ Bridge_Context_Window_Source :: enum u8 {
 	Default,
 	Config,
 	Override,
+	// Provider-reported window (Codex model_context_window); applies only when
+	// no override exists. Never produced by bridge_context_window_resolve.
+	Reported,
 }
 
 bridge_context_window_source_name :: proc(source: Bridge_Context_Window_Source) -> string {
 	switch source {
 	case .Override: return "override"
+	case .Reported: return "reported"
 	case .Config:   return "config"
 	case .Default:  return "default"
 	}

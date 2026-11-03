@@ -15,7 +15,9 @@ export interface AgentInstanceTokenUsage {
   est_tokens_total: number;
   context_tokens?: number;
   context_window?: number;
-  window_source?: 'override' | 'config' | 'default';
+  window_source?: 'override' | 'reported' | 'config' | 'default';
+  reported_window?: number;
+  window_mismatch?: boolean;
   context_pct?: number;
   output_tokens_total?: number;
   compactions: number;

@@ -40,3 +40,18 @@ test_agent_token_usage_usage_supported_round_trip :: proc(t: ^testing.T) {
 		testing.expect(t, !strings.contains(agent_token_usage_json(u, context.temp_allocator), "usage_supported"))
 	}
 }
+
+@(test)
+test_agent_token_usage_reported_window_source :: proc(t: ^testing.T) {
+	u, ok := agent_token_usage_from_json(`{"tool_calls":1,"est_tokens_total":2,"context_tokens":50000,"context_window":258400,"window_source":"reported","reported_window":258400,"window_mismatch":true,"compactions":0,"updated_at_ms":5}`)
+	testing.expect(t, ok)
+	testing.expect_value(t, u.window_source, "reported")
+	testing.expect_value(t, u.reported_window, i64(258400))
+	testing.expect(t, u.window_mismatch)
+	testing.expect_value(t, agent_token_usage_json(u, context.temp_allocator), `{"tool_calls":1,"est_tokens_total":2,"context_tokens":50000,"context_window":258400,"window_source":"reported","reported_window":258400,"window_mismatch":true,"context_pct":19,"compactions":0,"updated_at_ms":5}`)
+
+	u, ok = agent_token_usage_from_json(`{"tool_calls":1,"est_tokens_total":2,"window_source":"config","compactions":0,"updated_at_ms":5}`)
+	testing.expect(t, ok)
+	testing.expect_value(t, u.reported_window, i64(0))
+	testing.expect(t, !u.window_mismatch)
+}

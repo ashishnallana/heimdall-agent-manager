@@ -13,7 +13,7 @@ export const CONTEXT_WARN_PCT = 40;
 export const CONTEXT_ROLLOVER_PCT = 70;
 
 export type ContextTone = 'neutral' | 'warning' | 'danger';
-export type WindowSource = 'override' | 'config' | 'default' | '';
+export type WindowSource = 'override' | 'reported' | 'config' | 'default' | '';
 
 export interface TokenUsageSnapshot {
   toolCalls: number;
@@ -21,6 +21,10 @@ export interface TokenUsageSnapshot {
   contextTokens: number | null;
   contextWindow: number | null;
   windowSource: WindowSource;
+  /** Window the provider itself reported; null when none. */
+  reportedWindow: number | null;
+  /** Reported window differs from the config/default window by more than 10%. */
+  windowMismatch: boolean;
   /** Whole % of the window; null until the provider reported a context size. */
   contextPct: number | null;
   outputTokensTotal: number | null;
@@ -61,7 +65,9 @@ export function normalizeTokenUsage(raw: unknown): TokenUsageSnapshot | null {
     estTokensTotal: est,
     contextTokens,
     contextWindow,
-    windowSource: source === 'override' || source === 'config' || source === 'default' ? source : '',
+    windowSource: source === 'override' || source === 'reported' || source === 'config' || source === 'default' ? source : '',
+    reportedWindow: count(raw.reported_window) || null,
+    windowMismatch: raw.window_mismatch === true,
     contextPct,
     outputTokensTotal: count(raw.output_tokens_total),
     compactions: count(raw.compactions) ?? 0,
@@ -104,6 +110,7 @@ export function formatTokens(n: number): string {
 export function windowSourceLabel(source: WindowSource): string {
   switch (source) {
     case 'override': return 'user override';
+    case 'reported': return 'reported';
     case 'config': return 'model config';
     case 'default': return 'default';
     default: return '';

@@ -266,11 +266,11 @@ test_ctxwin_instance_snapshot_carries_window_and_pct :: proc(t: ^testing.T) {
 	res := bridge_ext_ingest(Bridge_Local_Agent_Token_Record{agent_instance_id = id, instance_token = "tok_test", role = .Agent}, raw, now)
 	bridge_ext_ingest_result_destroy(&res)
 	_, _, pct = bridge_ext_context_window_for(id)
-	testing.expect_value(t, pct, i64(60)) // 285000 / 475000, the reported 999999 ignored
+	testing.expect_value(t, pct, i64(28)) // 285000 / 999999: the provider-reported window beats config (T5)
 
 	frame := bridge_instance_status_json(id)
 	defer delete(frame)
-	testing.expect(t, strings.contains(frame, `"context_window":475000,"window_source":"config","context_pct":60`))
+	testing.expect(t, strings.contains(frame, `"context_window":999999,"window_source":"reported","reported_window":999999,"window_mismatch":true,"context_pct":28`))
 
 	// An override re-resolves the live instance; a session reset keeps the window.
 	testing.expect_value(t, bridge_context_window_set("codex", "gpt-6.1-sol", 1_000_000), Bridge_Context_Window_Error.None)
@@ -285,8 +285,8 @@ test_ctxwin_instance_snapshot_carries_window_and_pct :: proc(t: ^testing.T) {
 	testing.expect_value(t, source, Bridge_Context_Window_Source.Override)
 	testing.expect_value(t, bridge_context_window_clear("codex", "gpt-6.1-sol"), Bridge_Context_Window_Error.None)
 	window, source, _ = bridge_ext_context_window_for(id)
-	testing.expect_value(t, window, i64(475_000))
-	testing.expect_value(t, source, Bridge_Context_Window_Source.Config)
+	testing.expect_value(t, window, i64(999_999)) // no override again: the reported window applies
+	testing.expect_value(t, source, Bridge_Context_Window_Source.Reported)
 }
 
 // The shipped map (R1 research, docs/transient-extension-signals.md): every

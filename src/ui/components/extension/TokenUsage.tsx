@@ -67,10 +67,15 @@ export function ContextMeter({ instance }: { instance: any }) {
         <span className="text-primary" data-debug-id="live-instance-context-pct">
           {usage.contextPct}% · {formatTokens(usage.contextTokens ?? 0)}{window ? ` / ${window}` : ''} tokens
         </span>
-        <span className="text-muted" data-debug-id="live-instance-context-source">
+        <span className="text-muted" data-debug-id="live-instance-context-source" data-window-source={usage.windowSource}>
           {source ? `window: ${source}` : ''}
         </span>
       </div>
+      {usage.windowMismatch ? (
+        <span className="text-[11px] text-warning" data-debug-id="live-instance-window-mismatch" role="note">
+          Provider reports a {formatTokens(usage.reportedWindow ?? 0)} window, which differs from the configured one by more than 10%. Set an override if this is wrong.
+        </span>
+      ) : null}
       <span className="text-[11px] text-muted">
         {usage.toolCalls} tool calls · ~{formatTokens(usage.estTokensTotal)} tool tokens
         {usage.outputTokensTotal !== null ? ` · ${formatTokens(usage.outputTokensTotal)} output` : ''}

@@ -77,9 +77,11 @@ test_ext_tokens_accumulate_tool_calls_and_usage :: proc(t: ^testing.T) {
 	testing.expect(t, u.has_context)
 	testing.expect_value(t, u.context_tokens, i64(42000))
 	testing.expect_value(t, u.context_source, "claude_transcript")
-	// A provider-reported window is ignored (T2b: windows come only from config).
-	testing.expect_value(t, u.context_window, i64(0))
-	testing.expect_value(t, bridge_ext_token_usage_window(u), i64(BRIDGE_EXT_TOKEN_DEFAULT_WINDOW))
+	// A provider-reported window is used when no override exists (T5).
+	testing.expect_value(t, u.context_window, i64(475000))
+	testing.expect_value(t, u.window_source, Bridge_Context_Window_Source.Reported)
+	testing.expect_value(t, u.reported_window, i64(475000))
+	testing.expect(t, u.window_mismatch, "475000 vs the 200000 default")
 	testing.expect_value(t, u.output_tokens_total, i64(1234))
 	testing.expect_value(t, u.compactions, i64(0))
 	testing.expect_value(t, u.updated_at_ms, i64(3000))
@@ -90,7 +92,7 @@ test_ext_tokens_accumulate_tool_calls_and_usage :: proc(t: ^testing.T) {
 	testing.expect_value(t, u.tool_calls, i64(3))
 	testing.expect_value(t, u.context_tokens, i64(50000))
 	testing.expect_value(t, u.output_tokens_total, i64(1234))
-	testing.expect_value(t, u.context_window, i64(0))
+	testing.expect_value(t, u.context_window, i64(475000))
 }
 
 @(test)
@@ -188,7 +190,7 @@ test_ext_tokens_push_throttle :: proc(t: ^testing.T) {
 	// With a resolved 475k window, 5pp is 23750 tokens.
 	testing.expect(t, bridge_ext_token_usage_set_window(&u, {475000, .Config}))
 	bridge_ext_token_mark_pushed(&u, 13_500) // the window change itself made it dirty
-	_ = tok_apply(t, &u, tok_event("tool.end", "s1", tok_usage("50000", `,"context_window":999999`)), 14_000)
+	_ = tok_apply(t, &u, tok_event("tool.end", "s1", tok_usage("50000")), 14_000)
 	testing.expect(t, !bridge_ext_token_push_due(u, 14_000), "20001 < 5pp of 475k")
 	_ = tok_apply(t, &u, tok_event("tool.end", "s1", tok_usage("53749")), 14_500)
 	testing.expect(t, bridge_ext_token_push_due(u, 14_500), "23750 = 5pp of 475k")
@@ -316,4 +318,70 @@ test_ext_tokens_usage_supported_from_hello :: proc(t: ^testing.T) {
 	bridge_ext_token_usage_write_json(&b, u2)
 	testing.expect(t, strings.contains(strings.to_string(b), `"usage_supported":false`))
 	testing.expect(t, u2.updated_at_ms == 1000 && u2.dirty, "hello makes the snapshot reportable")
+}
+
+@(test)
+test_ext_tokens_reported_window_used_without_override :: proc(t: ^testing.T) {
+	u: Bridge_Ext_Token_Usage
+	defer bridge_ext_token_usage_destroy(&u)
+	testing.expect(t, bridge_ext_token_usage_set_window(&u, {200000, .Config}))
+	_ = tok_apply(t, &u, tok_event("tool.end", "s1", tok_usage("50000", `,"context_window":258400`)), 1000)
+	testing.expect_value(t, u.context_window, i64(258400))
+	testing.expect_value(t, u.window_source, Bridge_Context_Window_Source.Reported)
+	testing.expect_value(t, u.resolved_window, i64(200000))
+	testing.expect(t, u.window_mismatch)
+	testing.expect_value(t, bridge_ext_token_usage_context_pct(u), i64(19))
+
+	b := strings.builder_make(context.temp_allocator)
+	bridge_ext_token_usage_write_json(&b, u)
+	v, err := json.parse_string(strings.to_string(b), json.DEFAULT_SPECIFICATION, true, context.temp_allocator)
+	testing.expect_value(t, err, json.Error.None)
+	obj := v.(json.Object)
+	testing.expect_value(t, obj["window_source"].(json.String), "reported")
+	testing.expect_value(t, obj["reported_window"].(json.Integer), 258400)
+	testing.expect_value(t, obj["window_mismatch"].(json.Boolean), true)
+
+	// A later config resolution (e.g. override cleared/changed) keeps the reported window.
+	_ = bridge_ext_token_usage_set_window(&u, {258400, .Config})
+	testing.expect(t, !u.window_mismatch)
+	testing.expect_value(t, u.window_source, Bridge_Context_Window_Source.Reported)
+
+	// A reset (new session) keeps window state.
+	_ = tok_apply(t, &u, tok_event("session", "s2", `,"payload":{"phase":"start"}`), 2000)
+	testing.expect_value(t, u.reported_window, i64(258400))
+}
+
+@(test)
+test_ext_tokens_override_beats_reported_window :: proc(t: ^testing.T) {
+	u: Bridge_Ext_Token_Usage
+	defer bridge_ext_token_usage_destroy(&u)
+	testing.expect(t, bridge_ext_token_usage_set_window(&u, {500000, .Override}))
+	_ = tok_apply(t, &u, tok_event("tool.end", "s1", tok_usage("50000", `,"context_window":258400`)), 1000)
+	testing.expect_value(t, u.context_window, i64(500000))
+	testing.expect_value(t, u.window_source, Bridge_Context_Window_Source.Override)
+	testing.expect_value(t, u.reported_window, i64(258400))
+	testing.expect(t, !u.window_mismatch, "no mismatch under an override")
+
+	// Dropping the override lets the reported window take over.
+	testing.expect(t, bridge_ext_token_usage_set_window(&u, {200000, .Config}))
+	testing.expect_value(t, u.window_source, Bridge_Context_Window_Source.Reported)
+	testing.expect(t, u.window_mismatch)
+}
+
+@(test)
+test_ext_tokens_window_mismatch_ten_percent_boundary :: proc(t: ^testing.T) {
+	check :: proc(t: ^testing.T, reported: i64, want: bool) {
+		u: Bridge_Ext_Token_Usage
+		defer bridge_ext_token_usage_destroy(&u)
+		_ = bridge_ext_token_usage_set_window(&u, {200000, .Config})
+		u.reported_window = reported
+		bridge_ext_token_usage_window_recompute(&u)
+		testing.expect_value(t, u.window_mismatch, want)
+		testing.expect_value(t, u.context_window, reported)
+	}
+	check(t, 220000, false) // exactly +10%
+	check(t, 220001, true)
+	check(t, 180000, false) // exactly -10%
+	check(t, 179999, true)
+	check(t, 200000, false)
 }

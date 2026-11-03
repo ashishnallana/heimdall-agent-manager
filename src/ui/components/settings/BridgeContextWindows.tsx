@@ -14,7 +14,7 @@ import {
   parseCustomContextWindow,
 } from './contextWindowSettings';
 
-const SOURCE_TONE = { override: 'info', config: 'neutral', default: 'warning' } as const;
+const SOURCE_TONE = { override: 'info', reported: 'info', config: 'neutral', default: 'warning' } as const;
 
 function entryKey(e: { provider: string; model: string }): string {
   return `${e.provider}\u0000${e.model}`;

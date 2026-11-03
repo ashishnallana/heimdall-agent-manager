@@ -6,7 +6,7 @@
 
 import { CONTEXT_ROLLOVER_PCT, CONTEXT_WARN_PCT } from '../extension/tokenUsageModel';
 
-export type ContextWindowSource = 'override' | 'config' | 'default';
+export type ContextWindowSource = 'override' | 'reported' | 'config' | 'default';
 
 export interface ContextWindowEntry {
   provider: string;
@@ -105,6 +105,7 @@ export function normalizeContextWindowState(data: any): ContextWindowState | nul
 export function contextWindowSourceLabel(source: ContextWindowSource): string {
   switch (source) {
     case 'override': return 'Override';
+    case 'reported': return 'Reported';
     case 'config': return 'Config';
     default: return 'Default';
   }
@@ -113,6 +114,7 @@ export function contextWindowSourceLabel(source: ContextWindowSource): string {
 export function contextWindowSourceHelp(source: ContextWindowSource, defaultWindow: number): string {
   switch (source) {
     case 'override': return 'Set by you on this bridge.';
+    case 'reported': return 'Reported by the provider for a running instance.';
     case 'config': return 'From the context-window config shipped with the bridge.';
     default: return `Not in the shipped config; using the ${formatContextWindow(defaultWindow)} default. Set an override if this model has a different window.`;
   }
