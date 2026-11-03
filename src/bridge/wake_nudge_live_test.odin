@@ -64,7 +64,8 @@ test_wake_nudge_live_child_keeps_process_and_refreshes_task_md :: proc(t: ^testi
 	bridge_runtime_record_launch(Bridge_Runtime_Launch{agent_instance_id = id, run_dir = run_dir})
 	defer bridge_runtime_remove_launch(id)
 
-	path := fmt.tprintf("/tmp/ham-t8-nudge-%d.sock", os.get_pid())
+	path := fmt.aprintf("/tmp/ham-t8-nudge-%d.sock", os.get_pid())
+	defer delete(path)
 	_ = posix.unlink(cstring(raw_data(path)))
 	defer _ = posix.unlink(cstring(raw_data(path)))
 	listener := posix.socket(.UNIX, .STREAM)
@@ -141,15 +142,8 @@ test_wake_nudge_live_child_keeps_process_and_refreshes_task_md :: proc(t: ^testi
 		}
 	})
 	defer thread.destroy(worker)
-	sync.mutex_lock(&pty_host_daemon_lock)
-	old_socket, old_started := pty_host_daemon_socket, pty_host_daemon_started
-	pty_host_daemon_socket, pty_host_daemon_started = path, true
-	sync.mutex_unlock(&pty_host_daemon_lock)
-	defer {
-		sync.mutex_lock(&pty_host_daemon_lock)
-		pty_host_daemon_socket, pty_host_daemon_started = old_socket, old_started
-		sync.mutex_unlock(&pty_host_daemon_lock)
-	}
+	pty_host_test_swap := pty_host_test_install_socket(path)
+	defer pty_host_test_restore_socket(pty_host_test_swap)
 
 	pack := `{"task_id":"task_t8","attempt_no":2,"task":{"title":"T8 nudge"},"brief":{"goal":"NUDGE_GOAL","acceptance":["a"]}}`
 	wake := strings.concatenate({

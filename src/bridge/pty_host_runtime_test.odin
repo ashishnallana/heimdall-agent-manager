@@ -1334,8 +1334,10 @@ bridge_br4_ensure_daemon_retires_a_live_prior_daemon_first :: proc(t: ^testing.T
 
 	sock := fmt.aprintf("/tmp/ham-br4-%d.sock", os.get_pid())
 	defer delete(sock)
-	pty_host_daemon_socket = sock
-	pty_host_daemon_started = true
+	// A heap clone installed under pty_host_daemon_lock and restored before `sock`
+	// is freed: assigning `sock` itself left the global dangling after the delete.
+	pty_host_test_swap := pty_host_test_install_socket(sock)
+	defer pty_host_test_restore_socket(pty_host_test_swap)
 
 	script := fmt.aprintf("/tmp/ham-br4-fake-daemon-%d.sh", os.get_pid())
 	defer delete(script)

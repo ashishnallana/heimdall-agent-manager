@@ -28,7 +28,8 @@ startup_wake_duplicate_preserves_child_and_stale_or_stopped_is_denied :: proc(t:
 	bridge_local_token_records = make([dynamic]Bridge_Local_Agent_Token_Record, allocator = runtime.heap_allocator())
 	append(&bridge_local_token_records, rec)
 	sync.mutex_unlock(&bridge_local_token_mutex)
-	path := fmt.tprintf("/tmp/ham-startup-wake-%d.sock", os.get_pid())
+	path := fmt.aprintf("/tmp/ham-startup-wake-%d.sock", os.get_pid())
+	defer delete(path)
 	_ = posix.unlink(cstring(raw_data(path)))
 	defer _ = posix.unlink(cstring(raw_data(path)))
 	listener := posix.socket(.UNIX, .STREAM)
@@ -83,15 +84,8 @@ startup_wake_duplicate_preserves_child_and_stale_or_stopped_is_denied :: proc(t:
 		}
 	})
 	defer thread.destroy(worker)
-	sync.mutex_lock(&pty_host_daemon_lock)
-	old_socket, old_started := pty_host_daemon_socket, pty_host_daemon_started
-	pty_host_daemon_socket, pty_host_daemon_started = path, true
-	sync.mutex_unlock(&pty_host_daemon_lock)
-	defer {
-		sync.mutex_lock(&pty_host_daemon_lock)
-		pty_host_daemon_socket, pty_host_daemon_started = old_socket, old_started
-		sync.mutex_unlock(&pty_host_daemon_lock)
-	}
+	pty_host_test_swap := pty_host_test_install_socket(path)
+	defer pty_host_test_restore_socket(pty_host_test_swap)
 	command := bridge_wake_launch_command_json("wake", id, "task", "worker", "future", "model", "agent", "name", "chain", "title", "coordinator", "", "", run_count = 4)
 	defer delete(command)
 	for i in 0..<2 {
@@ -255,11 +249,8 @@ startup_wake_preserved_old_child_after_bootstrap_failure_is_replaced_on_retry ::
 		}
 	})
 	defer { sync.atomic_store(&host.done, true); thread.join(worker); thread.destroy(worker) }
-	sync.mutex_lock(&pty_host_daemon_lock)
-	old_socket, old_daemon := pty_host_daemon_socket, pty_host_daemon_started
-	pty_host_daemon_socket, pty_host_daemon_started = path, true
-	sync.mutex_unlock(&pty_host_daemon_lock)
-	defer { sync.mutex_lock(&pty_host_daemon_lock); pty_host_daemon_socket, pty_host_daemon_started = old_socket, old_daemon; sync.mutex_unlock(&pty_host_daemon_lock) }
+	pty_host_test_swap := pty_host_test_install_socket(path)
+	defer pty_host_test_restore_socket(pty_host_test_swap)
 
 	command := bridge_wake_launch_command_json("retry", id, "task", "worker", "future", "model", "agent", "name", "chain", "title", "coordinator", "", "", run_count = 5)
 	ok, detail, _ := bridge_runtime_launch_agent("retry", command)

@@ -605,6 +605,7 @@ pty_host_bridge_identity :: proc() -> string {
 
 // pty_host_dial connects to the daemon unix socket, returning the fd or (-1,false).
 pty_host_dial :: proc(socket_path: string) -> (local_socket.Socket, bool) {
+	if !pty_host_test_socket_allowed(socket_path) do return -1, false
 	return local_socket.dial(strings.trim_prefix(socket_path, "unix:"))
 }
 
@@ -786,4 +787,25 @@ pty_host_request_deadline :: proc(socket_path: string, request: []byte, timeout_
         return reply, true
     }
     return {}, false
+}
+
+// pty_host_test_socket_allowed is the test-only fence around the pty-host socket:
+// a unit test may only talk to a socket it created under the (test) scratch root,
+// never the bridge's private socket directory (<scratch>/heimdall-<uid>/, where
+// every real bridge's daemon lives) nor anything under the data dir. A test that
+// resolves such a path (a dangling or temp-reused string, a config loaded from the
+// real home) is refused instead of pinging, spawning or killing a live daemon.
+// Production builds compile this to "always allowed".
+pty_host_test_socket_allowed :: proc(socket_path: string) -> bool {
+	when !ODIN_TEST {
+		return true
+	} else {
+		path := strings.trim_prefix(socket_path, "unix:")
+		if !strings.has_prefix(path, "/") do return false
+		root := bridge_scratch_root(context.temp_allocator)
+		private_dir := fmt.tprintf("/%s/", bridge_os_private_dir_name())
+		if strings.contains(path, private_dir) do return false
+		if strings.contains(path, "/.local/share/heimdall/") do return false
+		return strings.has_prefix(path, root) || strings.has_prefix(path, "/tmp/")
+	}
 }
