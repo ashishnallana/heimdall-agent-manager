@@ -111,6 +111,50 @@ export default {
       },
       transitionTimingFunction: {
         standard: 'var(--ease-standard)',
+        emphasized: 'var(--ease-emphasized)',
+      },
+      // Conversation launcher motion (values match the redesign reference). The
+      // reduced-motion guard for these utilities lives in src/ui/styles.css.
+      keyframes: {
+        tokSwap: {
+          from: { opacity: '0', transform: 'translateY(8px)', filter: 'blur(2px)' },
+          to: { opacity: '1', transform: 'none', filter: 'none' },
+        },
+        menuIn: {
+          from: { opacity: '0', transform: 'translateY(-4px) scale(.97)' },
+          to: { opacity: '1', transform: 'none' },
+        },
+        pop: {
+          from: { transform: 'scale(.6)', opacity: '0' },
+          to: { transform: 'none', opacity: '1' },
+        },
+        fadeSlide: {
+          from: { opacity: '0', transform: 'translateX(6px)' },
+          to: { opacity: '1', transform: 'none' },
+        },
+        composerSwap: {
+          from: { opacity: '0', transform: 'translateY(6px)' },
+          to: { opacity: '1', transform: 'none' },
+        },
+        breathe: {
+          '0%, 100%': { opacity: '.35', transform: 'scale(.85)' },
+          '50%': { opacity: '1', transform: 'none' },
+        },
+        sheetIn: {
+          from: { transform: 'translateY(100%)' },
+          to: { transform: 'none' },
+        },
+      },
+      animation: {
+        'tok-swap': 'tokSwap var(--duration-slow) var(--ease-emphasized)',
+        'menu-in': 'menuIn var(--duration-base) var(--ease-emphasized)',
+        pop: 'pop var(--duration-base) var(--ease-emphasized)',
+        'fade-slide': 'fadeSlide var(--duration-base) var(--ease-standard)',
+        'composer-swap': 'composerSwap var(--duration-slow) var(--ease-emphasized)',
+        // A looping "waiting" pulse; its 1.6s period is a loop rate, not a
+        // transition, so it does not map to a duration token.
+        breathe: 'breathe 1.6s ease-in-out infinite',
+        'sheet-in': 'sheetIn var(--duration-slow) var(--ease-emphasized)',
       },
     },
   },

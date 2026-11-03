@@ -1025,6 +1025,23 @@ body {
   }
 }
 
+/* Conversation launcher motion (tailwind.config.js `animation`). Under reduced
+   motion the entrances finish at once and the waiting pulse stops. Scoped to
+   these utilities so existing animations keep their own reduced-motion rules. */
+@media (prefers-reduced-motion: reduce) {
+  .animate-tok-swap,
+  .animate-menu-in,
+  .animate-pop,
+  .animate-fade-slide,
+  .animate-composer-swap,
+  .animate-sheet-in {
+    animation-duration: 1ms !important;
+  }
+  .animate-breathe {
+    animation: none !important;
+  }
+}
+
 /* Mobile aux pages share the same physical ordering as the Main pager:
    forward content arrives from the right, backward content from the left. */
 @keyframes heimdall-aux-page-in-forward {
