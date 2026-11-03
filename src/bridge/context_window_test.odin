@@ -359,3 +359,20 @@ test_ctxwin_shipped_map_known_model_ids :: proc(t: ^testing.T) {
 		testing.expectf(t, got == c.want, "%s/%s: got %v, want %v", c.provider, c.model, got, c.want)
 	}
 }
+
+// The snapshot sent to the hub carries the shipped config's thresholds (single
+// source of truth), not copies of the literals.
+@(test)
+test_ctxwin_snapshot_thresholds_match_shipped_config :: proc(t: ^testing.T) {
+	c: Bridge_Context_Window_Config
+	testing.expect(t, bridge_context_window_parse_config(BRIDGE_CONTEXT_WINDOWS_EMBEDDED, &c))
+	defer bridge_context_window_config_destroy(&c)
+	b := strings.builder_make(context.temp_allocator)
+	bridge_ext_token_usage_write_json(&b, Bridge_Ext_Token_Usage{updated_at_ms = 1})
+	value, err := json.parse_string(strings.to_string(b), json.DEFAULT_SPECIFICATION, true, context.temp_allocator)
+	testing.expect_value(t, err, json.Error.None)
+	root, is_obj := value.(json.Object)
+	testing.expect(t, is_obj)
+	testing.expect_value(t, root["warn_pct"].(json.Integer), json.Integer(c.warn_pct))
+	testing.expect_value(t, root["rollover_pct"].(json.Integer), json.Integer(c.rollover_pct))
+}

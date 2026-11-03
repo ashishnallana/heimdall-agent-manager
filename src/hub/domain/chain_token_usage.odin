@@ -77,6 +77,8 @@ Chain_Token_Usage :: struct {
 	has_data:            bool,
 	instances:           int,
 	instances_with_data: int,
+	warn_pct:            int, // from the first snapshot that reports them; 0 = none (use fallback)
+	rollover_pct:        int,
 }
 
 // agent_runtime_status_live mirrors the active runtime list of
@@ -156,6 +158,8 @@ chain_token_usage_aggregate :: proc(instances: []Agent_Instance, agent_names: ma
 		out.instances += 1
 		if row.live do agent.live_instances += 1
 		if !row.has_data do continue
+		if out.warn_pct == 0 && row.snapshot.warn_pct > 0 do out.warn_pct = row.snapshot.warn_pct
+		if out.rollover_pct == 0 && row.snapshot.rollover_pct > 0 do out.rollover_pct = row.snapshot.rollover_pct
 		agent.has_data = true
 		out.has_data = true
 		out.instances_with_data += 1

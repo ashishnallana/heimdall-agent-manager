@@ -13,9 +13,10 @@ import "core:strings"
 // Upper bound for any counter; larger (or negative/non-integer) values are
 // rejected so a misbehaving bridge cannot poison the lifetime totals.
 AGENT_TOKEN_USAGE_MAX :: 1_000_000_000_000
-// Thresholds shared with the bridge's shipped config (src/bridge/context_windows.json)
-// and the UI (tokenUsageModel.ts): warn = amber meter only, rollover = restart
-// with a fresh context.
+// FALLBACK thresholds only. The bridge's shipped config
+// (src/bridge/context_windows.json) is authoritative and rides on every
+// snapshot as warn_pct/rollover_pct; these apply when a snapshot omits them
+// (older bridge). warn = amber meter only, rollover = restart with a fresh context.
 AGENT_TOKEN_WARN_PCT :: 40
 AGENT_TOKEN_ROLLOVER_PCT :: 70
 
@@ -25,6 +26,8 @@ Agent_Token_Usage :: struct {
 	has_context:         bool,
 	context_tokens:      i64,
 	context_window:      i64, // 0 = not reported
+	warn_pct:            int, // 0 = not reported (use AGENT_TOKEN_WARN_PCT)
+	rollover_pct:        int, // 0 = not reported (use AGENT_TOKEN_ROLLOVER_PCT)
 	window_source:       string, // static literal: override | config | default | ""
 	has_output_total:    bool,
 	output_tokens_total: i64,
@@ -88,6 +91,8 @@ agent_token_usage_from_json :: proc(raw: string) -> (Agent_Token_Usage, bool) {
 	if flag, is_bool := obj["usage_supported"].(json.Boolean); is_bool {
 		u.has_usage_supported, u.usage_supported = true, bool(flag)
 	}
+	if pct, _, pct_ok := token_int(obj, "warn_pct", false); pct_ok && pct > 0 && pct <= 100 do u.warn_pct = int(pct)
+	if pct, _, pct_ok := token_int(obj, "rollover_pct", false); pct_ok && pct > 0 && pct <= 100 do u.rollover_pct = int(pct)
 	if source, is_str := obj["window_source"].(json.String); is_str do u.window_source = agent_token_usage_window_source(source)
 	return u, true
 }
@@ -107,6 +112,8 @@ agent_token_usage_json :: proc(u: Agent_Token_Usage, allocator := context.alloca
 	if u.has_context do strings.write_string(&b, fmt.tprintf(",\"context_tokens\":%d", u.context_tokens))
 	if u.context_window > 0 do strings.write_string(&b, fmt.tprintf(",\"context_window\":%d", u.context_window))
 	if u.window_source != "" do strings.write_string(&b, fmt.tprintf(",\"window_source\":\"%s\"", u.window_source))
+	if u.warn_pct > 0 do strings.write_string(&b, fmt.tprintf(",\"warn_pct\":%d", u.warn_pct))
+	if u.rollover_pct > 0 do strings.write_string(&b, fmt.tprintf(",\"rollover_pct\":%d", u.rollover_pct))
 	if pct := agent_token_usage_context_pct(u); pct >= 0 do strings.write_string(&b, fmt.tprintf(",\"context_pct\":%d", pct))
 	if u.has_output_total do strings.write_string(&b, fmt.tprintf(",\"output_tokens_total\":%d", u.output_tokens_total))
 	if u.has_usage_supported do strings.write_string(&b, fmt.tprintf(",\"usage_supported\":%v", u.usage_supported))

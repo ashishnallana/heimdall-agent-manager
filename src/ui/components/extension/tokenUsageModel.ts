@@ -3,12 +3,12 @@
 //
 // The agent instance JSON carries, when known:
 //   token_usage  {tool_calls, est_tokens_total, context_tokens?, context_window?,
-//                 window_source?, context_pct?, output_tokens_total?, compactions,
+//                 window_source?, warn_pct?, rollover_pct?, context_pct?, output_tokens_total?, compactions,
 //                 run_count?, usage_supported?, updated_at_ms}  (latest bridge snapshot)
 //   token_totals {total_context_tokens, total_est_tool_tokens, total_output_tokens,
 //                 runs_counted, last_run_counted}  (added at each hub stop/restart)
 
-/** Thresholds shared with the bridge's shipped config (src/bridge/context_windows.json) and the hub. */
+/** FALLBACK thresholds only: the bridge's shipped config is authoritative and sends warn_pct/rollover_pct on the snapshot. */
 export const CONTEXT_WARN_PCT = 40;
 export const CONTEXT_ROLLOVER_PCT = 70;
 
@@ -21,6 +21,9 @@ export interface TokenUsageSnapshot {
   contextTokens: number | null;
   contextWindow: number | null;
   windowSource: WindowSource;
+  /** Thresholds from the bridge config; null = not reported (fallback constants apply). */
+  warnPct: number | null;
+  rolloverPct: number | null;
   /** Whole % of the window; null until the provider reported a context size. */
   contextPct: number | null;
   outputTokensTotal: number | null;
@@ -61,6 +64,8 @@ export function normalizeTokenUsage(raw: unknown): TokenUsageSnapshot | null {
     estTokensTotal: est,
     contextTokens,
     contextWindow,
+    warnPct: count(raw.warn_pct) || null,
+    rolloverPct: count(raw.rollover_pct) || null,
     windowSource: source === 'override' || source === 'config' || source === 'default' ? source : '',
     contextPct,
     outputTokensTotal: count(raw.output_tokens_total),
@@ -82,10 +87,10 @@ export function normalizeTokenTotals(raw: unknown): TokenTotals | null {
   };
 }
 
-/** amber at >= CONTEXT_WARN_PCT (40 %), red at >= CONTEXT_ROLLOVER_PCT (70 %). Display only: nothing is sent to the agent. */
-export function contextTone(pct: number): ContextTone {
-  if (pct >= CONTEXT_ROLLOVER_PCT) return 'danger';
-  if (pct >= CONTEXT_WARN_PCT) return 'warning';
+/** amber at >= warnPct, red at >= rolloverPct (snapshot values; constants are the fallback). Display only: nothing is sent to the agent. */
+export function contextTone(pct: number, warnPct: number = CONTEXT_WARN_PCT, rolloverPct: number = CONTEXT_ROLLOVER_PCT): ContextTone {
+  if (pct >= rolloverPct) return 'danger';
+  if (pct >= warnPct) return 'warning';
   return 'neutral';
 }
 

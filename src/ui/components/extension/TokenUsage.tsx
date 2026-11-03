@@ -54,7 +54,7 @@ export function ContextMeter({ instance }: { instance: any }) {
       </div>
     );
   }
-  const tone = contextTone(usage.contextPct);
+  const tone = contextTone(usage.contextPct, usage.warnPct ?? undefined, usage.rolloverPct ?? undefined);
   return (
     <div data-debug-id="live-instance-context-meter" data-context-tone={tone} className="mt-0.5 flex flex-col gap-1">
       <ProgressBar
@@ -75,7 +75,7 @@ export function ContextMeter({ instance }: { instance: any }) {
         {usage.toolCalls} tool calls · ~{formatTokens(usage.estTokensTotal)} tool tokens
         {usage.outputTokensTotal !== null ? ` · ${formatTokens(usage.outputTokensTotal)} output` : ''}
         {usage.compactions ? ` · ${usage.compactions} compaction${usage.compactions === 1 ? '' : 's'}` : ''}
-        {` · warn ${CONTEXT_WARN_PCT}%, rollover ${CONTEXT_ROLLOVER_PCT}%`}
+        {` · warn ${usage.warnPct ?? CONTEXT_WARN_PCT}%, rollover ${usage.rolloverPct ?? CONTEXT_ROLLOVER_PCT}%`}
       </span>
     </div>
   );

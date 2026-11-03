@@ -40,3 +40,17 @@ test_agent_token_usage_usage_supported_round_trip :: proc(t: ^testing.T) {
 		testing.expect(t, !strings.contains(agent_token_usage_json(u, context.temp_allocator), "usage_supported"))
 	}
 }
+
+@(test)
+test_agent_token_usage_thresholds_round_trip :: proc(t: ^testing.T) {
+	u, ok := agent_token_usage_from_json(`{"tool_calls":1,"est_tokens_total":2,"warn_pct":30,"rollover_pct":60,"compactions":0,"updated_at_ms":9}`)
+	testing.expect(t, ok)
+	testing.expect_value(t, u.warn_pct, 30)
+	testing.expect_value(t, u.rollover_pct, 60)
+	testing.expect_value(t, agent_token_usage_json(u, context.temp_allocator), `{"tool_calls":1,"est_tokens_total":2,"warn_pct":30,"rollover_pct":60,"compactions":0,"updated_at_ms":9}`)
+	// Out-of-range values are dropped (consumers fall back to the defaults).
+	u, ok = agent_token_usage_from_json(`{"tool_calls":1,"est_tokens_total":2,"warn_pct":0,"rollover_pct":500,"compactions":0,"updated_at_ms":9}`)
+	testing.expect(t, ok)
+	testing.expect_value(t, u.warn_pct, 0)
+	testing.expect_value(t, u.rollover_pct, 0)
+}

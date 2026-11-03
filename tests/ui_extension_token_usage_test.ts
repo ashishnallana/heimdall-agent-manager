@@ -43,13 +43,19 @@ test('normalizes the snapshot and totals; rejects absent or malformed data', () 
 });
 
 test('badge tone: neutral below 40 %, amber at 40 %, red at 70 %', () => {
-  assert.equal(model.CONTEXT_WARN_PCT, 40);
-  assert.equal(model.CONTEXT_ROLLOVER_PCT, 70);
   assert.equal(model.contextTone(39), 'neutral');
   assert.equal(model.contextTone(40), 'warning');
   assert.equal(model.contextTone(69), 'warning');
   assert.equal(model.contextTone(70), 'danger');
   assert.equal(model.contextTone(100), 'danger');
+  // Snapshot thresholds win over the fallback constants.
+  assert.equal(model.contextTone(50, 60, 80), 'neutral');
+  assert.equal(model.contextTone(65, 60, 80), 'warning');
+  assert.equal(model.contextTone(80, 60, 80), 'danger');
+  const snap = model.normalizeTokenUsage({ tool_calls: 0, est_tokens_total: 0, warn_pct: 30, rollover_pct: 60, compactions: 0 })!;
+  assert.deepEqual([snap.warnPct, snap.rolloverPct], [30, 60]);
+  const bare = model.normalizeTokenUsage({ tool_calls: 0, est_tokens_total: 0, compactions: 0 })!;
+  assert.deepEqual([bare.warnPct, bare.rolloverPct], [null, null]);
   const badge = model.contextBadge({ token_usage: { ...SNAPSHOT, context_tokens: 164000, context_pct: 82 } })!;
   assert.equal(badge.tone, 'danger');
   assert.equal(badge.label, 'ctx 82%');

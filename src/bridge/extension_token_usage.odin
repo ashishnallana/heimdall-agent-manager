@@ -230,8 +230,8 @@ bridge_ext_token_mark_pushed :: proc(u: ^Bridge_Ext_Token_Usage, now: i64) {
 
 // bridge_ext_token_usage_write_json writes the snapshot object. context_tokens,
 // context_source, context_pct and output_tokens_total are omitted until
-// reported; context_window and window_source (override|config|default) are
-// always present. usage_supported is written once a hello was seen. run_count > 0 is written as the run the counters belong to.
+// reported; context_window, window_source (override|config|default), warn_pct and
+// rollover_pct (shipped config thresholds) are always present. usage_supported is written once a hello was seen. run_count > 0 is written as the run the counters belong to.
 bridge_ext_token_usage_write_json :: proc(b: ^strings.Builder, u: Bridge_Ext_Token_Usage, run_count := 0) {
 	strings.write_string(b, fmt.tprintf("{{\"tool_calls\":%d,\"est_tokens_total\":%d", u.tool_calls, u.est_tokens_total))
 	if u.has_context {
@@ -240,6 +240,8 @@ bridge_ext_token_usage_write_json :: proc(b: ^strings.Builder, u: Bridge_Ext_Tok
 		strings.write_byte(b, '"')
 	}
 	strings.write_string(b, fmt.tprintf(",\"context_window\":%d,\"window_source\":\"%s\"", bridge_ext_token_usage_window(u), bridge_context_window_source_name(u.window_source)))
+	warn_pct, rollover_pct, _ := bridge_context_window_thresholds()
+	strings.write_string(b, fmt.tprintf(",\"warn_pct\":%d,\"rollover_pct\":%d", warn_pct, rollover_pct))
 	if pct := bridge_ext_token_usage_context_pct(u); pct >= 0 do strings.write_string(b, fmt.tprintf(",\"context_pct\":%d", pct))
 	if u.has_output_total do strings.write_string(b, fmt.tprintf(",\"output_tokens_total\":%d", u.output_tokens_total))
 	if u.has_usage_cap do strings.write_string(b, fmt.tprintf(",\"usage_supported\":%v", u.usage_supported))

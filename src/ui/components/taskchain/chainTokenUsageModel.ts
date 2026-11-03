@@ -98,12 +98,14 @@ export function normalizeFigures(raw: unknown): ChainTokenFigures {
   };
 }
 
-function makeContext(pct: number | null, tokens: unknown, window: unknown): ChainTokenContext | null {
+interface Thresholds { warnPct: number; rolloverPct: number }
+
+function makeContext(pct: number | null, tokens: unknown, window: unknown, th: Thresholds): ChainTokenContext | null {
   if (pct === null) return null;
-  return { pct, tokens: count(tokens) ?? 0, window: count(window) || null, tone: contextTone(pct) };
+  return { pct, tokens: count(tokens) ?? 0, window: count(window) || null, tone: contextTone(pct, th.warnPct, th.rolloverPct) };
 }
 
-function normalizeInstance(raw: unknown): ChainTokenInstance | null {
+function normalizeInstance(raw: unknown, th: Thresholds): ChainTokenInstance | null {
   if (!isObject(raw)) return null;
   const instanceId = String(raw.agent_instance_id || '').trim();
   if (!instanceId) return null;
@@ -117,7 +119,7 @@ function normalizeInstance(raw: unknown): ChainTokenInstance | null {
     hasData: raw.has_data === true,
     lifetime: normalizeFigures(raw.lifetime),
     runCount: count(raw.run_count),
-    context: live ? makeContext(count(raw.context_pct), raw.context_tokens, raw.context_window) : null,
+    context: live ? makeContext(count(raw.context_pct), raw.context_tokens, raw.context_window, th) : null,
     usageSupported: typeof raw.usage_supported === 'boolean' ? raw.usage_supported : null,
   };
 }
@@ -132,15 +134,15 @@ function liveCapability(instances: ChainTokenInstance[]): Pick<ChainTokenAgent, 
   return { contextCapability: 'unknown', unsupportedProviders };
 }
 
-function normalizeAgent(raw: unknown): ChainTokenAgent | null {
+function normalizeAgent(raw: unknown, th: Thresholds): ChainTokenAgent | null {
   if (!isObject(raw)) return null;
   const agentId = String(raw.agent_id || '').trim();
   const instances = (Array.isArray(raw.instances) ? raw.instances : [])
-    .map(normalizeInstance)
+    .map((i: unknown) => normalizeInstance(i, th))
     .filter((i: ChainTokenInstance | null): i is ChainTokenInstance => i !== null);
   if (!agentId && instances.length === 0) return null;
   const ctx = isObject(raw.context) ? raw.context : null;
-  const context = ctx ? makeContext(count(ctx.pct), ctx.tokens, ctx.window) : null;
+  const context = ctx ? makeContext(count(ctx.pct), ctx.tokens, ctx.window, th) : null;
   return {
     agentId,
     name: String(raw.agent_name || '').trim() || agentId || 'Unknown agent',
@@ -157,15 +159,16 @@ function normalizeAgent(raw: unknown): ChainTokenAgent | null {
 export function normalizeChainTokenUsage(raw: unknown): ChainTokenUsage | null {
   const body = isObject(raw) && isObject(raw.data) && !('agents' in raw) ? raw.data : raw;
   if (!isObject(body)) return null;
+  // Hub-sent thresholds (from the bridge's shipped config); constants only when absent.
+  const th: Thresholds = { warnPct: count(body.warn_pct) || CONTEXT_WARN_PCT, rolloverPct: count(body.rollover_pct) || CONTEXT_ROLLOVER_PCT };
   const agents = (Array.isArray(body.agents) ? body.agents : [])
-    .map(normalizeAgent)
+    .map((a: unknown) => normalizeAgent(a, th))
     .filter((a: ChainTokenAgent | null): a is ChainTokenAgent => a !== null);
   return {
     hasData: body.has_data === true && agents.some((a: ChainTokenAgent) => a.hasData),
     instances: count(body.instances) ?? agents.reduce((n: number, a: ChainTokenAgent) => n + a.instances.length, 0),
     instancesWithData: count(body.instances_with_data) ?? 0,
-    warnPct: count(body.warn_pct) || CONTEXT_WARN_PCT,
-    rolloverPct: count(body.rollover_pct) || CONTEXT_ROLLOVER_PCT,
+    ...th,
     total: normalizeFigures(body.total),
     agents,
   };

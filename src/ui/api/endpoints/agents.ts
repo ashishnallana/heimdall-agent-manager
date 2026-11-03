@@ -16,6 +16,9 @@ export interface AgentInstanceTokenUsage {
   context_tokens?: number;
   context_window?: number;
   window_source?: 'override' | 'config' | 'default';
+  /** Thresholds from the bridge's shipped config; absent on older bridges. */
+  warn_pct?: number;
+  rollover_pct?: number;
   context_pct?: number;
   output_tokens_total?: number;
   compactions: number;

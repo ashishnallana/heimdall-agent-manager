@@ -69,7 +69,9 @@ write_chain_token_usage_json :: proc(b: ^strings.Builder, chain_id: string, usag
 	strings.write_byte(b, '{')
 	write_json_str_field(b, "chain_id", chain_id, true)
 	strings.write_string(b, fmt.tprintf(",\"has_data\":%v,\"instances\":%d,\"instances_with_data\":%d,\"warn_pct\":%d,\"rollover_pct\":%d,\"total\":",
-		usage.has_data, usage.instances, usage.instances_with_data, domain.AGENT_TOKEN_WARN_PCT, domain.AGENT_TOKEN_ROLLOVER_PCT))
+		usage.has_data, usage.instances, usage.instances_with_data,
+		usage.warn_pct if usage.warn_pct > 0 else domain.AGENT_TOKEN_WARN_PCT,
+		usage.rollover_pct if usage.rollover_pct > 0 else domain.AGENT_TOKEN_ROLLOVER_PCT))
 	write_chain_token_figures_json(b, usage.total)
 	strings.write_string(b, ",\"agents\":[")
 	for agent, i in usage.agents {
