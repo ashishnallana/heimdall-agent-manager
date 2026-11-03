@@ -19,6 +19,8 @@ BRIDGE_EXT_TOKEN_PUSH_DELTA_PP :: 5
 // Window of an instance the bridge has no launch record for (equals the shipped
 // config's default_window; a test keeps them in step).
 BRIDGE_EXT_TOKEN_DEFAULT_WINDOW :: 200_000
+// A reported window this far (percent) from the config/default one is a mismatch.
+BRIDGE_EXT_WINDOW_MISMATCH_PCT :: 10
 // A context drop to (100 - this)% or less of the previous value is a compaction.
 BRIDGE_EXT_COMPACTION_DROP_PCT :: 50
 // Conservative context estimate for an instance with no provider usage block
@@ -38,10 +40,19 @@ Bridge_Ext_Token_Usage :: struct {
 	has_context:         bool,
 	context_tokens:      i64, // latest provider-reported context size
 	context_source:      string, // owned; usage.source of context_tokens
-	// Resolved by the bridge from overrides/shipped config (never reported by the
-	// provider); 0 = no launch record, i.e. the default. Survives resets.
+	// Effective window: the override, else a provider-reported window, else the
+	// config/default resolution; 0 = no launch record, i.e. the default. All of
+	// the window fields below survive resets.
 	context_window:      i64,
 	window_source:       Bridge_Context_Window_Source,
+	// Last override/config/default resolution (0 = none yet, i.e. the default).
+	resolved_window:     i64,
+	resolved_source:     Bridge_Context_Window_Source,
+	// usage.context_window from the provider (0 = never reported).
+	reported_window:     i64,
+	// reported_window differs from the config/default resolution by > 10%.
+	// Never set while an override is in force.
+	window_mismatch:     bool,
 	has_output_total:    bool,
 	output_tokens_total: i64,
 	compactions:         i64,
@@ -66,12 +77,12 @@ bridge_ext_token_usage_reset :: proc(u: ^Bridge_Ext_Token_Usage, session_id: str
 	new_id := strings.clone(session_id) // session_id may alias u.session_id
 	delete(u.session_id); delete(u.context_source)
 	dirty, has_pushed, last_at, last_ctx := u.dirty, u.has_pushed, u.last_push_at_ms, u.last_push_context
-	window, source := u.context_window, u.window_source
+	window, source, resolved, resolved_src, reported, mismatch := u.context_window, u.window_source, u.resolved_window, u.resolved_source, u.reported_window, u.window_mismatch
 	has_cap, supported := u.has_usage_cap, u.usage_supported
 	u^ = {}
 	u.session_id = new_id
 	u.dirty, u.has_pushed, u.last_push_at_ms, u.last_push_context = dirty, has_pushed, last_at, last_ctx
-	u.context_window, u.window_source = window, source
+	u.context_window, u.window_source, u.resolved_window, u.resolved_source, u.reported_window, u.window_mismatch = window, source, resolved, resolved_src, reported, mismatch
 	u.has_usage_cap, u.usage_supported = has_cap, supported
 }
 
@@ -123,8 +134,10 @@ bridge_ext_token_usage_apply :: proc(u: ^Bridge_Ext_Token_Usage, ev: contracts.E
 			delete(u.context_source)
 			u.context_source = strings.clone(ev.usage.source)
 		}
-		// usage.context_window is deliberately ignored: the window comes only from
-		// the bridge's override/shipped config (user decision, no runtime detection).
+		if ev.usage.has_context_window && ev.usage.context_window > 0 && ev.usage.context_window <= BRIDGE_CONTEXT_WINDOW_MAX {
+			u.reported_window = ev.usage.context_window
+			bridge_ext_token_usage_window_recompute(u)
+		}
 		if ev.usage.has_output_tokens_total {
 			u.has_output_total = true
 			u.output_tokens_total = max(ev.usage.output_tokens_total, 0)
@@ -142,11 +155,35 @@ bridge_ext_token_usage_window :: proc(u: Bridge_Ext_Token_Usage) -> i64 {
 	return u.context_window if u.context_window > 0 else BRIDGE_EXT_TOKEN_DEFAULT_WINDOW
 }
 
-// bridge_ext_token_usage_set_window records a resolved window and reports
-// whether it changed; a change marks the snapshot dirty once it has content.
+// bridge_ext_token_usage_window_recompute derives the effective window, its
+// source and window_mismatch from the last resolution and the reported window:
+// override > reported > config > default. The mismatch compares the reported
+// window to the config/default resolution (an unresolved instance counts as
+// the default) and is logged when it appears or its figures change.
+bridge_ext_token_usage_window_recompute :: proc(u: ^Bridge_Ext_Token_Usage) {
+	resolved := u.resolved_window if u.resolved_window > 0 else BRIDGE_EXT_TOKEN_DEFAULT_WINDOW
+	was_mismatch := u.window_mismatch
+	u.window_mismatch = false
+	if u.resolved_source != .Override && u.reported_window > 0 {
+		u.context_window, u.window_source = u.reported_window, .Reported
+		diff := abs(u.reported_window - resolved)
+		u.window_mismatch = diff * 100 > resolved * BRIDGE_EXT_WINDOW_MISMATCH_PCT
+		if u.window_mismatch && !was_mismatch {
+			fmt.eprintfln("bridge context window mismatch: provider reported %d, config/default says %d", u.reported_window, resolved)
+		}
+	} else {
+		u.context_window, u.window_source = u.resolved_window, u.resolved_source
+	}
+}
+
+// bridge_ext_token_usage_set_window records a resolution and reports whether
+// the effective window, its source or the mismatch flag changed; a change marks
+// the snapshot dirty once it has content.
 bridge_ext_token_usage_set_window :: proc(u: ^Bridge_Ext_Token_Usage, r: Bridge_Context_Window_Resolution) -> bool {
-	if u.context_window == r.context_window && u.window_source == r.source do return false
-	u.context_window, u.window_source = r.context_window, r.source
+	window, source, mismatch := u.context_window, u.window_source, u.window_mismatch
+	u.resolved_window, u.resolved_source = r.context_window, r.source
+	bridge_ext_token_usage_window_recompute(u)
+	if u.context_window == window && u.window_source == source && u.window_mismatch == mismatch do return false
 	if u.updated_at_ms != 0 do u.dirty = true
 	return true
 }
@@ -266,8 +303,10 @@ bridge_ext_token_mark_pushed :: proc(u: ^Bridge_Ext_Token_Usage, now: i64) {
 
 // bridge_ext_token_usage_write_json writes the snapshot object. context_tokens,
 // context_source, context_pct and output_tokens_total are omitted until
-// reported; context_window, window_source (override|config|default), warn_pct and
-// rollover_pct (shipped config thresholds) are always present. usage_supported is written once a hello was seen. run_count > 0 is written as the run the counters belong to.
+// reported; context_window, window_source (override|reported|config|default),
+// warn_pct and rollover_pct (shipped config thresholds) are always present;
+// reported_window and window_mismatch appear once the provider reported a
+// window. usage_supported is written once a hello was seen. run_count > 0 is written as the run the counters belong to.
 bridge_ext_token_usage_write_json :: proc(b: ^strings.Builder, u: Bridge_Ext_Token_Usage, run_count := 0) {
 	strings.write_string(b, fmt.tprintf("{{\"tool_calls\":%d,\"est_tokens_total\":%d", u.tool_calls, u.est_tokens_total))
 	if u.has_context {
@@ -283,6 +322,7 @@ bridge_ext_token_usage_write_json :: proc(b: ^strings.Builder, u: Bridge_Ext_Tok
 	strings.write_string(b, fmt.tprintf(",\"context_window\":%d,\"window_source\":\"%s\"", bridge_ext_token_usage_window(u), bridge_context_window_source_name(u.window_source)))
 	warn_pct, rollover_pct, _ := bridge_context_window_thresholds()
 	strings.write_string(b, fmt.tprintf(",\"warn_pct\":%d,\"rollover_pct\":%d", warn_pct, rollover_pct))
+	if u.reported_window > 0 do strings.write_string(b, fmt.tprintf(",\"reported_window\":%d,\"window_mismatch\":%v", u.reported_window, u.window_mismatch))
 	if pct := bridge_ext_token_usage_context_pct(u); pct >= 0 do strings.write_string(b, fmt.tprintf(",\"context_pct\":%d", pct))
 	if u.has_output_total do strings.write_string(b, fmt.tprintf(",\"output_tokens_total\":%d", u.output_tokens_total))
 	if u.has_usage_cap do strings.write_string(b, fmt.tprintf(",\"usage_supported\":%v", u.usage_supported))

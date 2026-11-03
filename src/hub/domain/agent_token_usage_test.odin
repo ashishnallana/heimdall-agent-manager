@@ -56,6 +56,21 @@ test_agent_token_usage_thresholds_round_trip :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_agent_token_usage_reported_window_source :: proc(t: ^testing.T) {
+	u, ok := agent_token_usage_from_json(`{"tool_calls":1,"est_tokens_total":2,"context_tokens":50000,"context_window":258400,"window_source":"reported","reported_window":258400,"window_mismatch":true,"compactions":0,"updated_at_ms":5}`)
+	testing.expect(t, ok)
+	testing.expect_value(t, u.window_source, "reported")
+	testing.expect_value(t, u.reported_window, i64(258400))
+	testing.expect(t, u.window_mismatch)
+	testing.expect_value(t, agent_token_usage_json(u, context.temp_allocator), `{"tool_calls":1,"est_tokens_total":2,"context_tokens":50000,"context_window":258400,"window_source":"reported","reported_window":258400,"window_mismatch":true,"context_pct":19,"compactions":0,"updated_at_ms":5}`)
+
+	u, ok = agent_token_usage_from_json(`{"tool_calls":1,"est_tokens_total":2,"window_source":"config","compactions":0,"updated_at_ms":5}`)
+	testing.expect(t, ok)
+	testing.expect_value(t, u.reported_window, i64(0))
+	testing.expect(t, !u.window_mismatch)
+}
+
+@(test)
 test_agent_token_usage_estimate_fields :: proc(t: ^testing.T) {
 	// Estimate only: accepted, pct recomputed from the estimate.
 	u, ok := agent_token_usage_from_json(`{"tool_calls":3,"est_tokens_total":100000,"context_source":"estimate","estimated_context_tokens":150000,"context_window":200000,"context_pct":1,"compactions":0,"updated_at_ms":9}`)

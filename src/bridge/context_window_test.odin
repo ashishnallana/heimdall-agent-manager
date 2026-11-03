@@ -1,5 +1,6 @@
 package main
 
+import "base:runtime"
 import "core:encoding/json"
 import "core:fmt"
 import "core:os"
@@ -30,6 +31,17 @@ ctxwin_scratch_end :: proc(saved, scratch: string) {
 	bridge_config.data_dir = saved
 	bridge_context_window_reload_for_test()
 	delete(scratch)
+}
+
+// ctxwin_forget_launch hides a test instance from bridge_ext_context_window_instances
+// so its reported window cannot leak into other tests' settings lists.
+ctxwin_forget_launch :: proc(instance_id: string) {
+	sync.mutex_lock(&bridge_ext_mutex); defer sync.mutex_unlock(&bridge_ext_mutex)
+	for &s in bridge_ext_states {
+		if s.agent_instance_id != instance_id do continue
+		delete(s.launch_provider, runtime.heap_allocator())
+		s.launch_provider = ""
+	}
 }
 
 @(test)
@@ -254,6 +266,7 @@ test_ctxwin_instance_snapshot_carries_window_and_pct :: proc(t: ^testing.T) {
 	defer ctxwin_scratch_end(saved, scratch)
 
 	id := "inst_test_ctxwin_snapshot"
+	defer ctxwin_forget_launch(id)
 	bridge_runtime_mark_start_success(id)
 	bridge_ext_note_launch(id, "codex", "gpt-6.1-sol", "")
 	window, source, pct := bridge_ext_context_window_for(id)
@@ -266,11 +279,11 @@ test_ctxwin_instance_snapshot_carries_window_and_pct :: proc(t: ^testing.T) {
 	res := bridge_ext_ingest(Bridge_Local_Agent_Token_Record{agent_instance_id = id, instance_token = "tok_test", role = .Agent}, raw, now)
 	bridge_ext_ingest_result_destroy(&res)
 	_, _, pct = bridge_ext_context_window_for(id)
-	testing.expect_value(t, pct, i64(60)) // 285000 / 475000, the reported 999999 ignored
+	testing.expect_value(t, pct, i64(28)) // 285000 / 999999: the provider-reported window beats config (T5)
 
 	frame := bridge_instance_status_json(id)
 	defer delete(frame)
-	testing.expect(t, strings.contains(frame, `"context_window":475000,"window_source":"config","context_pct":60`))
+	testing.expect(t, strings.contains(frame, `"context_window":999999,"window_source":"reported","reported_window":999999,"window_mismatch":true,"context_pct":28`))
 
 	// An override re-resolves the live instance; a session reset keeps the window.
 	testing.expect_value(t, bridge_context_window_set("codex", "gpt-6.1-sol", 1_000_000), Bridge_Context_Window_Error.None)
@@ -285,8 +298,105 @@ test_ctxwin_instance_snapshot_carries_window_and_pct :: proc(t: ^testing.T) {
 	testing.expect_value(t, source, Bridge_Context_Window_Source.Override)
 	testing.expect_value(t, bridge_context_window_clear("codex", "gpt-6.1-sol"), Bridge_Context_Window_Error.None)
 	window, source, _ = bridge_ext_context_window_for(id)
-	testing.expect_value(t, window, i64(475_000))
-	testing.expect_value(t, source, Bridge_Context_Window_Source.Config)
+	testing.expect_value(t, window, i64(999_999)) // no override again: the reported window applies
+	testing.expect_value(t, source, Bridge_Context_Window_Source.Reported)
+}
+
+// The settings list reflects a running instance's provider-reported window
+// (source "reported", reported_window, window_mismatch) unless an override wins.
+@(test)
+test_ctxwin_state_json_carries_reported_window_and_mismatch :: proc(t: ^testing.T) {
+	sync.mutex_lock(&bridge_test_config_mutex); defer sync.mutex_unlock(&bridge_test_config_mutex)
+	saved, scratch := ctxwin_scratch_begin("listreported")
+	defer ctxwin_scratch_end(saved, scratch)
+
+	id := "inst_test_ctxwin_listreported"
+	defer ctxwin_forget_launch(id)
+	bridge_runtime_mark_start_success(id)
+	bridge_ext_note_launch(id, "codex", "gpt-6.1-sol", "") // config: 475000
+	now := bridge_runtime_now_ms()
+	ingest :: proc(id: string, window: int, now: i64) {
+		raw := fmt.tprintf(`{{"schema":"ham.ext.v1","provider":"codex","ext_version":"0.1.0","event":"tool.end","ts":"2026-11-02T06:00:%02dZ","session_id":"s-lr","tool":{{"name":"Read","use_id":"tu_%d"}},"usage":{{"context_tokens":1000,"context_window":%d,"source":"codex_transcript"}}}}`, int(now % 50), int(now), window)
+		res := bridge_ext_ingest(Bridge_Local_Agent_Token_Record{agent_instance_id = id, instance_token = "tok_test", role = .Agent}, raw, now)
+		bridge_ext_ingest_result_destroy(&res)
+	}
+	window_row :: proc() -> string {
+		b := strings.builder_make(context.temp_allocator)
+		bridge_context_window_state_json(&b)
+		s := strings.to_string(b)
+		w := strings.index(s, `"windows":[`)
+		if w < 0 do return ""
+		i := strings.index(s[w:], `{"provider":"codex","model":"gpt-6.1-sol"`)
+		if i < 0 do return ""
+		i += w
+		j := strings.index_byte(s[i:], '}')
+		return s[i:i + j + 1]
+	}
+
+	ingest(id, 999_999, now)
+	row := window_row()
+	testing.expect(t, strings.contains(row, `"context_window":999999,"source":"reported","reported_window":999999,"window_mismatch":true`), row)
+
+	ingest(id, 490_000, now + 1) // within 10% of 475000: reported, no mismatch
+	row = window_row()
+	testing.expect(t, strings.contains(row, `"source":"reported","reported_window":490000`), row)
+	testing.expect(t, !strings.contains(row, "window_mismatch"), row)
+
+	testing.expect_value(t, bridge_context_window_set("codex", "gpt-6.1-sol", 1_000_000), Bridge_Context_Window_Error.None)
+	row = window_row()
+	testing.expect(t, strings.contains(row, `"context_window":1000000,"source":"override"`), row)
+	testing.expect(t, !strings.contains(row, "reported_window"), row)
+}
+
+// A stopped instance keeps its final usage but must not drive the settings
+// overlay: stopped-only shows no reported fields; a stopped mismatching
+// instance never beats a live matching one.
+@(test)
+test_ctxwin_state_json_ignores_stopped_instances :: proc(t: ^testing.T) {
+	sync.mutex_lock(&bridge_test_config_mutex); defer sync.mutex_unlock(&bridge_test_config_mutex)
+	saved, scratch := ctxwin_scratch_begin("liststopped")
+	defer ctxwin_scratch_end(saved, scratch)
+
+	old_id, live_id := "inst_test_ctxwin_stopped_old", "inst_test_ctxwin_stopped_live"
+	defer ctxwin_forget_launch(old_id)
+	defer ctxwin_forget_launch(live_id)
+	bridge_runtime_mark_start_success(old_id)
+	bridge_ext_note_launch(old_id, "codex", "gpt-6.1-sol", "")
+	ingest :: proc(id: string, window: int, now: i64) {
+		raw := fmt.tprintf(`{{"schema":"ham.ext.v1","provider":"codex","ext_version":"0.1.0","event":"tool.end","ts":"2026-11-02T06:00:%02dZ","session_id":"s-st","tool":{{"name":"Read","use_id":"tu_%d"}},"usage":{{"context_tokens":1000,"context_window":%d,"source":"codex_transcript"}}}}`, int(now % 50), int(now), window)
+		res := bridge_ext_ingest(Bridge_Local_Agent_Token_Record{agent_instance_id = id, instance_token = "tok_test", role = .Agent}, raw, now)
+		bridge_ext_ingest_result_destroy(&res)
+	}
+	window_row :: proc() -> string {
+		b := strings.builder_make(context.temp_allocator)
+		bridge_context_window_state_json(&b)
+		s := strings.to_string(b)
+		w := strings.index(s, `"windows":[`)
+		if w < 0 do return ""
+		i := strings.index(s[w:], `{"provider":"codex","model":"gpt-6.1-sol"`)
+		if i < 0 do return ""
+		i += w
+		j := strings.index_byte(s[i:], '}')
+		return s[i:i + j + 1]
+	}
+	now := bridge_runtime_now_ms()
+	ingest(old_id, 999_999, now)
+	row := window_row()
+	testing.expect(t, strings.contains(row, `"source":"reported","reported_window":999999`), row) // running: overlay applies
+
+	bridge_runtime_set_status(old_id, "stopped", "idle")
+	row = window_row()
+	testing.expect(t, strings.contains(row, `"source":"config"`) || !strings.contains(row, "reported"), row)
+	testing.expect(t, !strings.contains(row, "reported_window"), row)
+	testing.expect(t, !strings.contains(row, "window_mismatch"), row)
+
+	bridge_runtime_mark_start_success(live_id)
+	bridge_ext_note_launch(live_id, "codex", "gpt-6.1-sol", "")
+	ingest(live_id, 490_000, now + 1) // within 10% of 475000
+	row = window_row()
+	testing.expect(t, strings.contains(row, `"source":"reported","reported_window":490000`), row)
+	testing.expect(t, !strings.contains(row, "window_mismatch"), row)
+	testing.expect(t, !strings.contains(row, "999999"), row)
 }
 
 // The shipped map (R1 research, docs/transient-extension-signals.md): every

@@ -6,7 +6,7 @@
 
 import { resolveThresholds } from '../extension/tokenUsageModel';
 
-export type ContextWindowSource = 'override' | 'config' | 'default';
+export type ContextWindowSource = 'override' | 'reported' | 'config' | 'default';
 
 export interface ContextWindowEntry {
   provider: string;
@@ -14,6 +14,8 @@ export interface ContextWindowEntry {
   resolved_model?: string;
   context_window: number;
   source: ContextWindowSource;
+  reported_window?: number;
+  window_mismatch?: boolean;
 }
 
 export interface ContextWindowState {
@@ -72,7 +74,7 @@ export function parseCustomContextWindow(text: string): CustomWindowParse {
   return { ok: true, value };
 }
 
-const SOURCES = new Set<ContextWindowSource>(['override', 'config', 'default']);
+const SOURCES = new Set<ContextWindowSource>(['override', 'reported', 'config', 'default']);
 
 // normalizeContextWindowState drops malformed rows so a partial or older bridge
 // reply never breaks the view.
@@ -89,6 +91,8 @@ export function normalizeContextWindowState(data: any): ContextWindowState | nul
       resolved_model: typeof w.resolved_model === 'string' && w.resolved_model !== w.model ? w.resolved_model : undefined,
       context_window: w.context_window,
       source: w.source,
+      reported_window: typeof w.reported_window === 'number' && w.reported_window > 0 ? w.reported_window : undefined,
+      window_mismatch: w.window_mismatch === true && w.source !== 'override' ? true : undefined,
     });
   }
   windows.sort((a, b) => a.provider.localeCompare(b.provider) || a.model.localeCompare(b.model));
@@ -106,6 +110,7 @@ export function normalizeContextWindowState(data: any): ContextWindowState | nul
 export function contextWindowSourceLabel(source: ContextWindowSource): string {
   switch (source) {
     case 'override': return 'Override';
+    case 'reported': return 'Reported';
     case 'config': return 'Config';
     default: return 'Default';
   }
@@ -114,6 +119,7 @@ export function contextWindowSourceLabel(source: ContextWindowSource): string {
 export function contextWindowSourceHelp(source: ContextWindowSource, defaultWindow: number): string {
   switch (source) {
     case 'override': return 'Set by you on this bridge.';
+    case 'reported': return 'Reported by the provider for a running instance.';
     case 'config': return 'From the context-window config shipped with the bridge.';
     default: return `Not in the shipped config; using the ${formatContextWindow(defaultWindow)} default. Set an override if this model has a different window.`;
   }

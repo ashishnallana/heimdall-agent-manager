@@ -246,6 +246,10 @@ bridge_ext_handle_rpc :: proc(request_id, method, params: string, rec: Bridge_Lo
 
 Bridge_Ext_Context_Window_Instance :: struct {
 	agent_instance_id, provider, model, provider_profile, resolved_model: string,
+	// Provider-reported window and mismatch flag (0 / false when never reported
+	// or when an override is in force).
+	reported_window: i64,
+	window_mismatch: bool,
 }
 
 // bridge_ext_token_capture_final freezes instance_id's current token snapshot
@@ -323,6 +327,8 @@ bridge_ext_context_window_instances :: proc() -> [dynamic]Bridge_Ext_Context_Win
 			strings.clone(s.model, context.temp_allocator),
 			strings.clone(s.provider_profile, context.temp_allocator),
 			strings.clone(s.resolved_model, context.temp_allocator),
+			s.token_usage.reported_window,
+			s.token_usage.window_mismatch,
 		})
 	}
 	return out

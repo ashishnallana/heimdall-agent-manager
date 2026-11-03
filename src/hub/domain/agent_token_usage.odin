@@ -34,7 +34,9 @@ Agent_Token_Usage :: struct {
 	context_window:      i64, // 0 = not reported
 	warn_pct:            int, // 0 = not reported (use AGENT_TOKEN_WARN_PCT)
 	rollover_pct:        int, // 0 = not reported (use AGENT_TOKEN_ROLLOVER_PCT)
-	window_source:       string, // static literal: override | config | default | ""
+	reported_window:     i64, // 0 = provider reported none
+	window_mismatch:     bool, // reported_window differs >10% from the config/default window
+	window_source:       string, // static literal: override | reported | config | default | ""
 	has_output_total:    bool,
 	output_tokens_total: i64,
 	compactions:         i64,
@@ -63,6 +65,7 @@ token_int :: proc(obj: json.Object, key: string, required: bool) -> (value: i64,
 agent_token_usage_window_source :: proc(source: string) -> string {
 	switch source {
 	case "override": return "override"
+	case "reported": return "reported"
 	case "config": return "config"
 	case "default": return "default"
 	}
@@ -89,6 +92,7 @@ agent_token_usage_from_json :: proc(raw: string) -> (Agent_Token_Usage, bool) {
 		if u.estimated_context_tokens, u.has_estimate, ok = token_int(obj, "estimated_context_tokens", false); !ok do return {}, false
 	}
 	if u.context_window, _, ok = token_int(obj, "context_window", false); !ok do return {}, false
+	if u.reported_window, _, ok = token_int(obj, "reported_window", false); !ok do return {}, false
 	if u.output_tokens_total, u.has_output_total, ok = token_int(obj, "output_tokens_total", false); !ok do return {}, false
 	if u.compactions, _, ok = token_int(obj, "compactions", false); !ok do return {}, false
 	if u.updated_at_ms, _, ok = token_int(obj, "updated_at_ms", false); !ok do return {}, false
@@ -102,6 +106,7 @@ agent_token_usage_from_json :: proc(raw: string) -> (Agent_Token_Usage, bool) {
 	}
 	if pct, _, pct_ok := token_int(obj, "warn_pct", false); pct_ok && pct > 0 && pct <= 100 do u.warn_pct = int(pct)
 	if pct, _, pct_ok := token_int(obj, "rollover_pct", false); pct_ok && pct > 0 && pct <= 100 do u.rollover_pct = int(pct)
+	if flag, is_bool := obj["window_mismatch"].(json.Boolean); is_bool do u.window_mismatch = bool(flag)
 	if source, is_str := obj["window_source"].(json.String); is_str do u.window_source = agent_token_usage_window_source(source)
 	return u, true
 }
@@ -133,6 +138,7 @@ agent_token_usage_json :: proc(u: Agent_Token_Usage, allocator := context.alloca
 	if u.window_source != "" do strings.write_string(&b, fmt.tprintf(",\"window_source\":\"%s\"", u.window_source))
 	if u.warn_pct > 0 do strings.write_string(&b, fmt.tprintf(",\"warn_pct\":%d", u.warn_pct))
 	if u.rollover_pct > 0 do strings.write_string(&b, fmt.tprintf(",\"rollover_pct\":%d", u.rollover_pct))
+	if u.reported_window > 0 do strings.write_string(&b, fmt.tprintf(",\"reported_window\":%d,\"window_mismatch\":%v", u.reported_window, u.window_mismatch))
 	if pct := agent_token_usage_context_pct(u); pct >= 0 do strings.write_string(&b, fmt.tprintf(",\"context_pct\":%d", pct))
 	if u.has_output_total do strings.write_string(&b, fmt.tprintf(",\"output_tokens_total\":%d", u.output_tokens_total))
 	if u.has_usage_supported do strings.write_string(&b, fmt.tprintf(",\"usage_supported\":%v", u.usage_supported))

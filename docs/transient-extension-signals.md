@@ -38,10 +38,9 @@ events arrived while hidden refetches once when shown.
 ## Context window
 
 Each snapshot also carries `context_window`, `window_source`
-(`override`|`config`|`default`) and, once a context size is known,
-`context_pct` (whole percent, floor). The window is never detected at runtime:
-a provider-reported `usage.context_window` is ignored. The bridge resolves it at
-launch (`src/bridge/context_window.odin`) from, in order:
+(`override`|`reported`|`config`|`default`) and, once a context size is known,
+`context_pct` (whole percent, floor). The bridge resolves it at launch
+(`src/bridge/context_window.odin`) from, in order:
 
 1. a user override persisted on the bridge in
    `<data_dir>/bridge/context_window_overrides.json`, keyed by provider + model
@@ -54,6 +53,15 @@ launch (`src/bridge/context_window.odin`) from, in order:
    `default`) and then the `resolved_model` from model discovery; it also
    ships `warn_pct` 40 and `rollover_pct` 70;
 3. the 200000 default.
+
+A window the provider reports itself (`usage.context_window`, Codex
+`model_context_window`) is layered on top: with no override it replaces the
+config/default result and the source becomes `reported`; an override always
+wins. The snapshot then also carries `reported_window` and `window_mismatch`,
+which is true when the reported window differs from the config/default result
+by more than 10% (exactly 10% is not a mismatch; never set under an override).
+The bridge logs the first mismatch, and the Runtime card shows a "reported"
+badge plus an amber note.
 
 The shipped map (first match wins, trying `resolved_model` before the configured model; `src/bridge/context_window_test.odin`
 resolves every id below):

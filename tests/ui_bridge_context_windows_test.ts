@@ -205,3 +205,35 @@ test('bridge errors are surfaced and the confirmed value is kept; offline bridge
     }
   });
 });
+
+test('reported rows keep their badge, and the amber note shows only on mismatch (never under an override)', async () => {
+  const state = normalizeContextWindowState(bridgeState([
+    { provider: 'codex', model: 'gpt-a', context_window: 258400, source: 'reported', reported_window: 258400, window_mismatch: true },
+    { provider: 'codex', model: 'gpt-b', context_window: 200000, source: 'reported', reported_window: 200000 },
+    { provider: 'codex', model: 'gpt-c', context_window: 500000, source: 'override', reported_window: 258400, window_mismatch: true },
+  ]))!;
+  assert.deepEqual(state.windows.map((w) => [w.model, w.source, w.window_mismatch]), [['gpt-a', 'reported', true], ['gpt-b', 'reported', undefined], ['gpt-c', 'override', undefined]]);
+  await withDom(async (dom, container, _requests, setReply) => {
+    setReply(() => Response.json({ data: bridgeState([
+      { provider: 'codex', model: 'gpt-a', context_window: 258400, source: 'reported', reported_window: 258400, window_mismatch: true },
+      { provider: 'codex', model: 'gpt-b', context_window: 200000, source: 'reported', reported_window: 200000 },
+      { provider: 'codex', model: 'gpt-c', context_window: 500000, source: 'override', reported_window: 258400, window_mismatch: true },
+    ]) }));
+    const root = createRoot(container);
+    try {
+      await act(async () => { root.render(React.createElement(BridgeContextWindows, { bridgeId: 'brg-1', online: true })); });
+      const a = row(dom, 'gpt-a');
+      assert.equal(a.querySelector('[data-role="context-window-source"]')!.textContent, 'Reported');
+      assert.equal(a.querySelector('[data-role="context-window-value"]')!.textContent, '258,400');
+      assert.match(a.querySelector('[data-role="context-window-mismatch"]')!.textContent || '', /differs from the configured window by more than 10%/);
+      const b = row(dom, 'gpt-b');
+      assert.equal(b.querySelector('[data-role="context-window-source"]')!.textContent, 'Reported');
+      assert.equal(b.querySelector('[data-role="context-window-mismatch"]'), null);
+      const c = row(dom, 'gpt-c');
+      assert.equal(c.querySelector('[data-role="context-window-source"]')!.textContent, 'Override');
+      assert.equal(c.querySelector('[data-role="context-window-mismatch"]'), null);
+    } finally {
+      await act(async () => root.unmount());
+    }
+  });
+});

@@ -151,6 +151,17 @@ test('usage_supported: unavailable copy when false, "waiting for signal" when tr
   assert.equal(view.ContextUsageBadge({ instance: { token_usage: base }, instanceId: 'inst_x' }), null);
 });
 
+test('reported window shows a "reported" source and an amber note only on mismatch', async () => {
+  const base = { tool_calls: 2, est_tokens_total: 40, context_tokens: 50000, context_window: 258400, window_source: 'reported', reported_window: 258400, compactions: 0, updated_at_ms: 1 };
+  const ok = await render(view.ContextMeter({ instance: { token_usage: base } }));
+  assert.match(ok, /window: reported/);
+  assert.doesNotMatch(ok, /live-instance-window-mismatch/);
+  const bad = await render(view.ContextMeter({ instance: { token_usage: { ...base, window_mismatch: true } } }));
+  assert.match(bad, /window: reported/);
+  assert.match(bad, /data-debug-id="live-instance-window-mismatch"/);
+  assert.match(bad, /258K window/);
+});
+
 test('estimate-only snapshot renders a "~" prefix and the estimate tooltip', async () => {
   const est = { tool_calls: 5, est_tokens_total: 100000, context_source: 'estimate', estimated_context_tokens: 150000, context_window: 200000, context_pct: 75, compactions: 0, updated_at_ms: 1 };
   const u = model.normalizeTokenUsage(est)!;

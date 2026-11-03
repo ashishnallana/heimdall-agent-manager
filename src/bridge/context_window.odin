@@ -1,8 +1,8 @@
 package main
 
 // Context window per agent instance (chain "Estimate agent tokens via
-// extensions", T2b). The window is NEVER detected at runtime (no Codex
-// model_context_window, no CLI model-list fields). It resolves, in order:
+// extensions", T2b). bridge_context_window_resolve never probes a provider; it
+// resolves, in order:
 //   1. a user override persisted on this bridge, keyed by provider + model;
 //   2. the read-only config shipped inside the bridge binary
 //      (context_windows.json: ordered {provider, model_regex, context_window},
@@ -13,6 +13,10 @@ package main
 // The model id tried is the resolved_model when discovery knows it, then the
 // configured model (which may be an alias such as `default` or `opus`); an alias
 // with no known resolved id resolves small (200K), never large.
+// A window the provider itself reports (Codex model_context_window) is layered on
+// top in extension_token_usage.odin: it replaces the config/default result
+// (source "reported") but never a user override, and a >10% disagreement with
+// the config/default result raises window_mismatch.
 // The hub reaches this through the `context_window_op` frame (list/set/clear).
 
 import "base:runtime"
@@ -37,11 +41,15 @@ Bridge_Context_Window_Source :: enum u8 {
 	Default,
 	Config,
 	Override,
+	// Provider-reported window (Codex model_context_window); applies only when
+	// no override exists. Never produced by bridge_context_window_resolve.
+	Reported,
 }
 
 bridge_context_window_source_name :: proc(source: Bridge_Context_Window_Source) -> string {
 	switch source {
 	case .Override: return "override"
+	case .Reported: return "reported"
 	case .Config:   return "config"
 	case .Default:  return "default"
 	}
@@ -394,6 +402,19 @@ ctxwin_write_str :: proc(b: ^strings.Builder, key, value: string) {
 	strings.write_string(b, `"`)
 }
 
+// ctxwin_instance_live reports whether an instance is still running. Stopped,
+// failed or unreachable instances keep their extension state (final usage
+// snapshots) but must not drive the settings' reported-window overlay.
+@(private = "file")
+ctxwin_instance_live :: proc(instance_id: string) -> bool {
+	inst, ok := bridge_runtime_instance_snapshot(instance_id)
+	if !ok do return false
+	switch inst.runtime_status {
+	case "stopped", "stopping", "failed", "unreachable": return false
+	}
+	return true
+}
+
 // bridge_context_window_state_json renders the list payload members (no braces):
 // thresholds, the shipped entries, the overrides and the resolved windows.
 bridge_context_window_state_json :: proc(b: ^strings.Builder, extra_provider: string = "", extra_model: string = "") {
@@ -423,14 +444,32 @@ bridge_context_window_state_json :: proc(b: ^strings.Builder, extra_provider: st
 		sync.mutex_unlock(&bridge_ctxwin_mu)
 	}
 	strings.write_string(b, `],"windows":[`)
+	insts := bridge_ext_context_window_instances()
 	for p, i in pairs {
 		r := bridge_context_window_resolve(p.provider, p.model, p.resolved_model)
+		// A running instance's provider-reported window replaces a config/default
+		// result (never an override); the first mismatching instance wins.
+		reported, mismatch := i64(0), false
+		if r.source != .Override {
+			for inst in insts {
+				if inst.provider != p.provider || inst.model != p.model || inst.reported_window <= 0 do continue
+				if !ctxwin_instance_live(inst.agent_instance_id) do continue
+				if reported == 0 || (inst.window_mismatch && !mismatch) {
+					reported, mismatch = inst.reported_window, inst.window_mismatch
+				}
+			}
+			if reported > 0 do r = {context_window = reported, source = .Reported}
+		}
 		if i > 0 do strings.write_byte(b, ',')
 		strings.write_byte(b, '{'); ctxwin_write_str(b, "provider", p.provider)
 		strings.write_byte(b, ','); ctxwin_write_str(b, "model", p.model)
 		if p.resolved_model != "" { strings.write_byte(b, ','); ctxwin_write_str(b, "resolved_model", p.resolved_model) }
 		strings.write_string(b, fmt.tprintf(`,"context_window":%d,`, r.context_window))
 		ctxwin_write_str(b, "source", bridge_context_window_source_name(r.source))
+		if reported > 0 {
+			strings.write_string(b, fmt.tprintf(`,"reported_window":%d`, reported))
+			if mismatch do strings.write_string(b, `,"window_mismatch":true`)
+		}
 		strings.write_byte(b, '}')
 	}
 	strings.write_byte(b, ']')
