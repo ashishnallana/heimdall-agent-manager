@@ -133,5 +133,10 @@ test('usage_supported: unavailable copy when false, "waiting for signal" when tr
   const badge = await render(view.ContextUsageBadge({ instance: { provider: 'antigravity', token_usage: { ...base, usage_supported: false } }, instanceId: 'inst_x' }));
   assert.match(badge, /ctx n\/a/);
   assert.match(badge, /Context tracking unavailable for antigravity/);
-  assert.equal(view.ContextUsageBadge({ instance: { token_usage: { ...base, usage_supported: true } }, instanceId: 'inst_x' }), null);
+  const waiting = await render(view.ContextUsageBadge({ instance: { provider: 'claude', token_usage: { ...base, usage_supported: true } }, instanceId: 'inst_x' }));
+  assert.match(waiting, /data-context-state="waiting"/);
+  assert.match(waiting, /Waiting for signal/);
+  assert.doesNotMatch(waiting, /unavailable|n\/a/);
+  // Unknown capability without a figure stays hidden.
+  assert.equal(view.ContextUsageBadge({ instance: { token_usage: base }, instanceId: 'inst_x' }), null);
 });

@@ -27,9 +27,9 @@ function figuresTitle(f: ChainTokenFigures): string {
   ].join(' · ');
 }
 
-function ContextCell({ context, debugId, unsupported = false, waiting = false }: { context: ChainTokenContext | null; debugId: string; unsupported?: boolean; waiting?: boolean }) {
+function ContextCell({ context, debugId, unsupported = false, waiting = false, provider }: { context: ChainTokenContext | null; debugId: string; unsupported?: boolean; waiting?: boolean; provider?: string }) {
   if (!context && unsupported) {
-    return <span data-debug-id={debugId} data-context-state="unsupported" title={contextUnavailableText()} className="text-faint">n/a</span>;
+    return <span data-debug-id={debugId} data-context-state="unsupported" title={contextUnavailableText(provider)} className="text-faint">n/a</span>;
   }
   if (!context && waiting) return <span data-debug-id={debugId} data-context-state="waiting" title={CONTEXT_WAITING_TEXT} className="text-faint">…</span>;
   if (!context) return <span data-debug-id={debugId} className="text-faint">—</span>;
@@ -60,7 +60,7 @@ function InstanceRow({ inst }: { inst: ChainTokenInstance }) {
         {name}
         <span className="text-faint">{` · ${inst.runtimeStatus || 'unknown'}`}{inst.runCount ? ` · run ${inst.runCount}` : ''}</span>
       </span>
-      <ContextCell context={inst.context} debugId={`chain-token-usage-instance-context-${inst.instanceId}`} unsupported={inst.live && inst.usageSupported === false} waiting={inst.live && inst.usageSupported === true} />
+      <ContextCell context={inst.context} debugId={`chain-token-usage-instance-context-${inst.instanceId}`} unsupported={inst.live && inst.usageSupported === false} waiting={inst.live && inst.usageSupported === true} provider={inst.provider} />
       <span className="w-16 text-right tabular-nums text-primary" title={inst.hasData ? figuresTitle(inst.lifetime) : 'No token data reported'}>
         {inst.hasData ? formatTokens(inst.lifetime.totalTokens) : '—'}
       </span>
@@ -83,7 +83,7 @@ function AgentRow({ agent, total }: { agent: ChainTokenAgent; total: ChainTokenF
               {agent.hasData ? ` · ${agent.lifetime.runs} run${agent.lifetime.runs === 1 ? '' : 's'} · ${share}% of chain` : ' · no data yet'}
             </span>
           </span>
-          <ContextCell context={agent.context} debugId={`chain-token-usage-agent-context-${agent.agentId}`} unsupported={agent.usageUnsupported && agent.liveInstances > 0} />
+          <ContextCell context={agent.context} debugId={`chain-token-usage-agent-context-${agent.agentId}`} unsupported={agent.contextCapability === 'unsupported'} waiting={agent.contextCapability === 'waiting'} provider={agent.unsupportedProviders.join(', ')} />
           <span
             data-debug-id={`chain-token-usage-agent-total-${agent.agentId}`}
             className="w-16 text-right text-body-sm tabular-nums text-primary"

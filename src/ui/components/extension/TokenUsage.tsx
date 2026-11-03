@@ -25,7 +25,7 @@ export function ContextUsageBadge({ instance, instanceId }: { instance: any; ins
   const badge = contextBadge(instance);
   if (!badge) return null;
   return (
-    <span data-debug-id={`live-instance-context-${instanceId}`} data-context-tone={badge.tone} data-context-state={badge.pct === null ? 'unsupported' : 'value'} title={badge.tooltip}>
+    <span data-debug-id={`live-instance-context-${instanceId}`} data-context-tone={badge.tone} data-context-state={badge.state} title={badge.tooltip}>
       <StatusPill tone={BADGE_TONE[badge.tone]}>{badge.label}</StatusPill>
     </span>
   );

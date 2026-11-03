@@ -127,19 +127,24 @@ export const CONTEXT_WAITING_TEXT = 'Waiting for signal';
 
 export interface ContextBadgeModel {
   pct: number | null;
+  /** value = figure; waiting = capable provider, no signal yet; unsupported = provider cannot report. */
+  state: ContextTrackingState;
   tone: ContextTone;
   label: string;
   tooltip: string;
 }
 
-/** The instance-list context badge, or null when there is no context figure. */
+/** The instance-list context badge, or null when there is nothing to say (no snapshot, or unknown capability without a figure). */
 export function contextBadge(instance: any): ContextBadgeModel | null {
   const usage = normalizeTokenUsage(instance?.token_usage);
   if (!usage) return null;
   if (contextTrackingState(usage) === 'unsupported') {
-    return { pct: null, tone: 'neutral', label: 'ctx n/a', tooltip: contextUnavailableText(instance?.provider) };
+    return { pct: null, state: 'unsupported', tone: 'neutral', label: 'ctx n/a', tooltip: contextUnavailableText(instance?.provider) };
   }
-  if (usage.contextPct === null) return null;
+  if (usage.contextPct === null) {
+    if (usage.usageSupported !== true) return null;
+    return { pct: null, state: 'waiting', tone: 'neutral', label: 'ctx …', tooltip: CONTEXT_WAITING_TEXT };
+  }
   const pct = usage.contextPct;
   const window = usage.contextWindow ? formatTokens(usage.contextWindow) : '';
   const source = windowSourceLabel(usage.windowSource);
@@ -147,5 +152,5 @@ export function contextBadge(instance: any): ContextBadgeModel | null {
     `Context ${formatTokens(usage.contextTokens ?? 0)}${window ? ` of ${window}` : ''} tokens (${pct}%)`,
     source ? `window: ${source}` : '',
   ].filter(Boolean).join(' · ');
-  return { pct, tone: contextTone(pct), label: `ctx ${pct}%`, tooltip };
+  return { pct, state: 'value', tone: contextTone(pct), label: `ctx ${pct}%`, tooltip };
 }
