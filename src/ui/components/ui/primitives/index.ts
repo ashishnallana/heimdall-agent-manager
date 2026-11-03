@@ -42,6 +42,9 @@ export type { BadgeProps } from './Badge';
 export { StatusPill } from './StatusPill';
 export type { StatusPillProps } from './StatusPill';
 
+export { IconWell } from './IconWell';
+export type { IconWellProps, IconWellSize } from './IconWell';
+
 export { StatusDot } from './StatusDot';
 export type { StatusDotProps } from './StatusDot';
 
