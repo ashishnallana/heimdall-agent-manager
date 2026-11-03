@@ -314,19 +314,20 @@ test('reduced motion: the mode swap applies no animation class', async () => {
 });
 
 test('issues render as a quiet status line with rewritten copy, and send stays disabled', async () => {
-  // One bridge, offline: the `on [bridge]` clause is hidden, so the line says what is wrong.
+  // One bridge, offline: the `on [bridge]` clause is hidden. T8: on a cold start
+  // that is the full no-bridge screen, so mount embedded (banner case). The banner
+  // says what is wrong, so the quiet line does not repeat it; send stays disabled.
   await withPage({ bridges: [RIVER_OFF] }, async (ctx) => {
     const { bridgeIssueText } = await import('../src/ui/components/chat/NewConversationPage.tsx');
     assert.equal(bridgeIssueText('agent', true), 'Choose a connected bridge above.');
     assert.equal(bridgeIssueText('shell', true), 'Choose a connected bridge above.');
     assert.equal(bridgeIssueText('shell', false), 'No bridge is online. Start a bridge to launch a shell.');
     assert.equal(bridgeIssueText('agent', false), 'No bridge is online. Start a bridge to start a conversation.');
-    await ctx.render();
-    await until(ctx, () => /No bridge is online/.test(issuesText(ctx.doc)), 'bridge issue');
+    await ctx.render({ embedded: true });
+    await until(ctx, () => Boolean(q(ctx.doc, 'no-bridge-banner')) && !/Loading/.test(issuesText(ctx.doc)), 'banner');
     const line = q(ctx.doc, 'new-convo-launch-issues')!;
     assert.equal(line.getAttribute('role'), 'status');
-    assert.ok(line.querySelector('.text-muted'), 'muted text');
-    assert.match(issuesText(ctx.doc), /No bridge is online\. Start a bridge to start a conversation\./);
+    assert.doesNotMatch(issuesText(ctx.doc), /No bridge is online/, 'the banner carries it');
     assert.doesNotMatch(issuesText(ctx.doc), /Agent settings/);
     await type(ctx, q(ctx.doc, 'new-convo-composer-input'), 'hello');
     assert.ok(sendButton(ctx.doc)!.disabled, 'send disabled while issues exist');
@@ -335,7 +336,7 @@ test('issues render as a quiet status line with rewritten copy, and send stays d
     assert.equal(ctx.calls.filter((c) => c.url.includes('/chats') && c.method === 'POST').length, 0, 'a forced submit launches nothing');
 
     await pickMode(ctx, 'shell');
-    assert.match(issuesText(ctx.doc), /No bridge is online\. Start a bridge to launch a shell\./);
+    assert.ok(q(ctx.doc, 'no-bridge-banner'), 'banner in shell mode too');
     assert.ok((q(ctx.doc, 'new-shell-open') as HTMLButtonElement).disabled, 'Open shell disabled while issues exist');
   });
   // Two bridges with one online, the chosen one offline: point at the headline token.

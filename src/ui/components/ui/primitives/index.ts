@@ -3,8 +3,8 @@
  * Re-exported through the top-level `@ui` barrel (`../index.ts`).
  */
 
-export { Button } from './Button';
-export type { ButtonProps, ButtonTone } from './Button';
+export { Button, ButtonLink } from './Button';
+export type { ButtonLinkProps, ButtonProps, ButtonTone } from './Button';
 
 export { IconButton } from './IconButton';
 export type { IconButtonProps, IconButtonVariant } from './IconButton';

@@ -27,6 +27,7 @@ import { AgentMenu, type NewFavoriteAgent } from './launcher/AgentMenu';
 import { bridgeDisplayName } from './launcher/BridgeMenu';
 import { ConversationComposerBody, LaunchComposer, ShellComposerBody } from './launcher/LaunchComposer';
 import { LaunchHeadline, shouldShowBridgeClause } from './launcher/LaunchHeadline';
+import { NoBridgeBanner, NoBridgeOnline, noBridgeOnline, noBridgeRows } from './launcher/NoBridgeOnline';
 import type { LauncherMode } from './launcher/ModeMenu';
 import { isDefaultConversationProject } from './launcher/ProjectMenu';
 import { RuntimeMenu } from './launcher/RuntimeMenu';
@@ -48,6 +49,24 @@ export function bridgeIssueText(mode: LauncherMode, bridgeClauseShown: boolean):
   return mode === 'shell' ? 'No bridge is online. Start a bridge to launch a shell.' : 'No bridge is online. Start a bridge to start a conversation.';
 }
 
+/** Spec §4 #19: the no-bridge screen fades out at --duration-fast before the launcher swaps in. */
+export const NO_BRIDGE_EXIT_MS = 120;
+
+/**
+ * Which no-bridge state the page shows (spec §3.5 / §3.6, user-confirmed rule):
+ *  - `full`: the full-screen NoBridgeOnline, only decided once, on the first
+ *    bridge list of a cold start, when zero non-revoked bridges are online and the
+ *    page is not `embedded`;
+ *  - `banner`: the launcher with the inline banner and a disabled composer, when
+ *    no bridge is online later in the session (the chosen bridge dropped while the
+ *    user was here, so a typed message is kept), or on an embedded cold start;
+ *  - `none`: the launcher as usual.
+ */
+export type NoBridgeScreen = 'pending' | 'full' | 'launcher';
+export function initialNoBridgeScreen(bridges: ReadonlyArray<any> | null | undefined, embedded: boolean): Exclude<NoBridgeScreen, 'pending'> {
+  return !embedded && noBridgeOnline(bridges) ? 'full' : 'launcher';
+}
+
 export interface NewConversationPageProps {
   embedded?: boolean;
   footer?: ReactNode;
@@ -65,7 +84,7 @@ export interface NewConversationPageProps {
  * mode / project / bridge controls, the meta line, the shared composer (agent and
  * provider chips in its footer), and a quiet issues line under it.
  */
-export default function NewConversationPage({ footer, onLaunched, launchIntent }: NewConversationPageProps) {
+export default function NewConversationPage({ embedded = false, footer, onLaunched, launchIntent }: NewConversationPageProps) {
   const mobile = useIsMobile();
   // SH-1: the page opens an agent conversation OR an interactive shell. The
   // choice is a per-browser convenience, so it lives in localStorage.
@@ -133,6 +152,27 @@ export default function NewConversationPage({ footer, onLaunched, launchIntent }
   const agents = agentsQuery.data?.agents || [];
   const projects = projectsQuery.data?.projects || [];
   const bridges = bridgesQuery.data?.bridges || [];
+  // No-bridge states (spec §3.5/§3.6). The cold-start decision is made once, on the
+  // first bridge list; a later drop shows the banner instead of the full screen.
+  const [screen, setScreen] = useState<NoBridgeScreen>('pending');
+  const [leavingNoBridge, setLeavingNoBridge] = useState(false);
+  const [swapInLauncher, setSwapInLauncher] = useState(false);
+  const recoveredFromFull = useRef(false);
+  const zeroOnline = Boolean(bridgesQuery.data) && noBridgeOnline(bridges);
+  useEffect(() => {
+    if (screen === 'pending') {
+      if (bridgesQuery.data) setScreen(initialNoBridgeScreen(bridges, embedded));
+      else if (bridgesQuery.isError) setScreen('launcher');
+      return;
+    }
+    if (screen !== 'full' || zeroOnline) { setLeavingNoBridge(false); return; }
+    // A bridge came online: fade the empty state out (fast), then swap the launcher in.
+    setLeavingNoBridge(true);
+    const reduced = typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const timer = window.setTimeout(() => { setLeavingNoBridge(false); setSwapInLauncher(true); recoveredFromFull.current = true; setScreen('launcher'); }, reduced ? 0 : NO_BRIDGE_EXIT_MS);
+    return () => window.clearTimeout(timer);
+  }, [screen, bridgesQuery.data, bridgesQuery.isError, zeroOnline, embedded]);
+  const showBanner = screen === 'launcher' && zeroOnline;
   const favoriteIds = [...(preferences.data?.favorite_agent_ids || [])].sort((a, b) => { const rank = (id: string) => { const slug = agents.find(agent => agent.agent_id === id)?.slug; return slug === 'soloist' ? 0 : slug === 'coordinator' ? 1 : 2; }; return rank(a) - rank(b); });
   const pinnedIds = preferences.data?.pinned_agent_ids || [];
   const favoritesFull = favoriteIds.length >= 6;
@@ -189,6 +229,19 @@ export default function NewConversationPage({ footer, onLaunched, launchIntent }
     if (initialProject !== prefs.project_id) remember('project_id', initialProject);
     if (initialBridge !== prefs.bridge_id) remember('bridge_id', initialBridge);
   }, [preferences.data, agentsQuery.data, projectsQuery.data, bridgesQuery.data, hydrated, routeProject]);
+  // Recovery: hydrating with no bridge online leaves no bridge chosen (or the saved,
+  // offline one). When a bridge comes online, fill an empty choice; after the full
+  // screen hands back to the launcher, also replace an offline choice, so the page
+  // the user returns to is usable without a pick. Otherwise a saved choice stays
+  // (the issues line points at the headline token).
+  const firstOnlineId = useMemo(() => String(noBridgeRows(bridges).find(composerBridgeIsOnline)?.bridge_id || ''), [bridges]);
+  const chosenOnline = Boolean(selectedBridgeRow && composerBridgeIsOnline(selectedBridgeRow));
+  useEffect(() => {
+    if (!hydrated || !firstOnlineId || chosenOnline) { if (chosenOnline) recoveredFromFull.current = false; return; }
+    if (runtime.bridgeId && !recoveredFromFull.current) return;
+    recoveredFromFull.current = false;
+    chooseRuntime({ bridgeId: firstOnlineId, provider: '', model: '' });
+  }, [hydrated, firstOnlineId, chosenOnline, screen]);
   useEffect(() => {
     if (!hydrated || !routeProject) return;
     chooseProject(routeProject); consumeProjectPreselection();
@@ -314,9 +367,11 @@ export default function NewConversationPage({ footer, onLaunched, launchIntent }
 
   const bridgeName = bridgeDisplayName(selectedBridgeRow, '');
   const profileId = runtime.providerProfile || runtime.provider;
-  const statusLines = paneMode === 'agent'
+  // With the banner up it carries the bridge problem; the quiet line would repeat it.
+  const bannerCovers = (line: string) => showBanner && (line === bridgeIssueText('agent', bridgeClauseShown) || line === bridgeIssueText('shell', bridgeClauseShown));
+  const statusLines = (paneMode === 'agent'
     ? (sending ? [`Creating conversation and starting on ${selectedBridge?.label || 'selected bridge'}…`] : issues)
-    : shellIssues;
+    : shellIssues).filter(line => !bannerCovers(line));
   const alertText = paneMode === 'agent' ? error || preferenceError : shell.errorMessage || preferenceError;
 
   const attachmentRows = attachments.length ? <ul data-debug-id="new-convo-attachments" className="m-0 flex list-none flex-col gap-2 p-0">{attachments.map(a => (
@@ -328,8 +383,16 @@ export default function NewConversationPage({ footer, onLaunched, launchIntent }
     </li>
   ))}</ul> : null;
 
-  return <section data-debug-id="new-conversation-page" className="w-full px-4 sm:px-8">
-    <div className="mx-auto flex w-full max-w-[760px] flex-col gap-6 pb-16 pt-12 md:pt-[120px]">
+  if (screen === 'full') {
+    return <section data-debug-id="new-conversation-page" data-no-bridge="full" className="w-full px-4 sm:px-8">
+      <div className="mx-auto w-full pb-8 pt-12 md:pb-16 md:pt-24">
+        <NoBridgeOnline bridges={bridges} onCheckAgain={() => void bridgesQuery.refetch()} checking={bridgesQuery.isFetching} leaving={leavingNoBridge} />
+      </div>
+    </section>;
+  }
+
+  return <section data-debug-id="new-conversation-page" data-no-bridge={showBanner ? 'banner' : undefined} className="w-full px-4 sm:px-8">
+    <div className={`mx-auto flex w-full max-w-[760px] flex-col gap-6 pb-16 pt-12 md:pt-[120px] ${swapInLauncher ? 'animate-composer-swap' : ''}`} onAnimationEnd={() => setSwapInLauncher(false)}>
       <LaunchHeadline
         mode={paneMode}
         onModeChange={setPaneMode}
@@ -344,9 +407,9 @@ export default function NewConversationPage({ footer, onLaunched, launchIntent }
         branch={branch}
         disabled={sending || !hydrated}
       />
-      {/* Banner slot (spec §3.5): the inline no-bridge Alert goes here. */}
+      {showBanner ? <NoBridgeBanner bridges={bridges} onCheckAgain={() => void bridgesQuery.refetch()} checking={bridgesQuery.isFetching} /> : null}
       <div ref={composerRef} data-debug-id="new-convo-launch-dock" className={`relative w-full ${transitioning ? 'z-20' : ''}`}>
-        <LaunchComposer mode={paneMode} onSubmit={paneMode === 'agent' ? submit : (event) => { event.preventDefault(); openShell(); }}>
+        <LaunchComposer mode={paneMode} disabled={showBanner} onSubmit={paneMode === 'agent' ? submit : (event) => { event.preventDefault(); openShell(); }}>
           {paneMode === 'agent' ? (
             <ConversationComposerBody
               mobile={mobile}
