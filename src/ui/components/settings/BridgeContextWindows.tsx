@@ -131,6 +131,9 @@ export default function BridgeContextWindows({ bridgeId, online }: { bridgeId: s
                 onClick={() => openEditor(w)}>{open ? 'Cancel' : 'Change'}</Button>
             </div>
           </div>
+          {w.window_mismatch ? <Text as="p" role="caption" tone="warning" data-role="context-window-mismatch">
+            Provider reports {formatContextWindow(w.reported_window ?? w.context_window)}, which differs from the configured window by more than 10%. Check the config or set an override.
+          </Text> : null}
           {open ? <div className="flex flex-col gap-2" data-role="context-window-editor">
             <div className="flex flex-wrap items-center gap-2" role="group" aria-label="Preset context windows">
               {CONTEXT_WINDOW_PRESETS.map((p) => <Button key={p.value} size="sm"

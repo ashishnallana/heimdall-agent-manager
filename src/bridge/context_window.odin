@@ -431,14 +431,31 @@ bridge_context_window_state_json :: proc(b: ^strings.Builder, extra_provider: st
 		sync.mutex_unlock(&bridge_ctxwin_mu)
 	}
 	strings.write_string(b, `],"windows":[`)
+	insts := bridge_ext_context_window_instances()
 	for p, i in pairs {
 		r := bridge_context_window_resolve(p.provider, p.model, p.resolved_model)
+		// A running instance's provider-reported window replaces a config/default
+		// result (never an override); the first mismatching instance wins.
+		reported, mismatch := i64(0), false
+		if r.source != .Override {
+			for inst in insts {
+				if inst.provider != p.provider || inst.model != p.model || inst.reported_window <= 0 do continue
+				if reported == 0 || (inst.window_mismatch && !mismatch) {
+					reported, mismatch = inst.reported_window, inst.window_mismatch
+				}
+			}
+			if reported > 0 do r = {context_window = reported, source = .Reported}
+		}
 		if i > 0 do strings.write_byte(b, ',')
 		strings.write_byte(b, '{'); ctxwin_write_str(b, "provider", p.provider)
 		strings.write_byte(b, ','); ctxwin_write_str(b, "model", p.model)
 		if p.resolved_model != "" { strings.write_byte(b, ','); ctxwin_write_str(b, "resolved_model", p.resolved_model) }
 		strings.write_string(b, fmt.tprintf(`,"context_window":%d,`, r.context_window))
 		ctxwin_write_str(b, "source", bridge_context_window_source_name(r.source))
+		if reported > 0 {
+			strings.write_string(b, fmt.tprintf(`,"reported_window":%d`, reported))
+			if mismatch do strings.write_string(b, `,"window_mismatch":true`)
+		}
 		strings.write_byte(b, '}')
 	}
 	strings.write_byte(b, ']')
