@@ -8,6 +8,7 @@ import {
   encryptVaultText,
   decryptVaultText,
   decryptEmbeddedVaultTokens,
+  decryptVaultLabel,
   getActiveVaultKey,
 } from './vaultContent.ts';
 import { VAULT_LOCKED_MARKER } from './vaultCrypto.ts';
@@ -96,8 +97,9 @@ export async function decryptChatMessages<T extends ChatMessagePayload>(
 }
 
 /**
- * Decrypt conversation fields (title, last_message_preview, lastMessagePreview, bodyPreview, lastMessage) using active CryptoKey or key string.
- * Handles both fully armored strings and embedded ciphertext tokens (e.g. sender-prefixed previews).
+ * Decrypt conversation fields (title, agent name, last_message_preview, lastMessagePreview, bodyPreview, lastMessage) using active CryptoKey or key string.
+ * Handles both fully armored strings and embedded ciphertext tokens (e.g. sender-prefixed previews,
+ * or a native coordinator title "<sealed agent name> #3").
  */
 export async function decryptConversationRecord<T extends ConversationPayload>(
   conv: T,
@@ -112,32 +114,35 @@ export async function decryptConversationRecord<T extends ConversationPayload>(
 
   if (title && (isVaultArmored(title) || containsVaultArmored(title))) {
     try {
-      title = isVaultArmored(title)
-        ? await decryptVaultText(title, resolvedKey)
-        : await decryptEmbeddedVaultTokens(title, resolvedKey);
+      title = await decryptVaultLabel(title, resolvedKey);
     } catch {}
   }
   if (lastMessagePreview && (isVaultArmored(lastMessagePreview) || containsVaultArmored(lastMessagePreview))) {
     try {
-      lastMessagePreview = isVaultArmored(lastMessagePreview)
-        ? await decryptVaultText(lastMessagePreview, resolvedKey)
-        : await decryptEmbeddedVaultTokens(lastMessagePreview, resolvedKey);
+      lastMessagePreview = await decryptVaultLabel(lastMessagePreview, resolvedKey);
     } catch {}
   }
   if (bodyPreview && (isVaultArmored(bodyPreview) || containsVaultArmored(bodyPreview))) {
     try {
-      bodyPreview = isVaultArmored(bodyPreview)
-        ? await decryptVaultText(bodyPreview, resolvedKey)
-        : await decryptEmbeddedVaultTokens(bodyPreview, resolvedKey);
+      bodyPreview = await decryptVaultLabel(bodyPreview, resolvedKey);
     } catch {}
+  }
+  // Agent labels: an MCP-created agent's name is sealed, and its instance label is the
+  // native "<sealed agent name> #3" (sidebar rows show it as the agent name).
+  const agentLabels: Record<string, string> = {};
+  for (const key of ['agentName', 'agent_name', 'agent_display_name', 'agentDisplayName']) {
+    const value = (conv as any)[key];
+    if (typeof value === 'string' && (isVaultArmored(value) || containsVaultArmored(value))) {
+      try {
+        agentLabels[key] = await decryptVaultLabel(value, resolvedKey);
+      } catch {}
+    }
   }
   if (lastMessage && typeof lastMessage === 'object') {
     const lBody = lastMessage.body || lastMessage.bodyPreview;
     if (lBody && (isVaultArmored(lBody) || containsVaultArmored(lBody))) {
       try {
-        const decryptedBody = isVaultArmored(lBody)
-          ? await decryptVaultText(lBody, resolvedKey)
-          : await decryptEmbeddedVaultTokens(lBody, resolvedKey);
+        const decryptedBody = await decryptVaultLabel(lBody, resolvedKey);
         lastMessage = {
           ...lastMessage,
           ...(lastMessage.body !== undefined ? { body: decryptedBody } : {}),
@@ -149,6 +154,7 @@ export async function decryptConversationRecord<T extends ConversationPayload>(
 
   return {
     ...conv,
+    ...agentLabels,
     title,
     ...(lastMessagePreview !== undefined
       ? { last_message_preview: lastMessagePreview, lastMessagePreview }

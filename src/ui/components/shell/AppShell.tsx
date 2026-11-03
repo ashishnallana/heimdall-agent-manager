@@ -84,7 +84,7 @@ import {
   setBulkChainTitles,
   selectSearchChains,
 } from '../../store/searchTitleSlice';
-import { isVaultArmored } from '../../utils/vaultContent';
+import { isVaultArmored, maskVaultArmored } from '../../utils/vaultContent';
 import { VaultText } from '../vault/VaultText';
 import { batchDecryptTitles, type RawSearchItemInput } from '../../utils/vaultSearch';
 import { useFetchExperimentsQuery } from '../../api/endpoints/settings';
@@ -547,7 +547,8 @@ function looksLikeInternalId(value: string): boolean {
 }
 
 function displayAgentName(agentId: string, name?: string): string {
-  const trimmed = String(name || '').trim();
+  // Never paint ciphertext: a sealed name the vault could not open ("<token> #3") is masked.
+  const trimmed = maskVaultArmored(String(name || '').trim());
   if (trimmed && trimmed !== agentId && !looksLikeInternalId(trimmed)) return trimmed;
   return 'Unnamed agent';
 }

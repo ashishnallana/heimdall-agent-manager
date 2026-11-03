@@ -8,6 +8,7 @@ import {
 } from '../../store/vaultSlice';
 import {
   isVaultArmored,
+  isWholeVaultArmored,
   containsVaultArmored,
   decryptVaultText,
   decryptEmbeddedVaultTokens,
@@ -71,7 +72,8 @@ export function VaultText({
   const activeVaultKey = useSelector(selectActiveVaultKey) || getActiveVaultKey();
 
   const rawString = value ?? '';
-  const isArmored = isVaultArmored(rawString);
+  // Whole-envelope only on an exact token: "<sealed name> #3" takes the embedded path.
+  const isArmored = isWholeVaultArmored(rawString);
   const isEmbedded = !isArmored && containsVaultArmored(rawString);
   const hasVault = isArmored || isEmbedded;
 
@@ -180,7 +182,7 @@ export function useDecryptedText(value?: string | null): {
   const isUnlocked = useSelector(selectIsVaultUnlocked);
   const activeVaultKey = useSelector(selectActiveVaultKey) || getActiveVaultKey();
   const raw = value ?? '';
-  const isArmored = isVaultArmored(raw);
+  const isArmored = isWholeVaultArmored(raw);
   const isEmbedded = !isArmored && containsVaultArmored(raw);
   const hasVault = isArmored || isEmbedded;
 
