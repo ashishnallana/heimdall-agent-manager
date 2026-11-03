@@ -31,6 +31,10 @@ export type FsEntry = {
   has_git: boolean;
   size: number;
   modified_at: string;
+  // The on-disk name is not valid UTF-8: `name` is display-only (U+FFFD for each
+  // undecodable byte) and does not name the entry, so it must not be opened,
+  // navigated into, renamed or deleted through a path built from it.
+  name_lossy?: boolean;
 };
 
 export type FsListResult = {

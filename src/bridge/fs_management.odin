@@ -69,6 +69,13 @@ Bridge_Fs_Entry :: struct {
 	has_git:     bool   `json:"has_git"`,
 	size:        i64    `json:"size"`,    // bytes for regular files; 0 for dirs
 	modified_at: string `json:"modified_at"`, // RFC3339 UTC
+	// name_lossy: the on-disk name is not valid UTF-8, so `name` is a display-only
+	// rendering with U+FFFD for each undecodable byte. It does NOT name the entry on
+	// disk; clients must not build a path from it (no navigate/open/select). Such
+	// entries are still listed (with is_dir kept) so the user sees the folder's real
+	// contents; they are just not actionable. (Always sent: this toolchain's
+	// json omitempty does not apply to bool fields.)
+	name_lossy:  bool   `json:"name_lossy"`,
 }
 
 Bridge_Fs_List_Result :: struct {
@@ -777,8 +784,10 @@ bridge_fs_list_dir :: proc(requested: string, include_hidden: bool = true, curso
 		}
 		size := i64(0)
 		if !is_dir do size = info.size
+		display_name, name_lossy := bridge_utf8_lossy(name)
 		append(&all, Bridge_Fs_Entry{
-			name        = strings.clone(name),
+			name        = display_name,
+			name_lossy  = name_lossy,
 			is_dir      = is_dir,
 			hidden      = hidden,
 			has_git     = has_git,
@@ -1819,9 +1828,7 @@ bridge_fs_list_result_json :: proc(command_id: string, r: Bridge_Fs_List_Result,
 		entries     = r.entries,
 		error       = bridge_result_error(r.error_code, r.message),
 	}
-	data, err := json.marshal(wire, allocator = context.temp_allocator)
-	if err != nil do return ""
-	return strings.clone(string(data), allocator)
+	return bridge_wire_json(wire, allocator)
 }
 
 bridge_fs_read_file_result_json :: proc(command_id: string, r: Bridge_Fs_Read_File_Result, allocator := context.allocator) -> string {
@@ -1844,9 +1851,7 @@ bridge_fs_read_file_result_json :: proc(command_id: string, r: Bridge_Fs_Read_Fi
 		wire.content = r.content
 		wire.encoding = r.encoding
 	}
-	data, err := json.marshal(wire, allocator = context.temp_allocator)
-	if err != nil do return ""
-	return strings.clone(string(data), allocator)
+	return bridge_wire_json(wire, allocator)
 }
 
 bridge_fs_create_file_result_json :: proc(command_id: string, r: Bridge_Fs_Create_File_Result, allocator := context.allocator) -> string {
@@ -1859,9 +1864,7 @@ bridge_fs_create_file_result_json :: proc(command_id: string, r: Bridge_Fs_Creat
 		within_root = r.within_root,
 		error       = bridge_result_error(r.error_code, r.message),
 	}
-	data, err := json.marshal(wire, allocator = context.temp_allocator)
-	if err != nil do return ""
-	return strings.clone(string(data), allocator)
+	return bridge_wire_json(wire, allocator)
 }
 
 bridge_fs_move_result_json :: proc(command_id: string, r: Bridge_Fs_Move_Result, allocator := context.allocator) -> string {
@@ -1874,9 +1877,7 @@ bridge_fs_move_result_json :: proc(command_id: string, r: Bridge_Fs_Move_Result,
 		within_root = r.within_root,
 		error       = bridge_result_error(r.error_code, r.message),
 	}
-	data, err := json.marshal(wire, allocator = context.temp_allocator)
-	if err != nil do return ""
-	return strings.clone(string(data), allocator)
+	return bridge_wire_json(wire, allocator)
 }
 
 bridge_fs_delete_result_json :: proc(command_id: string, r: Bridge_Fs_Delete_Result, allocator := context.allocator) -> string {
@@ -1889,9 +1890,7 @@ bridge_fs_delete_result_json :: proc(command_id: string, r: Bridge_Fs_Delete_Res
 		within_root = r.within_root,
 		error       = bridge_result_error(r.error_code, r.message),
 	}
-	data, err := json.marshal(wire, allocator = context.temp_allocator)
-	if err != nil do return ""
-	return strings.clone(string(data), allocator)
+	return bridge_wire_json(wire, allocator)
 }
 
 bridge_fs_stat_result_json :: proc(command_id: string, r: Bridge_Fs_Stat_Result, allocator := context.allocator) -> string {
@@ -1906,9 +1905,7 @@ bridge_fs_stat_result_json :: proc(command_id: string, r: Bridge_Fs_Stat_Result,
 		within_root = r.within_root,
 		error       = bridge_result_error(r.error_code, r.message),
 	}
-	data, err := json.marshal(wire, allocator = context.temp_allocator)
-	if err != nil do return ""
-	return strings.clone(string(data), allocator)
+	return bridge_wire_json(wire, allocator)
 }
 
 bridge_fs_mkdir_result_json :: proc(command_id: string, r: Bridge_Fs_Mkdir_Result, allocator := context.allocator) -> string {
@@ -1921,9 +1918,7 @@ bridge_fs_mkdir_result_json :: proc(command_id: string, r: Bridge_Fs_Mkdir_Resul
 		within_root = r.within_root,
 		error       = bridge_result_error(r.error_code, r.message),
 	}
-	data, err := json.marshal(wire, allocator = context.temp_allocator)
-	if err != nil do return ""
-	return strings.clone(string(data), allocator)
+	return bridge_wire_json(wire, allocator)
 }
 
 bridge_fs_write_file_result_json :: proc(command_id: string, r: Bridge_Fs_Write_File_Result, allocator := context.allocator) -> string {
@@ -1937,9 +1932,7 @@ bridge_fs_write_file_result_json :: proc(command_id: string, r: Bridge_Fs_Write_
 		within_root   = r.within_root,
 		error         = bridge_result_error(r.error_code, r.message),
 	}
-	data, err := json.marshal(wire, allocator = context.temp_allocator)
-	if err != nil do return ""
-	return strings.clone(string(data), allocator)
+	return bridge_wire_json(wire, allocator)
 }
 
 bridge_fs_batch_write_result_json :: proc(command_id: string, r: Bridge_Fs_Batch_Write_Result, allocator := context.allocator) -> string {
@@ -1951,9 +1944,7 @@ bridge_fs_batch_write_result_json :: proc(command_id: string, r: Bridge_Fs_Batch
 		errors     = r.errors,
 		error      = bridge_result_error(r.error_code, r.message),
 	}
-	data, err := json.marshal(wire, allocator = context.temp_allocator)
-	if err != nil do return ""
-	return strings.clone(string(data), allocator)
+	return bridge_wire_json(wire, allocator)
 }
 
 bridge_fs_find_files_result_json :: proc(command_id: string, r: Bridge_Fs_Find_Files_Result, allocator := context.allocator) -> string {
@@ -1966,9 +1957,7 @@ bridge_fs_find_files_result_json :: proc(command_id: string, r: Bridge_Fs_Find_F
 		files      = r.files,
 		error      = bridge_result_error(r.error_code, r.message),
 	}
-	data, err := json.marshal(wire, allocator = context.temp_allocator)
-	if err != nil do return ""
-	return strings.clone(string(data), allocator)
+	return bridge_wire_json(wire, allocator)
 }
 
 bridge_fs_grep_result_json :: proc(command_id: string, r: Bridge_Fs_Grep_Result, allocator := context.allocator) -> string {
@@ -1981,9 +1970,7 @@ bridge_fs_grep_result_json :: proc(command_id: string, r: Bridge_Fs_Grep_Result,
 		matches    = r.matches,
 		error      = bridge_result_error(r.error_code, r.message),
 	}
-	data, err := json.marshal(wire, allocator = context.temp_allocator)
-	if err != nil do return ""
-	return strings.clone(string(data), allocator)
+	return bridge_wire_json(wire, allocator)
 }
 
 bridge_fs_find_files_result_delete :: proc(r: ^Bridge_Fs_Find_Files_Result) {
