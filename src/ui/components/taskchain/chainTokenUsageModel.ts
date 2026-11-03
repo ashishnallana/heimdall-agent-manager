@@ -25,6 +25,8 @@ export interface ChainTokenContext {
   tokens: number;
   window: number | null;
   tone: ContextTone;
+  /** True when tokens/pct come from the bridge's tool-traffic estimate. */
+  isEstimate: boolean;
 }
 
 export interface ChainTokenInstance {
@@ -98,9 +100,9 @@ export function normalizeFigures(raw: unknown): ChainTokenFigures {
   };
 }
 
-function makeContext(pct: number | null, tokens: unknown, window: unknown): ChainTokenContext | null {
+function makeContext(pct: number | null, tokens: unknown, window: unknown, estimate = false): ChainTokenContext | null {
   if (pct === null) return null;
-  return { pct, tokens: count(tokens) ?? 0, window: count(window) || null, tone: contextTone(pct) };
+  return { pct, tokens: count(tokens) ?? 0, window: count(window) || null, tone: contextTone(pct), isEstimate: estimate };
 }
 
 function normalizeInstance(raw: unknown): ChainTokenInstance | null {
@@ -117,7 +119,10 @@ function normalizeInstance(raw: unknown): ChainTokenInstance | null {
     hasData: raw.has_data === true,
     lifetime: normalizeFigures(raw.lifetime),
     runCount: count(raw.run_count),
-    context: live ? makeContext(count(raw.context_pct), raw.context_tokens, raw.context_window) : null,
+    context: live ? (() => {
+      const est = raw.context_source === 'estimate' && count(raw.context_tokens) === null;
+      return makeContext(count(raw.context_pct), est ? raw.estimated_context_tokens : raw.context_tokens, raw.context_window, est);
+    })() : null,
     usageSupported: typeof raw.usage_supported === 'boolean' ? raw.usage_supported : null,
   };
 }
@@ -140,7 +145,7 @@ function normalizeAgent(raw: unknown): ChainTokenAgent | null {
     .filter((i: ChainTokenInstance | null): i is ChainTokenInstance => i !== null);
   if (!agentId && instances.length === 0) return null;
   const ctx = isObject(raw.context) ? raw.context : null;
-  const context = ctx ? makeContext(count(ctx.pct), ctx.tokens, ctx.window) : null;
+  const context = ctx ? makeContext(count(ctx.pct), ctx.tokens, ctx.window, ctx.context_source === 'estimate') : null;
   return {
     agentId,
     name: String(raw.agent_name || '').trim() || agentId || 'Unknown agent',

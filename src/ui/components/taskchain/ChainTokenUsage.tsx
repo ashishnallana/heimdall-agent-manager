@@ -5,7 +5,7 @@ import React from 'react';
 import { ProgressBar, StatusPill, Text } from '@ui';
 import { useGetTaskChainTokenUsageQuery } from '../../api/endpoints/taskChains';
 import { retainChainTokenUsageView } from '../../api/chainTokenUsageRefresh';
-import { CONTEXT_WAITING_TEXT, contextUnavailableText, formatTokens } from '../extension/tokenUsageModel';
+import { CONTEXT_ESTIMATE_TEXT, CONTEXT_WAITING_TEXT, contextUnavailableText, formatTokens } from '../extension/tokenUsageModel';
 import {
   normalizeChainTokenUsage,
   shareOfTotal,
@@ -34,17 +34,19 @@ function ContextCell({ context, debugId, unsupported = false, waiting = false, p
   if (!context && waiting) return <span data-debug-id={debugId} data-context-state="waiting" title={CONTEXT_WAITING_TEXT} className="text-faint">…</span>;
   if (!context) return <span data-debug-id={debugId} className="text-faint">—</span>;
   const window = context.window ? ` / ${formatTokens(context.window)}` : '';
+  const tilde = context.isEstimate ? '~' : '';
   return (
     <span
       data-debug-id={debugId}
       data-context-tone={context.tone}
-      title={`Current context ${formatTokens(context.tokens)}${window} tokens (${context.pct}% of window)`}
+      data-context-estimate={context.isEstimate ? 'true' : undefined}
+      title={`Current context ${tilde}${formatTokens(context.tokens)}${window} tokens (${tilde}${context.pct}% of window)${context.isEstimate ? ` · ${CONTEXT_ESTIMATE_TEXT}` : ''}`}
       className="flex min-w-0 items-center gap-2"
     >
       <span className="hidden w-16 sm:block">
-        <ProgressBar value={Math.min(context.pct, 100)} tone={METER_TONE[context.tone]} size="sm" label={`Context ${context.pct}% of window`} />
+        <ProgressBar value={Math.min(context.pct, 100)} tone={METER_TONE[context.tone]} size="sm" label={`Context ${tilde}${context.pct}% of window`} />
       </span>
-      <StatusPill tone={PILL_TONE[context.tone]}>{`${context.pct}%`}</StatusPill>
+      <StatusPill tone={PILL_TONE[context.tone]}>{`${tilde}${context.pct}%`}</StatusPill>
     </span>
   );
 }

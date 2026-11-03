@@ -112,7 +112,7 @@ codex_map_hook :: proc(raw, ts: string, permission_timeout_ms := 0, permission_b
 		ext_event_tool(&eb, root, tool_input, tool_response)
 	}
 	if has_metrics do ext_event_metrics(&eb, metrics)
-	if has_usage do ext_event_usage(&eb, codex_transcript_usage(json_get_string(root, "transcript_path")))
+	ext_event_finish_usage(&eb, CODEX_PROVIDER, root, has_usage)
 	append(&out.events, ext_event_end(&eb, pb_done(&p)))
 	if name == "PostToolUse" && json_get_string(root, "tool_name") == "apply_patch" {
 		for edit in codex_patch_events(root, ts) do append(&out.events, edit)

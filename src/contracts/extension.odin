@@ -8,6 +8,7 @@ package contracts
 //    transcript_path?, agent:{id?,type?}, tool?:{name,use_id?,input?,response?},
 //    metrics?:{input_bytes,response_bytes,est_tokens},
 //    usage?:{context_tokens,output_tokens_total?,context_window?,source},
+//    usage_unavailable?:true,   (reader exists for provider but yielded nothing)
 //    payload}
 //
 // compaction {payload:{phase:"pre"|"post", trigger?}} marks the provider
@@ -89,6 +90,9 @@ Ext_Event :: struct {
 	metrics:            Ext_Tool_Metrics,
 	has_usage:          bool,
 	usage:              Ext_Usage,
+	// The adapter has a transcript reader for this provider but it found no
+	// usable record (event.usage_unavailable); the bridge logs it once per session.
+	usage_unavailable:  bool,
 }
 
 // Ext_Tool_Metrics is the pre-clip size of one tool call (event.metrics).
@@ -269,6 +273,8 @@ ext_parse_event :: proc(raw: string) -> (ev: Ext_Event, err: Ext_Error) {
 			ev.usage.source = ext_obj_string(u, "source")
 		}
 	}
+
+	if v, is := root["usage_unavailable"].(json.Boolean); is do ev.usage_unavailable = bool(v)
 
 	#partial switch kind {
 	case .Session:

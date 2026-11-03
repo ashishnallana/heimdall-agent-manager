@@ -100,9 +100,32 @@ Pi and Antigravity rows come from dawnstar's `provider_models.json` and
 are authoritative. Antigravity does not document its in-app limit: the rows are
 set low so rollover fires before the platform compacts. Pi has no Heimdall
 extension yet, so the bridge gets no `context_tokens` for a Pi agent; its rows
-take effect once a Pi usage source exists, and until then the byte estimate
-applies. Copilot is not in the map (no models were listed; it needed
+apply to the tool-traffic estimate described below until a Pi usage source
+exists. Copilot is not in the map (no models were listed; it needed
 authentication on dawnstar).
+
+### Estimate fallback (`context_source: "estimate"`)
+
+A provider that reports no context size (no `usage` block: Antigravity sends
+tool metrics only, Pi has no extension events) would otherwise never reach the
+rollover threshold. While no provider `usage.context_tokens` has been seen, the
+bridge uses `estimated_context_tokens = (est_tokens_total since last reset) *
+BRIDGE_EXT_ESTIMATE_MULTIPLIER` (`src/bridge/extension_token_usage.odin`,
+default **1.5**: tool traffic understates the real context, so the estimate is
+scaled up to stay conservative). The snapshot then carries
+`context_source:"estimate"`, `estimated_context_tokens` and `context_pct`
+computed from it; `context_tokens` stays absent (it is only ever the raw
+provider figure). The estimate restarts from zero on a session start (not a
+`source=compact` restart) and on a `compaction` event (either phase);
+`est_tokens_total` itself remains a lifetime sum. A provider-reported usage
+block always wins from then on. Rollover, the hub's `context_pct` recompute
+and the UI all use this effective figure; the UI prefixes it with `~` and the
+tooltip says "estimated from tool traffic".
+
+| Source | `context_source` | Confidence |
+|---|---|---|
+| provider usage block (Claude/Codex transcript) | the provider's `usage.source` | measured |
+| tool-metrics fallback | `estimate` | rough, deliberately high (x1.5) |
 
 The hub drives overrides with the `context_window_op` frame
 `{command_id, op: list|set|clear, provider?, model?, context_window?}`. The
