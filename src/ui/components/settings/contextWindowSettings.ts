@@ -4,7 +4,7 @@
 // GET/PUT/DELETE /api/v1/bridges/{id}/context-windows to it. Every reply is the
 // bridge's full state, so the UI always re-renders from the latest reply.
 
-import { CONTEXT_ROLLOVER_PCT, CONTEXT_WARN_PCT } from '../extension/tokenUsageModel';
+import { resolveThresholds } from '../extension/tokenUsageModel';
 
 export type ContextWindowSource = 'override' | 'config' | 'default';
 
@@ -92,12 +92,13 @@ export function normalizeContextWindowState(data: any): ContextWindowState | nul
     });
   }
   windows.sort((a, b) => a.provider.localeCompare(b.provider) || a.model.localeCompare(b.model));
+  const thresholds = resolveThresholds(num(data.warn_pct, 0), num(data.rollover_pct, 0));
   return {
     default_window: num(data.default_window, 200_000),
     min_window: num(data.min_window, CONTEXT_WINDOW_MIN),
     max_window: num(data.max_window, CONTEXT_WINDOW_MAX),
-    warn_pct: num(data.warn_pct, CONTEXT_WARN_PCT),
-    rollover_pct: num(data.rollover_pct, CONTEXT_ROLLOVER_PCT),
+    warn_pct: thresholds.warnPct,
+    rollover_pct: thresholds.rolloverPct,
     windows,
   };
 }

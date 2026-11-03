@@ -61,6 +61,10 @@ test('badge tone: neutral below 40 %, amber at 40 %, red at 70 %', () => {
   assert.equal(badge.label, 'ctx 82%');
   assert.match(badge.tooltip, /164K of 200K tokens \(82%\)/);
   assert.match(badge.tooltip, /window: model config/);
+  const custom = model.contextBadge({ token_usage: { ...SNAPSHOT, context_tokens: 100000, context_pct: 50, warn_pct: 60, rollover_pct: 80 } })!;
+  assert.equal(custom.tone, 'neutral');
+  const customWarn = model.contextBadge({ token_usage: { ...SNAPSHOT, context_tokens: 130000, context_pct: 65, warn_pct: 60, rollover_pct: 80 } })!;
+  assert.equal(customWarn.tone, 'warning');
   assert.equal(model.contextBadge({}), null);
   assert.equal(model.contextBadge({ token_usage: { tool_calls: 0, est_tokens_total: 0, compactions: 0 } }), null, 'hidden without a context figure');
 });

@@ -9,8 +9,16 @@
 //                 runs_counted, last_run_counted}  (added at each hub stop/restart)
 
 /** FALLBACK thresholds only: the bridge's shipped config is authoritative and sends warn_pct/rollover_pct on the snapshot. */
-export const CONTEXT_WARN_PCT = 40;
-export const CONTEXT_ROLLOVER_PCT = 70;
+const CONTEXT_WARN_PCT = 40;
+const CONTEXT_ROLLOVER_PCT = 70;
+
+export interface Thresholds { warnPct: number; rolloverPct: number }
+
+/** The ONLY place the fallback constants are applied: live (bridge-reported) values win; absent/invalid -> constants. */
+export function resolveThresholds(warnPct?: number | null, rolloverPct?: number | null): Thresholds {
+  const ok = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v) && v > 0;
+  return { warnPct: ok(warnPct) ? warnPct : CONTEXT_WARN_PCT, rolloverPct: ok(rolloverPct) ? rolloverPct : CONTEXT_ROLLOVER_PCT };
+}
 
 export type ContextTone = 'neutral' | 'warning' | 'danger';
 export type WindowSource = 'override' | 'config' | 'default' | '';
@@ -88,9 +96,10 @@ export function normalizeTokenTotals(raw: unknown): TokenTotals | null {
 }
 
 /** amber at >= warnPct, red at >= rolloverPct (snapshot values; constants are the fallback). Display only: nothing is sent to the agent. */
-export function contextTone(pct: number, warnPct: number = CONTEXT_WARN_PCT, rolloverPct: number = CONTEXT_ROLLOVER_PCT): ContextTone {
-  if (pct >= rolloverPct) return 'danger';
-  if (pct >= warnPct) return 'warning';
+export function contextTone(pct: number, warnPct?: number | null, rolloverPct?: number | null): ContextTone {
+  const th = resolveThresholds(warnPct, rolloverPct);
+  if (pct >= th.rolloverPct) return 'danger';
+  if (pct >= th.warnPct) return 'warning';
   return 'neutral';
 }
 
@@ -157,5 +166,5 @@ export function contextBadge(instance: any): ContextBadgeModel | null {
     `Context ${formatTokens(usage.contextTokens ?? 0)}${window ? ` of ${window}` : ''} tokens (${pct}%)`,
     source ? `window: ${source}` : '',
   ].filter(Boolean).join(' · ');
-  return { pct, state: 'value', tone: contextTone(pct), label: `ctx ${pct}%`, tooltip };
+  return { pct, state: 'value', tone: contextTone(pct, usage.warnPct, usage.rolloverPct), label: `ctx ${pct}%`, tooltip };
 }

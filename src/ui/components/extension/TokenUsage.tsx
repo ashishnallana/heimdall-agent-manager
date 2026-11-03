@@ -4,8 +4,7 @@
 // the instance JSON has no data.
 import { ProgressBar, StatusPill } from '@ui';
 import {
-  CONTEXT_ROLLOVER_PCT,
-  CONTEXT_WARN_PCT,
+  resolveThresholds,
   CONTEXT_WAITING_TEXT,
   contextBadge,
   contextTrackingState,
@@ -54,7 +53,7 @@ export function ContextMeter({ instance }: { instance: any }) {
       </div>
     );
   }
-  const tone = contextTone(usage.contextPct, usage.warnPct ?? undefined, usage.rolloverPct ?? undefined);
+  const tone = contextTone(usage.contextPct, usage.warnPct, usage.rolloverPct);
   return (
     <div data-debug-id="live-instance-context-meter" data-context-tone={tone} className="mt-0.5 flex flex-col gap-1">
       <ProgressBar
@@ -75,7 +74,7 @@ export function ContextMeter({ instance }: { instance: any }) {
         {usage.toolCalls} tool calls · ~{formatTokens(usage.estTokensTotal)} tool tokens
         {usage.outputTokensTotal !== null ? ` · ${formatTokens(usage.outputTokensTotal)} output` : ''}
         {usage.compactions ? ` · ${usage.compactions} compaction${usage.compactions === 1 ? '' : 's'}` : ''}
-        {` · warn ${usage.warnPct ?? CONTEXT_WARN_PCT}%, rollover ${usage.rolloverPct ?? CONTEXT_ROLLOVER_PCT}%`}
+        {` · warn ${resolveThresholds(usage.warnPct, usage.rolloverPct).warnPct}%, rollover ${resolveThresholds(usage.warnPct, usage.rolloverPct).rolloverPct}%`}
       </span>
     </div>
   );

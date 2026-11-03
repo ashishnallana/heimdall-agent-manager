@@ -10,7 +10,7 @@
 //    context_pct?, context_tokens?, context_window?, window_source?}]}]}
 //   Figures = {total_tokens, context_tokens, est_tool_tokens, output_tokens, runs}
 // total_tokens is context (sum of each run's context) + output, computed by the hub.
-import { CONTEXT_ROLLOVER_PCT, CONTEXT_WARN_PCT, contextTone, type ContextTone } from '../extension/tokenUsageModel';
+import { contextTone, resolveThresholds, type ContextTone, type Thresholds } from '../extension/tokenUsageModel';
 
 export interface ChainTokenFigures {
   totalTokens: number;
@@ -98,7 +98,6 @@ export function normalizeFigures(raw: unknown): ChainTokenFigures {
   };
 }
 
-interface Thresholds { warnPct: number; rolloverPct: number }
 
 function makeContext(pct: number | null, tokens: unknown, window: unknown, th: Thresholds): ChainTokenContext | null {
   if (pct === null) return null;
@@ -160,7 +159,7 @@ export function normalizeChainTokenUsage(raw: unknown): ChainTokenUsage | null {
   const body = isObject(raw) && isObject(raw.data) && !('agents' in raw) ? raw.data : raw;
   if (!isObject(body)) return null;
   // Hub-sent thresholds (from the bridge's shipped config); constants only when absent.
-  const th: Thresholds = { warnPct: count(body.warn_pct) || CONTEXT_WARN_PCT, rolloverPct: count(body.rollover_pct) || CONTEXT_ROLLOVER_PCT };
+  const th: Thresholds = resolveThresholds(count(body.warn_pct), count(body.rollover_pct));
   const agents = (Array.isArray(body.agents) ? body.agents : [])
     .map((a: unknown) => normalizeAgent(a, th))
     .filter((a: ChainTokenAgent | null): a is ChainTokenAgent => a !== null);
