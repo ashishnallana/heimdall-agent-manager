@@ -64,6 +64,8 @@ export default {
       },
       fontSize: {
         display: ['var(--text-display-size)', { lineHeight: 'var(--text-display-leading)', letterSpacing: 'var(--text-display-tracking)', fontWeight: 'var(--text-display-weight)' }],
+        headline: ['var(--text-headline-size)', { lineHeight: 'var(--text-headline-leading)', letterSpacing: 'var(--text-headline-tracking)', fontWeight: 'var(--text-headline-weight)' }],
+        'headline-sm': ['var(--text-headline-sm-size)', { lineHeight: 'var(--text-headline-sm-leading)', letterSpacing: 'var(--text-headline-tracking)', fontWeight: 'var(--text-headline-weight)' }],
         heading: ['var(--text-heading-size)', { lineHeight: 'var(--text-heading-leading)', letterSpacing: 'var(--text-heading-tracking)', fontWeight: 'var(--text-heading-weight)' }],
         title: ['var(--text-title-size)', { lineHeight: 'var(--text-title-leading)', letterSpacing: 'var(--text-title-tracking)', fontWeight: 'var(--text-title-weight)' }],
         body: ['var(--text-body-size)', { lineHeight: 'var(--text-body-leading)', letterSpacing: 'var(--text-body-tracking)', fontWeight: 'var(--text-body-weight)' }],
@@ -72,6 +74,7 @@ export default {
         caption: ['var(--text-caption-size)', { lineHeight: 'var(--text-caption-leading)', letterSpacing: 'var(--text-caption-tracking)', fontWeight: 'var(--text-caption-weight)' }],
         overline: ['var(--text-overline-size)', { lineHeight: 'var(--text-overline-leading)', letterSpacing: 'var(--text-overline-tracking)', fontWeight: 'var(--text-overline-weight)' }],
         code: ['var(--text-code-size)', { lineHeight: 'var(--text-code-leading)', letterSpacing: 'var(--text-code-tracking)', fontWeight: 'var(--text-code-weight)' }],
+        'code-sm': ['var(--text-code-sm-size)', { lineHeight: 'var(--text-code-sm-leading)', letterSpacing: 'var(--text-code-sm-tracking)', fontWeight: 'var(--text-code-sm-weight)' }],
         // Body/label long-tail remap (EL / 02-tokens.md): the raw Tailwind
         // `text-sm` / `text-xs` scale is repointed at the `body` / `label` tokens
         // so the ~1000-node body/label tail picks up token leading/weight/tracking

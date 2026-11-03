@@ -3,6 +3,8 @@
 
 /* Design system: page titles, section headings and agent replies are set in the serif. */
 .text-display,
+.text-headline,
+.text-headline-sm,
 .text-heading {
   font-family: var(--font-display);
 }
