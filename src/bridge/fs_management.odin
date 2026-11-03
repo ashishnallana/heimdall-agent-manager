@@ -564,15 +564,22 @@ bridge_fs_resolve_within :: proc(requested: string, sandbox_root: string = "") -
 	// Empty request means "the root itself".
 	if req == "" || req == "~" do return strings.clone(root), true
 	expanded := bridge_expand_home(req)
+	// bridge_expand_home returns its input unchanged unless it expanded "~/".
+	expanded_owned := raw_data(expanded) != raw_data(req)
+	defer if expanded_owned do delete(expanded)
 	// Relative paths resolve against the root, not the process cwd.
 	if !filepath.is_abs(expanded) {
 		joined, jerr := filepath.join([]string{root, expanded}, context.allocator)
 		if jerr != nil do return "", false
+		if expanded_owned do delete(expanded)
 		expanded = joined
+		expanded_owned = true
 	}
 	// Resolve the deepest EXISTING ancestor to a real path (defeats symlink escape),
 	// then re-append the non-existent tail (needed for mkdir of a new dir).
 	real_prefix, tail := bridge_fs_realpath_existing_prefix(expanded)
+	defer delete(real_prefix)
+	defer delete(tail)
 	if real_prefix == "" do return "", false
 	full := real_prefix
 	if tail != "" {
@@ -580,9 +587,13 @@ bridge_fs_resolve_within :: proc(requested: string, sandbox_root: string = "") -
 		if jerr != nil do return "", false
 		full = joined
 	}
+	defer if raw_data(full) != raw_data(real_prefix) do delete(full)
 	cleaned, cerr := filepath.clean(full, context.allocator)
 	if cerr != nil do return "", false
-	if !bridge_fs_is_within_root(cleaned, root) do return "", false
+	if !bridge_fs_is_within_root(cleaned, root) {
+		delete(cleaned)
+		return "", false
+	}
 	return cleaned, true
 }
 
@@ -593,6 +604,8 @@ bridge_fs_resolve_within :: proc(requested: string, sandbox_root: string = "") -
 bridge_fs_realpath_existing_prefix :: proc(path: string) -> (real_prefix: string, tail: string) {
 	cleaned, cerr := filepath.clean(path, context.allocator)
 	if cerr != nil do return "", ""
+	// cursor and suffix_parts are slices of cleaned; both results are fresh allocations.
+	defer delete(cleaned)
 	cursor := cleaned
 	suffix_parts := make([dynamic]string)
 	defer delete(suffix_parts)
@@ -628,9 +641,13 @@ bridge_fs_realpath_existing_prefix :: proc(path: string) -> (real_prefix: string
 // returns a freshly allocated string.
 bridge_fs_canonicalize_existing :: proc(path: string) -> string {
 	real_prefix, tail := bridge_fs_realpath_existing_prefix(path)
+	defer delete(tail)
 	if real_prefix != "" {
 		if tail != "" {
-			if joined, jerr := filepath.join([]string{real_prefix, tail}, context.allocator); jerr == nil do return joined
+			if joined, jerr := filepath.join([]string{real_prefix, tail}, context.allocator); jerr == nil {
+				delete(real_prefix)
+				return joined
+			}
 		}
 		return real_prefix
 	}
