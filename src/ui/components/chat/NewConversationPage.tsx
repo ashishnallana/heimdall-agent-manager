@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { useSelector } from 'react-redux';
-import { Button, IconButton, Input, Modal, Text, Textarea } from '@ui';
+import { Button, IconButton, Text } from '@ui';
 import { useCreateAgentMutation, useListAgentIdentitiesQuery, useListAgentTemplatesQuery } from '../../api/endpoints/agents';
 import { useListBridgesQuery, useListAgentBridgeSupportQuery, useBridgeProviderStatus } from '../../api/endpoints/bridgeSupport';
 import { useCreateLaunchConversationMutation } from '../../api/endpoints/chats';
-import { useCreateProjectMutation, useListProjectsQuery } from '../../api/endpoints/projects';
+import { useListProjectsQuery } from '../../api/endpoints/projects';
 import { useGetProjectVcsStatusQuery } from '../../api/endpoints/projectVcs';
 import { useFetchExperimentsQuery } from '../../api/endpoints/settings';
 import { useCreateArtifactMutation } from '../../api/endpoints/artifacts';
@@ -27,6 +27,7 @@ import { AgentMenu, type NewFavoriteAgent } from './launcher/AgentMenu';
 import { bridgeDisplayName } from './launcher/BridgeMenu';
 import { ConversationComposerBody, LaunchComposer, ShellComposerBody } from './launcher/LaunchComposer';
 import { LaunchHeadline, shouldShowBridgeClause, type LaunchHeadlineMenu } from './launcher/LaunchHeadline';
+import { NewProjectModal } from './launcher/NewProjectModal';
 import { NoBridgeBanner, NoBridgeOnline, noBridgeOnline, noBridgeRows } from './launcher/NoBridgeOnline';
 import type { LauncherMode } from './launcher/ModeMenu';
 import { isDefaultConversationProject } from './launcher/ProjectMenu';
@@ -116,7 +117,6 @@ export default function NewConversationPage({ embedded = false, footer, onLaunch
   const [saveSelection] = useSaveConversationLaunchSelectionMutation();
   const [setFavorite, favoriteState] = useSetAgentFavoriteMutation();
   const [createAgent, createAgentState] = useCreateAgentMutation();
-  const [createProject, createProjectState] = useCreateProjectMutation();
   const [launch, launchState] = useCreateLaunchConversationMutation();
   const [createArtifact] = useCreateArtifactMutation();
   const vaultUnlocked = useSelector(selectIsVaultUnlocked);
@@ -137,8 +137,6 @@ export default function NewConversationPage({ embedded = false, footer, onLaunch
   // Spec §3.7: while any launcher menu is open (a bottom sheet on mobile) the
   // composer drops out of its sticky dock, so it never sits above the scrim.
   const menuOpen = Boolean(headlineMenu) || runtimeMenuOpen || agentMenuOpen;
-  const [projectName, setProjectName] = useState('');
-  const [projectDescription, setProjectDescription] = useState('');
   const [managementError, setManagementError] = useState('');
   const [transitioning, setTransitioning] = useState(false);
   const composerRef = useRef<HTMLDivElement>(null);
@@ -370,12 +368,8 @@ export default function NewConversationPage({ embedded = false, footer, onLaunch
       return true;
     } catch (e) { setManagementError(message(e)); return false; }
   }
-  async function addProject(event: FormEvent) {
-    event.preventDefault(); setManagementError('');
-    try {
-      const created = await createProject({ name: projectName.trim(), description: projectDescription }).unwrap();
-      await projectsQuery.refetch(); chooseProject(created.project_id); setProjectOpen(false); setProjectName(''); setProjectDescription('');
-    } catch (e) { setManagementError(message(e)); }
+  async function projectCreated(createdId: string) {
+    await projectsQuery.refetch(); if (createdId) chooseProject(createdId); setProjectOpen(false);
   }
 
   const bridgeName = bridgeDisplayName(selectedBridgeRow, '');
@@ -492,13 +486,13 @@ export default function NewConversationPage({ embedded = false, footer, onLaunch
       </div>
       <div data-debug-id="new-convo-footer" className={`flex items-center justify-center ${transitioning ? 'pointer-events-none opacity-0' : ''} transition-opacity duration-base`}>{footer}</div>
     </div>
-    <Modal open={projectOpen} onOpenChange={setProjectOpen} title="New project" size="md" data-debug-id="new-convo-project-modal"><Modal.Body>
-      <form onSubmit={addProject} className="flex flex-col gap-3">
-        {managementError ? <div role="alert"><Text role="body-sm" tone="danger" className="m-0">{managementError}</Text></div> : null}
-        <Input data-debug-id="new-convo-project-name-input" value={projectName} onChange={setProjectName} placeholder="Project name" aria-label="Project name" required width="full" />
-        <Textarea data-debug-id="new-convo-project-description-input" value={projectDescription} onChange={setProjectDescription} placeholder="Description (optional)" aria-label="Description" rows={3} width="full" />
-        <div><Button type="submit" variant="primary" data-debug-id="new-convo-create-project-btn" loading={createProjectState.isLoading} disabled={!projectName.trim()}>{createProjectState.isLoading ? 'Creating…' : 'Create project'}</Button></div>
-      </form>
-    </Modal.Body></Modal>
+    <NewProjectModal
+      open={projectOpen}
+      onOpenChange={setProjectOpen}
+      bridgeId={runtime.bridgeId}
+      bridgeLabel={bridgeName || undefined}
+      bridgeUsable={chosenOnline}
+      onCreated={projectCreated}
+    />
   </section>;
 }

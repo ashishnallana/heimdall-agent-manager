@@ -991,6 +991,7 @@ register_routes :: proc(graph: ^App_Graph) {
 	http.router_add(&graph.router, "GET", "/api/v1/bridges/*/session-projects", rawptr(&graph.bridge_handlers), http.list_bridge_session_projects_handler)
 	http.router_add(&graph.router, "GET", "/api/v1/bridges/*/fs", rawptr(&graph.bridge_handlers), http.list_bridge_dir_handler)
 	http.router_add(&graph.router, "GET", "/api/v1/bridges/*/fs/stat", rawptr(&graph.bridge_handlers), http.stat_bridge_path_handler)
+	http.router_add(&graph.router, "GET", "/api/v1/bridges/*/fs/file", rawptr(&graph.bridge_handlers), http.read_bridge_file_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/bridges/*/fs/mkdir", rawptr(&graph.bridge_handlers), http.mkdir_bridge_path_handler)
 	http.router_add(&graph.router, "GET", "/api/v1/bridges/*", rawptr(&graph.bridge_handlers), http.bridge_detail_handler)
 	http.router_add(&graph.router, "PATCH", "/api/v1/bridges/*", rawptr(&graph.bridge_handlers), http.rename_bridge_handler)

@@ -82,6 +82,7 @@ async function withPage(
   const bridges = setup.bridges ?? [RIVER];
   const prefs = { agent_id: 'agt_coord', project_id: 'p_ham', bridge_id: 'b_river', favorite_agent_ids: ['agt_coord', 'agt_solo'], pinned_agent_ids: ['agt_coord', 'agt_solo'], ...setup.prefs };
   const calls: Call[] = [];
+  const createdProjects: any[] = [];
   (globalThis as any).fetch = async (input: any, init: any = {}) => {
     const url = String(input?.url ?? input);
     const method = String(init?.method || input?.method || 'GET').toUpperCase();
@@ -98,7 +99,13 @@ async function withPage(
     if (path.endsWith('/me/conversation-launch')) data = prefs;
     else if (path.endsWith('/agents') && method === 'GET') data = AGENTS;
     else if (path.endsWith('/agents') && method === 'POST') data = { agent_id: 'agt_new', name: body.name, state: 'active' };
-    else if (path.endsWith('/projects')) data = { projects: PROJECTS };
+    else if (path.endsWith('/projects') && method === 'POST') {
+      const created = { project_id: 'p_new', name: body.name, description: body.description, default_path: body.default_path, vcs_kind: body.vcs_kind, state: 'active' };
+      createdProjects.push(created); data = created;
+    }
+    else if (path.endsWith('/projects')) data = { projects: [...PROJECTS, ...createdProjects] };
+    else if (/\/bridges\/[^/]+\/fs$/.test(path)) data = { ok: true, path: new URL(url, 'http://localhost').searchParams.get('path') || '/srv', root: '/srv', parent: '', entries: [{ name: '.git', is_dir: true, hidden: true }], truncated: false };
+    else if (/\/bridges\/[^/]+\/fs\/file$/.test(path)) data = { ok: false, path: '', viewable: false, error: { code: 'not_found', cause: 'path_not_found', message: 'Path does not exist' } };
     else if (path.endsWith('/bridges')) data = { bridges };
     else if (path.endsWith('/provider-status')) data = PROVIDERS;
     else if (path.endsWith('/bridge-support')) data = { entries: [] };
@@ -454,5 +461,28 @@ test('desktop (1280px): the composer is not docked by mobile rules and the Kbd h
     // The dock classes are all max-md: scoped, so nothing applies at >= 768px.
     const dock = q(ctx.doc, 'new-convo-launch-dock')!;
     assert.ok(dock.className.split(/\s+/).filter((c) => /sticky|bottom-|bg-canvas/.test(c)).every((c) => c.startsWith('max-md:')));
+  });
+});
+
+test('New project: opened from the project menu, browses the chosen bridge, creates with default_path and selects the project', async () => {
+  await withPage({}, async (ctx) => {
+    await ctx.render();
+    await until(ctx, () => !/Loading/.test(issuesText(ctx.doc)) && Boolean(q(ctx.doc, 'new-convo-project-token')), 'hydration');
+    await click(ctx, q(ctx.doc, 'new-convo-project-token'));
+    await click(ctx, q(ctx.doc, 'new-convo-new-project'));
+    await until(ctx, () => Boolean(q(ctx.doc, 'new-convo-project-form')), 'modal open');
+    assert.match(squash(q(ctx.doc, 'new-convo-project-form')!.textContent), /Folder on riverwood/);
+    const folder = q(ctx.doc, 'new-convo-project-folder-input') as HTMLInputElement;
+    const setter = Object.getOwnPropertyDescriptor(ctx.win.HTMLInputElement.prototype, 'value')!.set!;
+    await ctx.act(() => { setter.call(folder, '/srv/newthing'); folder.dispatchEvent(new ctx.win.Event('input', { bubbles: true })); });
+    await ctx.act(() => { folder.dispatchEvent(new ctx.win.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })); });
+    await until(ctx, () => /Detected: Git/.test(squash(q(ctx.doc, 'new-convo-project-form')?.textContent)), 'detection');
+    assert.ok(ctx.calls.some((c) => c.url.includes('/bridges/b_river/fs')), 'browses the headline bridge');
+    await click(ctx, q(ctx.doc, 'new-convo-create-project-btn'));
+    await until(ctx, () => !q(ctx.doc, 'new-convo-project-form'), 'modal closes');
+    const post = ctx.calls.find((c) => c.method === 'POST' && c.url.endsWith('/projects'))!;
+    assert.equal(post.body.default_path, '/srv/newthing');
+    assert.equal(post.body.vcs_kind, 'git');
+    await until(ctx, () => /newthing/.test(squash(q(ctx.doc, 'new-convo-project-token')?.textContent)), 'new project selected');
   });
 });
