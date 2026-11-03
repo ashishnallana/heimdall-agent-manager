@@ -107,6 +107,7 @@ write_chain_token_instance_json :: proc(b: ^strings.Builder, row: domain.Chain_T
 	}
 	if row.has_snapshot {
 		s := row.snapshot
+		if s.has_usage_supported do strings.write_string(b, fmt.tprintf(",\"usage_supported\":%v", s.usage_supported))
 		if s.run_count > 0 do strings.write_string(b, fmt.tprintf(",\"run_count\":%d", s.run_count))
 		if row.context_pct >= 0 do strings.write_string(b, fmt.tprintf(",\"context_pct\":%d", row.context_pct))
 		if s.has_context do strings.write_string(b, fmt.tprintf(",\"context_tokens\":%d", s.context_tokens))

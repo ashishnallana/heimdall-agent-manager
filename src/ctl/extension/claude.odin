@@ -29,7 +29,8 @@ import contracts "odin_test:contracts"
 
 CLAUDE_PROVIDER :: "claude"
 CLAUDE_EXT_VERSION :: "0.1.0"
-CLAUDE_CAPABILITIES :: [?]string{"activity", "subagents", "permissions", "file_edits", "session_id"}
+// "usage" = this provider emits usage.context_tokens (ham.ext.v1).
+CLAUDE_CAPABILITIES :: [?]string{"activity", "subagents", "permissions", "file_edits", "session_id", "usage"}
 
 // Strings inside tool input / response are clipped so one event stays well
 // under contracts.EXT_EVENT_MAX_BYTES (256KB) even with a 64KB diff.

@@ -30,6 +30,8 @@ ANTIGRAVITY_EXT_VERSION :: "0.1.0"
 ANTIGRAVITY_HOOK_INPUT_MAX :: 16 * 1024 * 1024
 ANTIGRAVITY_TOOL_STRING_MAX :: 4 * 1024
 ANTIGRAVITY_MESSAGE_MAX :: 2 * 1024
+// No "usage": Antigravity reports metrics only, never usage.context_tokens, so its
+// hello omits the capability and the bridge reports usage_supported=false.
 ANTIGRAVITY_CAPABILITIES :: [?]string{"activity", "subagents", "permissions", "file_edits", "session_id"}
 ANTIGRAVITY_DENY_DEFAULT_MESSAGE :: "Denied in Ninjy"
 

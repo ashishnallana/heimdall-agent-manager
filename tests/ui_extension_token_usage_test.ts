@@ -109,3 +109,29 @@ test('instance list rows and the Runtime card render the token pieces', () => {
   const ws = read('../src/ui/api/wsInvalidation.ts');
   assert.match(ws, /change === 'token_usage_changed'/);
 });
+
+test('usage_supported: unavailable copy when false, "waiting for signal" when true without a figure', async () => {
+  const base = { tool_calls: 2, est_tokens_total: 40, context_window: 200000, window_source: 'default', compactions: 0, updated_at_ms: 1 };
+  assert.equal(model.normalizeTokenUsage(base)!.usageSupported, null);
+  assert.equal(model.normalizeTokenUsage({ ...base, usage_supported: false })!.usageSupported, false);
+  assert.equal(model.normalizeTokenUsage({ ...base, usage_supported: 'no' })!.usageSupported, null);
+
+  const off = await render(view.ContextMeter({ instance: { provider: 'antigravity', token_usage: { ...base, usage_supported: false } } }));
+  assert.match(off, /Context tracking unavailable for antigravity/);
+  assert.match(off, /data-context-state="unsupported"/);
+  assert.doesNotMatch(off, /progressbar|No context reported|Waiting for signal/);
+  assert.match(await render(view.ContextMeter({ instance: { token_usage: { ...base, usage_supported: false } } })), /unavailable for this provider/);
+
+  const on = await render(view.ContextMeter({ instance: { provider: 'claude', token_usage: { ...base, usage_supported: true } } }));
+  assert.match(on, /Waiting for signal/);
+  assert.match(on, /data-context-state="waiting"/);
+  assert.doesNotMatch(on, /unavailable/);
+
+  // A real figure always wins the meter when supported.
+  assert.match(await render(view.ContextMeter({ instance: { token_usage: { ...SNAPSHOT, usage_supported: true } } })), /progressbar/);
+
+  const badge = await render(view.ContextUsageBadge({ instance: { provider: 'antigravity', token_usage: { ...base, usage_supported: false } }, instanceId: 'inst_x' }));
+  assert.match(badge, /ctx n\/a/);
+  assert.match(badge, /Context tracking unavailable for antigravity/);
+  assert.equal(view.ContextUsageBadge({ instance: { token_usage: { ...base, usage_supported: true } }, instanceId: 'inst_x' }), null);
+});

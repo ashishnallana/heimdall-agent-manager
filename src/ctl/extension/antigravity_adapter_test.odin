@@ -3,6 +3,7 @@ package extension
 import json "core:encoding/json"
 import "core:fmt"
 import "core:mem"
+import "core:slice"
 import "core:strings"
 import "core:testing"
 import contracts "odin_test:contracts"
@@ -59,6 +60,7 @@ test_antigravity_pre_invocation_maps_hello_session_and_activity :: proc(t: ^test
 	testing.expect_value(t, ev0.provider, "antigravity")
 	testing.expect_value(t, ev0.session_id, "2f93a09c-a72a-41a2-be58-b906858e9794")
 	testing.expect_value(t, len(ev0.capabilities), 5)
+	testing.expect(t, !slice.contains(ev0.capabilities[:], "usage"), "antigravity must not declare the usage capability")
 
 	// Event 1: session (start)
 	ev1, err1 := contracts.ext_parse_event(mapped.events[1])

@@ -37,6 +37,11 @@ Bridge_Ext_Token_Usage :: struct {
 	output_tokens_total: i64,
 	compactions:         i64,
 	updated_at_ms:       i64, // 0 = no token signal seen yet
+	// From the provider hello: has_usage_cap = a hello was seen; usage_supported =
+	// it listed the "usage" capability (provider emits usage.context_tokens).
+	// Neither is set for a provider without an extension (Pi): flag omitted.
+	has_usage_cap:       bool,
+	usage_supported:     bool,
 
 	// Upstream throttle state (not part of the snapshot).
 	dirty:               bool, // changed since the last push
@@ -53,10 +58,12 @@ bridge_ext_token_usage_reset :: proc(u: ^Bridge_Ext_Token_Usage, session_id: str
 	delete(u.session_id); delete(u.context_source)
 	dirty, has_pushed, last_at, last_ctx := u.dirty, u.has_pushed, u.last_push_at_ms, u.last_push_context
 	window, source := u.context_window, u.window_source
+	has_cap, supported := u.has_usage_cap, u.usage_supported
 	u^ = {}
 	u.session_id = new_id
 	u.dirty, u.has_pushed, u.last_push_at_ms, u.last_push_context = dirty, has_pushed, last_at, last_ctx
 	u.context_window, u.window_source = window, source
+	u.has_usage_cap, u.usage_supported = has_cap, supported
 }
 
 bridge_ext_token_usage_destroy :: proc(u: ^Bridge_Ext_Token_Usage) {
@@ -77,6 +84,12 @@ bridge_ext_token_usage_apply :: proc(u: ^Bridge_Ext_Token_Usage, ev: contracts.E
 		u.session_id = strings.clone(ev.session_id)
 	}
 
+	if ev.kind == .Hello {
+		supported := false
+		for c in ev.capabilities do if c == "usage" do supported = true
+		if !u.has_usage_cap || u.usage_supported != supported do changed = true
+		u.has_usage_cap, u.usage_supported = true, supported
+	}
 	if ev.kind == .Tool_End {
 		u.tool_calls += 1
 		if ev.has_metrics do u.est_tokens_total += max(ev.metrics.est_tokens, 0)
@@ -218,7 +231,7 @@ bridge_ext_token_mark_pushed :: proc(u: ^Bridge_Ext_Token_Usage, now: i64) {
 // bridge_ext_token_usage_write_json writes the snapshot object. context_tokens,
 // context_source, context_pct and output_tokens_total are omitted until
 // reported; context_window and window_source (override|config|default) are
-// always present. run_count > 0 is written as the run the counters belong to.
+// always present. usage_supported is written once a hello was seen. run_count > 0 is written as the run the counters belong to.
 bridge_ext_token_usage_write_json :: proc(b: ^strings.Builder, u: Bridge_Ext_Token_Usage, run_count := 0) {
 	strings.write_string(b, fmt.tprintf("{{\"tool_calls\":%d,\"est_tokens_total\":%d", u.tool_calls, u.est_tokens_total))
 	if u.has_context {
@@ -229,6 +242,7 @@ bridge_ext_token_usage_write_json :: proc(b: ^strings.Builder, u: Bridge_Ext_Tok
 	strings.write_string(b, fmt.tprintf(",\"context_window\":%d,\"window_source\":\"%s\"", bridge_ext_token_usage_window(u), bridge_context_window_source_name(u.window_source)))
 	if pct := bridge_ext_token_usage_context_pct(u); pct >= 0 do strings.write_string(b, fmt.tprintf(",\"context_pct\":%d", pct))
 	if u.has_output_total do strings.write_string(b, fmt.tprintf(",\"output_tokens_total\":%d", u.output_tokens_total))
+	if u.has_usage_cap do strings.write_string(b, fmt.tprintf(",\"usage_supported\":%v", u.usage_supported))
 	if run_count > 0 do strings.write_string(b, fmt.tprintf(",\"run_count\":%d", run_count))
 	strings.write_string(b, fmt.tprintf(",\"compactions\":%d,\"updated_at_ms\":%d}}", u.compactions, u.updated_at_ms))
 }

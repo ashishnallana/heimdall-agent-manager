@@ -2,6 +2,7 @@ package extension
 
 import "core:fmt"
 import json "core:encoding/json"
+import "core:slice"
 import "core:strings"
 import "core:testing"
 import contracts "odin_test:contracts"
@@ -163,4 +164,18 @@ test_codex_compaction_hook_prints_nothing :: proc(t: ^testing.T) {
 		testing.expect(t, strings.contains(codex_fake_params, `"event":"compaction"`), name)
 		testing.expect(t, strings.contains(codex_fake_params, `"trigger":"auto"`), name)
 	}
+}
+
+@(test)
+test_codex_hello_declares_usage_capability :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	defer free_all(context.temp_allocator)
+	mapped, err := codex_map_hook(`{"session_id":"s1","hook_event_name":"SessionStart","source":"startup","cwd":"/w","model":"gpt-5"}`, TS)
+	testing.expect_value(t, err, Codex_Error.None)
+	testing.expect(t, len(mapped.events) > 0)
+	if len(mapped.events) == 0 do return
+	ev, perr := contracts.ext_parse_event(mapped.events[0])
+	testing.expect_value(t, perr, contracts.Ext_Error.None)
+	testing.expect_value(t, ev.kind, contracts.Ext_Event_Kind.Hello)
+	testing.expect(t, slice.contains(ev.capabilities[:], "usage"), "codex declares the usage capability")
 }

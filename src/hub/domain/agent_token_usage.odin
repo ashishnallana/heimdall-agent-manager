@@ -30,6 +30,8 @@ Agent_Token_Usage :: struct {
 	output_tokens_total: i64,
 	compactions:         i64,
 	run_count:           int, // 0 = not reported
+	has_usage_supported: bool, // false = bridge did not report the flag (Pi, older bridge)
+	usage_supported:     bool, // provider emits usage.context_tokens
 	updated_at_ms:       i64,
 }
 
@@ -83,6 +85,9 @@ agent_token_usage_from_json :: proc(raw: string) -> (Agent_Token_Usage, bool) {
 		if run > i64(max(i32)) do return {}, false
 		u.run_count = int(run)
 	}
+	if flag, is_bool := obj["usage_supported"].(json.Boolean); is_bool {
+		u.has_usage_supported, u.usage_supported = true, bool(flag)
+	}
 	if source, is_str := obj["window_source"].(json.String); is_str do u.window_source = agent_token_usage_window_source(source)
 	return u, true
 }
@@ -104,6 +109,7 @@ agent_token_usage_json :: proc(u: Agent_Token_Usage, allocator := context.alloca
 	if u.window_source != "" do strings.write_string(&b, fmt.tprintf(",\"window_source\":\"%s\"", u.window_source))
 	if pct := agent_token_usage_context_pct(u); pct >= 0 do strings.write_string(&b, fmt.tprintf(",\"context_pct\":%d", pct))
 	if u.has_output_total do strings.write_string(&b, fmt.tprintf(",\"output_tokens_total\":%d", u.output_tokens_total))
+	if u.has_usage_supported do strings.write_string(&b, fmt.tprintf(",\"usage_supported\":%v", u.usage_supported))
 	if u.run_count > 0 do strings.write_string(&b, fmt.tprintf(",\"run_count\":%d", u.run_count))
 	strings.write_string(&b, fmt.tprintf(",\"compactions\":%d,\"updated_at_ms\":%d}}", u.compactions, u.updated_at_ms))
 	return strings.clone(strings.to_string(b), allocator)

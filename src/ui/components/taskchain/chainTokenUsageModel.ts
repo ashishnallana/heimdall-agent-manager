@@ -37,6 +37,8 @@ export interface ChainTokenInstance {
   runCount: number | null;
   /** Current % of window; null unless live with a reported context. */
   context: ChainTokenContext | null;
+  /** false = provider cannot report context usage; null = not reported. */
+  usageSupported: boolean | null;
 }
 
 export interface ChainTokenAgent {
@@ -48,6 +50,8 @@ export interface ChainTokenAgent {
   lifetime: ChainTokenFigures;
   /** Highest current context % among live instances; null when none. */
   context: (ChainTokenContext & { instanceId: string }) | null;
+  /** True when every instance with a known flag reports usage_supported=false (and at least one does). */
+  usageUnsupported: boolean;
   instances: ChainTokenInstance[];
 }
 
@@ -103,6 +107,7 @@ function normalizeInstance(raw: unknown): ChainTokenInstance | null {
     lifetime: normalizeFigures(raw.lifetime),
     runCount: count(raw.run_count),
     context: live ? makeContext(count(raw.context_pct), raw.context_tokens, raw.context_window) : null,
+    usageSupported: typeof raw.usage_supported === 'boolean' ? raw.usage_supported : null,
   };
 }
 
@@ -122,6 +127,7 @@ function normalizeAgent(raw: unknown): ChainTokenAgent | null {
     liveInstances: count(raw.live_instances) ?? 0,
     lifetime: normalizeFigures(raw.lifetime),
     context: context ? { ...context, instanceId: String(ctx?.agent_instance_id || '') } : null,
+    usageUnsupported: instances.some((i) => i.usageSupported === false) && !instances.some((i) => i.usageSupported === true),
     instances,
   };
 }
