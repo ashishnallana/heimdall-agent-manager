@@ -30,14 +30,20 @@ export function resolveProjectBridgeShellCwd(
   return path || undefined;
 }
 
+/**
+ * A new interactive shell (kind=shell). `cmd` and `cwd` are sent only when non-blank:
+ * with no cmd the bridge starts the user's login shell, with no cwd it starts in HOME.
+ */
 export function buildInteractiveShellRequest({
   bridgeId,
   cwd,
+  cmd,
   chainId,
   projectId,
 }: {
   bridgeId: string;
   cwd?: string;
+  cmd?: string;
   chainId?: string;
   projectId?: string;
 }): CreateShellArgs {
@@ -47,6 +53,8 @@ export function buildInteractiveShellRequest({
   };
   const normalizedCwd = String(cwd || '').trim();
   if (normalizedCwd) request.cwd = normalizedCwd;
+  const normalizedCmd = String(cmd || '').trim();
+  if (normalizedCmd) request.cmd = normalizedCmd;
   if (chainId) request.chain_id = chainId;
   if (projectId) request.project_id = projectId;
   return request;

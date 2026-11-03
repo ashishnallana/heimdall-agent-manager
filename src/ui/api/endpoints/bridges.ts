@@ -3,6 +3,7 @@
 import { ApiError, cookieJsonFetch, cookieMutation } from '../cookieFetch';
 import type { WireError } from '../wireError';
 import { heimdallApi } from '../heimdallApi';
+import { readBridgeRows } from './bridgeSupport';
 import type {
   BridgeUnsealPayload,
   BridgeUnsealResult,
@@ -119,10 +120,7 @@ export interface PendingBridgeEnrollment {
  * Opt-in enrollment_in_progress keeps ordinary bridge pickers unchanged. The
  * enrollment_state fallback supports Hubs predating replacement discovery.
  */
-export async function fetchPendingBridgeEnrollments(): Promise<PendingBridgeEnrollment[]> {
-  const res = await cookieJsonFetch('/bridges?include_pending=1');
-  const body = (res as any)?.data ?? res;
-  const rows: any[] = Array.isArray(body) ? body : Array.isArray(body?.bridges) ? body.bridges : [];
+export function selectPendingBridgeEnrollments(rows: readonly any[]): PendingBridgeEnrollment[] {
   return rows
     .filter((row) => row?.enrollment_state === 'pending' || row?.enrollment_in_progress === true)
     .map((row) => ({
@@ -135,9 +133,16 @@ export async function fetchPendingBridgeEnrollments(): Promise<PendingBridgeEnro
     .filter((row) => row.bridge_id !== '');
 }
 
-/** Abandons a pending enrollment now instead of at its deadline. Idempotent. */
 /**
- * Cancels a pending enrollment (REQ-EA-3). `rolledBack` is the Hub's verdict: it is
+ * Pending enrollments read fresh through the shared listBridgesWithPending cache:
+ * the enrollment flows act on the answer, so a cached list is not enough.
+ */
+export async function fetchPendingBridgeEnrollments(): Promise<PendingBridgeEnrollment[]> {
+  return selectPendingBridgeEnrollments(await readBridgeRows({ includePending: true, fresh: true }));
+}
+
+/**
+ * Cancels a pending enrollment now instead of at its deadline (REQ-EA-3). Idempotent. `rolledBack` is the Hub's verdict: it is
  * false when the bridge's commit won the race and it is enrolled after all, so the
  * caller must not report a rollback. A Hub that predates the field reports none,
  * which reads as rolled back, as it always did.
@@ -147,18 +152,13 @@ export async function cancelBridgeEnrollment(bridgeId: string): Promise<{ rolled
   return { rolledBack: (res as any)?.rolled_back !== false };
 }
 
-/** GET /bridges rows (list or `{bridges}`), tolerant of either envelope. */
-async function listBridgeRows(): Promise<any[]> {
-  const data = await cookieJsonFetch('/bridges');
-  return data?.bridges || (Array.isArray(data) ? data : []);
-}
-
 /**
  * Bridges whose vault reports locked while online — the ones a chain-verified
- * re-unseal should reach (see services/deviceVault.unsealApprovedBridges).
+ * re-unseal should reach (see services/deviceVault.unsealApprovedBridges). Read
+ * fresh: the auto-unseal re-check exists to skip bridges unlocked meanwhile.
  */
 export async function listOnlineLockedBridgeIds(): Promise<string[]> {
-  return selectOnlineLockedBridgeIds(await listBridgeRows() as BridgeVaultStatusRecord[]);
+  return selectOnlineLockedBridgeIds(await readBridgeRows({ fresh: true }) as BridgeVaultStatusRecord[]);
 }
 
 /**
@@ -166,15 +166,15 @@ export async function listOnlineLockedBridgeIds(): Promise<string[]> {
  * them any more (they missed their enrollment's first unseal). Revoke + re-enroll.
  */
 export async function listUnpairedBridgeIds(): Promise<string[]> {
-  return (await listBridgeRows())
+  return (await readBridgeRows())
     .filter((b) => String(b?.vault_status ?? '').toLowerCase() === 'unpaired')
     .map((b) => String(b?.bridge_id || b?.bridgeId || b?.id || ''))
     .filter(Boolean);
 }
 
-/** Every online, non-revoked bridge id (re-unseal after a rotation). */
+/** Every online, non-revoked bridge id (re-unseal after a rotation), read fresh. */
 export async function listOnlineBridgeIds(): Promise<string[]> {
-  return (await listBridgeRows())
+  return (await readBridgeRows({ fresh: true }))
     .filter((b) => {
       const status = String(b?.status || b?.runtime_status || '').toLowerCase();
       return status === 'online' || status === 'connected';

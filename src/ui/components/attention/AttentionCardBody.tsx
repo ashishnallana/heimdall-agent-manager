@@ -2,18 +2,19 @@ import { Icon } from '@ui';
 import { DecryptedMarkdown, VaultText } from '../vault';
 import type { AttentionItem, AttentionMemoryItem, AttentionMessageItem, AttentionTaskItem } from '../../api/endpoints/attention';
 import { AgentBlockerBody } from './AgentBlockerCard';
+import { PlacementRecovery } from './PlacementRecovery';
 import { PRIORITY_LABELS, SCOPE_ROWS, TASK_BADGE_LABELS, expiryLine, formatAge, memoryTypePhrase, reasonLine, urgencyClass } from './attentionModel';
 
 /**
  * The read-only part of an attention card: why it is here, where it comes from,
- * what it is about, and one excerpt. Everything shown is human-readable -- ids are
- * only ever used for actions, never rendered. Text that may be vault ciphertext
+ * what it is about, and one excerpt. Names identify available placement records;
+ * missing records retain their durable reference for recovery. Vault ciphertext
  * goes through the vault helpers (masked until decrypted, a lock placeholder when
  * the vault is locked).
  */
-export function AttentionCardBody({ item, now, children }: { item: AttentionItem; now: number; children?: React.ReactNode }) {
+export function AttentionCardBody({ item, now, children, onOpenConfiguration }: { item: AttentionItem; now: number; children?: React.ReactNode; onOpenConfiguration?: () => void }) {
   return (
-    <article data-debug-id={`attention-card-${item.kind}`} aria-label={item.kind === 'task' ? (item.details.attention === 'blocked' ? 'Ticket blocked on you' : 'Ticket waiting on your review') : item.kind === 'memory' ? 'Memory proposal' : item.kind === 'agent_blocker' ? 'Agent needs your permission' : 'Agent question'} className="flex h-full min-h-0 flex-col">
+    <article data-debug-id={`attention-card-${item.kind}`} aria-label={item.kind === 'task' ? (item.details.attention === 'placement' ? 'Ticket placement needs repair' : item.details.attention === 'blocked' ? 'Ticket blocked on you' : 'Ticket waiting on your review') : item.kind === 'memory' ? 'Memory proposal' : item.kind === 'agent_blocker' ? 'Agent needs your permission' : 'Agent question'} className="flex h-full min-h-0 flex-col">
       <p data-debug-id="attention-card-reason" className={`text-[13px] font-semibold ${urgencyClass(item.urgency)}`}>
         {reasonLine(item, now)}
       </p>
@@ -28,7 +29,7 @@ export function AttentionCardBody({ item, now, children }: { item: AttentionItem
       {/* touch-pan-y: this is its own scroll container, so it must also leave
           horizontal gestures to the deck's swipe (or the browser claims them). */}
       <div className="mt-3 min-h-0 flex-1 touch-pan-y overflow-y-auto pr-1">
-        {item.kind === 'task' ? <TaskBody item={item} now={now} />
+        {item.kind === 'task' ? <TaskBody item={item} now={now} onOpenConfiguration={onOpenConfiguration} />
           : item.kind === 'memory' ? <MemoryBody item={item} now={now} />
           : item.kind === 'agent_blocker' ? <AgentBlockerBody item={item} />
           : <MessageBody item={item} now={now} />}
@@ -38,8 +39,14 @@ export function AttentionCardBody({ item, now, children }: { item: AttentionItem
   );
 }
 
-function TaskBody({ item, now }: { item: AttentionTaskItem; now: number }) {
+function TaskBody({ item, now, onOpenConfiguration }: { item: AttentionTaskItem; now: number; onOpenConfiguration?: () => void }) {
   const d = item.details;
+  if (d.attention === 'placement') return (
+    <>
+      <h3 data-debug-id="attention-card-title" className="text-[17px] font-semibold text-primary"><VaultText value={item.title} fallback="Untitled ticket" /></h3>
+      <PlacementRecovery item={item} onOpenConfiguration={onOpenConfiguration} />
+    </>
+  );
   return (
     <>
       <h3 data-debug-id="attention-card-title" className="text-[17px] font-semibold leading-snug text-primary">

@@ -20,17 +20,17 @@ reconcile_owner_plan :: proc(service: ^Bridge_Service, user_id: string) -> domai
 	return reconcile_plan_limits(service, user_id, entitlements.max_bridges)
 }
 
-// Refresh entitlements before reading the flag: cache fills may re-enable a bridge.
+// Read the current flag only: startup, billing webhooks and the reaper maintain it,
+// and entitlement lookups never reconcile. Entitlements only describe a suspension.
 // Called before runtime admission, so a refused hello cannot replace a live socket.
-// Reuse the caller's authenticated row, but re-read the flag after cache refresh.
 // Runtime connect repeats the gate after admission to cover an intervening downgrade.
 check_bridge_plan :: proc(service: ^Bridge_Service, bridge: domain.Bridge) -> domain.Domain_Error {
-	entitlements, lookup_err := domain.lookup_entitlements(service.entitlements, string(bridge.owner_user_id))
-	if lookup_err.code != .None do return lookup_err
 	current, current_ok, current_err := iface.bridge_get_bridge(service.repo, bridge.bridge_id)
 	if !current_ok do return current_err
 	defer domain.bridge_destroy(&current)
 	if current.plan_disabled_at == "" do return {}
+	entitlements, lookup_err := domain.lookup_entitlements(service.entitlements, string(bridge.owner_user_id))
+	if lookup_err.code != .None do return lookup_err
 	count, count_err := iface.bridge_count_active_by_owner(service.repo, bridge.owner_user_id)
 	if count_err.code != .None do return count_err
 	return domain.entitlement_limit_error(service.entitlements, string(bridge.owner_user_id), "max_bridges", entitlements.max_bridges, count)

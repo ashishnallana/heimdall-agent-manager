@@ -5,6 +5,7 @@ import "core:strings"
 import "core:sync"
 import contracts "odin_test:contracts"
 import domain "odin_test:hub/domain"
+import dbt "odin_test:hub/platform/dbtelemetry"
 import iface "odin_test:hub/repository/iface"
 import platform "odin_test:hub/platform"
 import agent "odin_test:hub/service/agent"
@@ -282,6 +283,8 @@ end_uow :: proc(svc: ^Service, u: ^Uow, ok: bool) -> (bool, domain.Domain_Error)
 		} else {
 			iface.unit_of_work_rollback(&u.tx)
 		}
+		// A rolled-back savepoint took its events with it.
+		if !committed do fold_cache_invalidate()
 		u.has_tx = false
 	}
 	if committed && !nested do flush_effects(svc, &u.effects)
@@ -615,7 +618,11 @@ record_event :: proc(svc: ^Service, u: ^Uow, task: domain.Task, actor: Actor, ki
 // refold_task recomputes `task`'s view from its events and persists the
 // projection fields when they changed. Terminal-ness changes are queued for the
 // chain-status callback.
-refold_task :: proc(svc: ^Service, u: ^Uow, task: domain.Task, tasks: []domain.Task = nil, deps: []domain.Task_Dependency = nil) -> (domain.Task, Task_View, bool, domain.Domain_Error) {
+//
+// With `skip_settled` (refold_chain inside after_chain_change) a task whose
+// fold inputs are unchanged since its last refold in this call is returned
+// as is, with an empty view: refolding it would be a no-op (see fold_cache).
+refold_task :: proc(svc: ^Service, u: ^Uow, task: domain.Task, tasks: []domain.Task = nil, deps: []domain.Task_Dependency = nil, skip_settled := false) -> (domain.Task, Task_View, bool, domain.Domain_Error) {
 	all_tasks := tasks
 	all_deps := deps
 	if all_tasks == nil {
@@ -623,21 +630,29 @@ refold_task :: proc(svc: ^Service, u: ^Uow, task: domain.Task, tasks: []domain.T
 		if err.code != .None do return task, Task_View{}, false, err
 		all_tasks = loaded
 	}
-	if all_deps == nil {
+	have_deps := all_deps != nil
+	if !have_deps do all_deps, have_deps = fold_cache_deps(task.chain_id, task.owner_user_id)
+	if !have_deps {
 		loaded, err := iface.taskchain_list_dependencies_by_chain(svc.repo, task.chain_id, task.owner_user_id)
 		if err.code != .None do return task, Task_View{}, false, err
 		all_deps = loaded
 	}
-	evs, ev_err := iface.taskchain_list_events_by_task(svc.repo, task.task_id, task.owner_user_id)
+	evs, ev_err := task_fold_events(svc, task)
 	if ev_err.code != .None do return task, Task_View{}, false, ev_err
 	deps_done, ready_err := task_dependencies_ready(svc, task, all_tasks, all_deps)
 	if ready_err.code != .None do return task, Task_View{}, false, ready_err
-	view := fold_task(evs, fold_input_for_task(task, deps_done))
+	input := fold_input_for_task(task, deps_done)
+	if skip_settled && fold_cache_settled(task, fold_key_for(task, evs, input)) do return task, Task_View{}, true, domain.Domain_Error{}
+	view := fold_task(evs, input)
 	now := platform.clock_now(svc.clock)
 	next := apply_view_to_task(task, view, now)
-	if projection_equal(task, next) do return task, view, true, domain.Domain_Error{}
+	if projection_equal(task, next) {
+		fold_cache_settle(task, fold_key_for(task, evs, input))
+		return task, view, true, domain.Domain_Error{}
+	}
 	saved, ok, err := iface.taskchain_save_task(svc.repo, next)
 	if !ok do return task, view, false, err
+	fold_cache_settle(saved, fold_key_for(saved, evs, input))
 	if saved.state != task.state {
 		metric_task_transition(task.state, saved.state)
 	}
@@ -737,11 +752,23 @@ refold_chain :: proc(svc: ^Service, u: ^Uow, chain: domain.Task_Chain) -> ([]dom
 	if err.code != .None do return nil, false, err
 	deps, dep_err := iface.taskchain_list_dependencies_by_chain(svc.repo, chain.chain_id, chain.owner_user_id)
 	if dep_err.code != .None do return nil, false, dep_err
+	// Inside after_chain_change: one edge read for the whole pass (refolds do
+	// not change edges), and tasks whose inputs did not move are skipped.
+	cache := tl_fold_cache
+	if cache != nil && (cache.chain_id != chain.chain_id || cache.owner != chain.owner_user_id) do cache = nil
+	if cache != nil {
+		edges, eerr := iface.taskchain_list_work_dependencies(svc.repo, chain.chain_id, chain.owner_user_id)
+		if eerr.code != .None do return nil, false, eerr
+		cache.deps, cache.edges, cache.edges_loaded = deps, edges, true
+	}
+	defer if cache != nil {
+		cache.deps, cache.edges, cache.edges_loaded = nil, nil, false
+	}
 	for pass := 0; pass < len(tasks) + 1; pass += 1 {
 		changed := false
 		for i in 0..<len(tasks) {
 			before := tasks[i]
-			after, _, ok, rerr := refold_task(svc, u, before, tasks, deps)
+			after, _, ok, rerr := refold_task(svc, u, before, tasks, deps, skip_settled = true)
 			if !ok do return tasks, false, rerr
 			if after.state != before.state || after.attempt_no != before.attempt_no || after.blocked_on_json != before.blocked_on_json {
 				changed = true
@@ -911,10 +938,6 @@ event_exists :: proc(svc: ^Service, task: domain.Task, kind: string) -> bool {
 	return false
 }
 
-// after_chain_change is the one place every chain mutation funnels through
-// inside its UoW: refold the chain's projections, materialise ready workflow
-// stages, trigger on_output workflow spawns, rebuild the mechanical chain
-// summary on task transitions, then run the matcher.
 // release_task_blocks_in_uow clears a `blocked_on {kind: "task", ref}` badge
 // once the referenced task is done: the hub records `answered` on the agent's
 // behalf, so the task is ready again without a human. Covers both a ref that
@@ -946,30 +969,59 @@ release_task_blocks_in_uow :: proc(svc: ^Service, u: ^Uow, tasks: []domain.Task)
 	return released, true, domain.Domain_Error{}
 }
 
+// after_chain_change is the one place every chain mutation funnels through
+// inside its UoW: refold the chain's projections, materialise ready workflow
+// stages, trigger on_output workflow spawns, rebuild the mechanical chain
+// summary on task transitions, then run the matcher.
+//
+// Each phase's in-transaction time and statement count is recorded
+// (heimdall_db_phase_*, and the db_slow_request / db_slow_scope breakdown),
+// including on an early error return.
 after_chain_change :: proc(svc: ^Service, u: ^Uow, chain_id: domain.Task_Chain_ID, owner: domain.User_ID, trigger: Trigger) -> (bool, domain.Domain_Error) {
+	phases: dbt.Phase_Set
+	defer dbt.phase_flush(&phases)
+	// One batched event read serves every fold below; only dirty tasks refold.
+	cache: Chain_Fold_Cache
+	active, prev := fold_cache_begin(&cache, chain_id, owner)
+	defer fold_cache_end(active, prev)
 	chain, ok, err := iface.taskchain_get_chain(svc.repo, chain_id)
 	if !ok do return false, err
+	mark := dbt.phase_mark()
 	requirement_tasks, req_err := iface.taskchain_list_tasks_by_chain(svc.repo, chain_id, owner)
-	if req_err.code != .None do return false, req_err
+	if req_err.code != .None { dbt.phase_record(&phases, .Requirements, mark); return false, req_err }
 	for task in requirement_tasks {
-		if rok, rerr := requirements_reconcile_in_uow(svc, u, task); !rok do return false, rerr
+		if rok, rerr := requirements_reconcile_in_uow(svc, u, task); !rok { dbt.phase_record(&phases, .Requirements, mark); return false, rerr }
 	}
+	dbt.phase_record(&phases, .Requirements, mark)
 	// Settle run/task dependencies together; a successful run can release
 	// another run or a ticket in this same transaction.
 	for pass := 0; pass < 130; pass += 1 {
+		mark = dbt.phase_mark()
 		tasks, rok, rerr := refold_chain(svc, u, chain)
+		dbt.phase_record(&phases, .Refold, mark)
 		if !rok do return false, rerr
+		mark = dbt.phase_mark()
 		_, uok, uerr := release_task_blocks_in_uow(svc, u, tasks)
-		if !uok do return false, uerr
-		if tok, terr := trigger_on_output_workflows_in_uow(svc, u, chain, tasks); !tok do return false, terr
+		if !uok { dbt.phase_record(&phases, .Release_Workflow, mark); return false, uerr }
+		if tok, terr := trigger_on_output_workflows_in_uow(svc, u, chain, tasks); !tok { dbt.phase_record(&phases, .Release_Workflow, mark); return false, terr }
 		changed, wok, werr := workflow_reconcile_chain(svc, u, chain)
+		dbt.phase_record(&phases, .Release_Workflow, mark)
 		if !wok do return false, werr
 		if !changed do break
 	}
-	if _, ok, err := refold_chain(svc, u, chain); !ok do return false, err
+	mark = dbt.phase_mark()
+	_, rok, rerr := refold_chain(svc, u, chain)
+	dbt.phase_record(&phases, .Refold, mark)
+	if !rok do return false, rerr
 	#partial switch trigger {
 	case .Lease_Released, .Lease_Expired, .Review_Posted, .Task_Reopened, .Task_Cancelled, .Chain_Published, .Task_Published:
+		mark = dbt.phase_mark()
 		rebuild_chain_summary_in_uow(svc, u, chain)
+		dbt.phase_record(&phases, .Summary, mark)
 	}
-	return match_chain_in_uow(svc, u, chain, trigger)
+	mark = dbt.phase_mark()
+	mok, merr := match_chain_in_uow(svc, u, chain, trigger)
+	dbt.phase_record(&phases, .Match, mark)
+	when FOLD_VERIFY { if mok do fold_verify_full_refold_is_noop(svc, chain_id, owner) }
+	return mok, merr
 }

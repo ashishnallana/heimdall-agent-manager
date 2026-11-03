@@ -3,6 +3,7 @@ import { loadAllProjectPages } from '../projectPagination';
 import { apiErrorText, cookieJsonFetch, cookieJsonFetchEnvelope, cookieMutation } from '../cookieFetch';
 import { isVaultArmored, encryptVaultText, decryptVaultText, getActiveVaultKey } from '../../utils/vaultContent';
 import { encryptProjectFields, decryptProjectRecord, decryptProjectList } from '../../utils/vaultProjects';
+import { deriveProjectSlug } from '../../utils/slug';
 
 export type ProjectBridgePath = {
   bridge_id: string;
@@ -80,12 +81,18 @@ export const projectsApi = heimdallApi.injectEndpoints({
       },
       providesTags: (_result, _error, { projectId }) => [{ type: 'Project' as const, id: projectId }],
     }),
-    createProject: build.mutation<any, { name: string; description?: string; repo_url?: string; vcs_kind?: string; default_path?: string }>({
+    createProject: build.mutation<any, { name: string; slug?: string; description?: string; repo_url?: string; vcs_kind?: string; default_path?: string }>({
       queryFn: async (payload, api) => {
         try {
           const state: any = api?.getState?.();
           const isUnlocked = Boolean(state?.vault?.isUnlocked);
           const activeKey = getActiveVaultKey();
+          // The slug is never encrypted, so it must come from the PLAINTEXT name,
+          // before the name is sealed below. Without this the hub fell back to the
+          // (encrypted) name and stored `vault:v2:…` as the slug (T17). A name that
+          // is already armored says nothing readable, so the folder name is used.
+          const slug = payload.slug?.trim()
+            || deriveProjectSlug(isVaultArmored(payload.name || '') ? '' : payload.name, payload.default_path);
           let name = payload.name;
           let description = payload.description;
 
@@ -101,6 +108,7 @@ export const projectsApi = heimdallApi.injectEndpoints({
           const body = {
             ...payload,
             name,
+            slug,
             ...(description !== undefined ? { description } : {}),
           };
           const data = await cookieMutation('/projects', 'POST', body);

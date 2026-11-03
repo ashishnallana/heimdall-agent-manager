@@ -79,11 +79,16 @@ test('wiring: Workspace renders ShellMainPane for shell ids; picker has Agent|Sh
   assert.match(pane, /data-debug-id="shell-main-pane-switcher-btn"/);
   assert.match(pane, /data-debug-id="shell-main-pane-kill-confirm"/);
   const picker = read('src/ui/components/chat/NewConversationPage.tsx');
-  assert.match(picker, /<PaneModeSwitch value=\{paneMode\}/);
-  assert.match(picker, /paneMode === 'shell' \? \(\s*<ShellLaunchPanel/);
+  // The mode is the headline's mode token; shell mode is the shared composer's shell body.
+  assert.match(picker, /<LaunchHeadline\s+mode=\{paneMode\}\s+onModeChange=\{setPaneMode\}/);
+  assert.match(picker, /<ShellComposerBody/);
+  assert.match(picker, /useShellLaunch\(\{/);
   const panel = read('src/ui/components/chat/ShellLaunchPanel.tsx');
   assert.match(panel, /<BridgeDirectoryPicker/);
-  assert.match(panel, /resolveProjectBridgeShellCwd\(project, bridgeId\)/);
+  // Launch logic (bridge, cwd default, start) lives in the shared hook.
+  assert.match(panel, /useShellLaunch\(\{/);
+  const launch = read('src/ui/components/shells/useShellLaunch.ts');
+  assert.match(launch, /resolveProjectBridgeShellCwd\(project, bridgeId\)/);
   assert.match(panel, /data-debug-id=\{`new-convo-shell-kill-\$\{s\.session_id\}`\}/);
 });
 
@@ -107,7 +112,9 @@ test('resource chooser and explicit launcher-intent wiring is reusable', () => {
   assert.match(shells, /event\.key === 'Enter'/);
   const launcher = read('src/ui/components/chat/NewConversationPage.tsx');
   assert.match(launcher, /launchIntent\?: LauncherIntent/);
-  assert.match(launcher, /autoFocusStart=\{launchIntent === 'shell'\}/);
+  // An explicit shell shortcut focuses "Open shell" once it can be pressed.
+  assert.match(launcher, /if \(launchIntent !== 'shell' \|\| paneMode !== 'shell' \|\| openShellDisabled\) return;/);
+  assert.match(launcher, /openShellRef\.current\?\.focus\(\)/);
   const workspace = read('src/ui/components/mainWorkspace/Workspace.tsx');
   assert.match(workspace, /launchIntent: value\.launchIntent/);
 });

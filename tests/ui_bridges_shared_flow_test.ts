@@ -192,3 +192,26 @@ test('Settings keeps setup disabled until the discovered profile status resolves
   assert.equal(dom.window.document.querySelector('[data-debug-id="settings-this-machine-loading"]'), null);
   assert.ok(dom.window.document.querySelector('[data-debug-id="settings-this-machine-update-btn"]'));
 }));
+
+test('shared detector loads once without polling and supports explicit refresh', async () => ui(async ({ render, dom }: any) => {
+  const { manager, targets } = createManager();
+  const intervalDelays: number[] = [];
+  const originalInterval = dom.window.setInterval;
+  dom.window.setInterval = ((handler: any, delay: number, ...args: any[]) => {
+    intervalDelays.push(delay);
+    return originalInterval.call(dom.window, handler, delay, ...args);
+  }) as any;
+  let latest: any;
+  function Probe() {
+    latest = useThisMachineBridge(manager);
+    return React.createElement('output', null, latest.phase);
+  }
+  await render(React.createElement(Probe));
+  assert.equal(latest.phase, 'present');
+  assert.equal(targets.length, 1);
+  await render(React.createElement(Probe));
+  assert.equal(targets.length, 1, 'rerender does not reload local status');
+  assert.deepEqual(intervalDelays, [], 'neither Settings nor setup schedules status polling');
+  await act(async () => { await latest.refresh(); });
+  assert.equal(targets.length, 2, 'explicit refresh still reloads status');
+}));

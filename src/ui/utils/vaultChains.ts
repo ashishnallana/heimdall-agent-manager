@@ -2,7 +2,7 @@
 // REQ-VAULT-CHAINS-1
 
 import type { VaultKeyring } from './vaultKeyring.ts';
-import { isVaultArmored, encryptVaultText, decryptVaultText, getActiveVaultKey } from './vaultContent.ts';
+import { isVaultArmored, containsVaultArmored, encryptVaultText, decryptVaultText, decryptEmbeddedVaultTokens, getActiveVaultKey } from './vaultContent.ts';
 
 export interface ChainPayload {
   title?: string;
@@ -59,13 +59,45 @@ export async function decryptChainRecord<T extends ChainPayload>(
     } catch {}
   }
 
+  const members = Array.isArray((chain as any).members)
+    ? await decryptChainMembers((chain as any).members, resolvedKey)
+    : (chain as any).members;
+
   return {
     ...chain,
     title,
     description,
     descriptionPreview,
     description_preview: descriptionPreview,
+    ...(members !== undefined ? { members } : {}),
   };
+}
+
+/**
+ * Decrypt member display names. An instance display name is vault text on the
+ * MCP paths: chains.create stores the sealed chain title as the coordinator's
+ * name, and an MCP-created agent's sealed name prefixes the default "<name> #n".
+ * Embedded tokens are opened in place; a token that cannot be opened stays armored
+ * so the render layer can mask it.
+ */
+export async function decryptChainMembers<T extends Record<string, any>>(
+  members: T[],
+  activeKey?: VaultKeyring | null,
+): Promise<T[]> {
+  const resolvedKey = activeKey || getActiveVaultKey();
+  if (!resolvedKey || !Array.isArray(members)) return members;
+  return Promise.all(members.map(async (member) => {
+    if (!member || typeof member !== 'object') return member;
+    const out: Record<string, any> = { ...member };
+    for (const key of ['display_name', 'displayName']) {
+      if (containsVaultArmored(out[key])) {
+        try {
+          out[key] = await decryptEmbeddedVaultTokens(out[key], resolvedKey);
+        } catch {}
+      }
+    }
+    return out as T;
+  }));
 }
 
 /**

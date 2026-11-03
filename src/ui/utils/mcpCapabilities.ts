@@ -7,6 +7,7 @@ export const MCP_CAPABILITIES = [
   ['mcp:projects:read', 'Read projects'], ['mcp:projects:write', 'Manage projects'],
   ['mcp:issues:read', 'Read issues'], ['mcp:issues:write', 'Manage issues'],
   ['mcp:artifacts:read', 'Read artifacts'], ['mcp:artifacts:write', 'Manage artifacts'],
+  ['mcp:chains:message', 'Send messages as you to chain coordinators and wake them on your machines'],
 ] as const;
 
 /** Fixed order and unique known scopes match the signed native representation. */
@@ -14,7 +15,7 @@ export function validMcpScopes(scope: unknown): scope is string {
   if (scope === MCP_BASE_SCOPE) return true;
   if (typeof scope !== 'string' || scope.length > 1024 || !scope.startsWith(`${MCP_BASE_SCOPE} `)) return false;
   const parts = scope.split(' ');
-  if (parts.length < 2 || parts.length > 15) return false;
+  if (parts.length < 2 || parts.length > MCP_CAPABILITIES.length + 1) return false;
   let previous = -1;
   for (const part of parts.slice(1)) {
     const index = MCP_CAPABILITIES.findIndex(([value]) => value === part);

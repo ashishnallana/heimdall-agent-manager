@@ -112,9 +112,11 @@ task_event_list_by_task_sqlite :: proc(ctx: rawptr, task_id: domain.Task_ID, own
 	return out[:], domain.Domain_Error{}
 }
 
-task_event_list_by_chain_sqlite :: proc(ctx: rawptr, chain_id: domain.Task_Chain_ID, owner_user_id: domain.User_ID) -> ([]domain.Task_Event, domain.Domain_Error) {
+// Comments are audit only: they never change a projection, so the fold read
+// skips them (idx_task_events_chain serves the range, the kind is a filter).
+task_fold_event_list_by_chain_sqlite :: proc(ctx: rawptr, chain_id: domain.Task_Chain_ID, owner_user_id: domain.User_ID) -> ([]domain.Task_Event, domain.Domain_Error) {
 	impl := (^Taskchain_Repo_SQLite)(ctx)
-	stmt, err := prepare(impl, "SELECT " + EVENT_COLS + " FROM task_events WHERE chain_id = ? AND owner_user_id = ? ORDER BY event_id ASC;", "chain event list")
+	stmt, err := prepare(impl, "SELECT " + EVENT_COLS + " FROM task_events WHERE chain_id = ? AND owner_user_id = ? AND kind <> 'comment' ORDER BY event_id ASC;", "chain fold event list")
 	if err.code != .None do return nil, err
 	defer sqlite3_finalize(stmt)
 	bind_text(stmt, 1, string(chain_id)); bind_text(stmt, 2, string(owner_user_id))

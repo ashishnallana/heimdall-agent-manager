@@ -70,8 +70,7 @@ export function useThisMachineBridge(manager: DesktopBridgeManagerApi) {
   useEffect(() => { attachDesktopBridgeSession(manager); }, [manager]);
   useEffect(() => {
     void refresh();
-    const timer = window.setInterval(() => { if (!desktopBridgeSession().operation) void refresh(); }, 15_000);
-    return () => { ++generation.current; window.clearInterval(timer); };
+    return () => { ++generation.current; };
   }, [refresh]);
   const finishedSeen = useRef(session.finished);
   useEffect(() => {

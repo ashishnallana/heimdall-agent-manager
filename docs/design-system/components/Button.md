@@ -17,3 +17,7 @@ The one labelled action: `<Button>` from `@ui`, styled as `nj-btn`. Use one `pri
 **Look:** primary = `accent` gold with `on-accent` text; secondary = `bg-500`; ghost = no fill until hover (`bg-300`); danger = `danger-tint` fill with `danger` text — never a solid red block. Label 500 weight, sentence case, 1–3 words.
 
 **Do** put the primary action last (rightmost) in a row. **Don't** place two primaries side by side, or use `danger` for anything reversible.
+
+## ButtonLink
+
+A real `<a href>` with Button's `variant` / `size` / `width` / `leading` / `trailing` classes, for a navigation that sits next to buttons and must look like one (e.g. "Download the bridge" beside "Check again"). The caller owns `target` / `rel` (`target="_blank" rel="noopener"` for external pages). Use `Link` for text links; never put an `onClick` navigation on a `Button` to fake a link.

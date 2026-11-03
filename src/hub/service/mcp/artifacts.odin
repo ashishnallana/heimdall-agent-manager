@@ -5,6 +5,7 @@ import "core:encoding/json"
 import "core:strings"
 import domain "odin_test:hub/domain"
 import content "odin_test:hub/service/content"
+import vault "odin_test:lib/vault"
 
 resource_artifact_mime :: proc(content_type,mime:string)->string {
 	value:=mime;if value=="" do value=content_type
@@ -28,8 +29,22 @@ resource_artifact_get :: proc(s:^Control_Service,owner,id:string,detail:bool)->(
 		switch a.kind {case "markdown":mime="text/markdown";case "text":mime="text/plain";case "json":mime="application/json"}
 		if mime!="" do row["content_type"]=json.String(mime)
 	}
-	if detail {
+	if detail && resource_artifact_is_bundle(a.kind,mime) {
+		// Complete html-bundle download: the stored vault token is relayed to the
+		// decrypting device/hosted keyring under content_base64, which returns the
+		// exact archive bytes as canonical base64 (never the text content path).
+		if a.blob_ref!="" && stored==0 {row["content_error"]=json.String("content_unavailable")} else if stored>content.ARTIFACT_BOUNDED_BUNDLE_READ_MAX {row["content_error"]=json.String("content_too_large")} else {
+			if stored>len(a.content) {
+				full,full_stored,full_found,full_err:=content.get_artifact_bounded(s.content,control_auth(owner),id,content.ARTIFACT_BOUNDED_BUNDLE_READ_MAX)
+				if !full_found || full_err.code!=.None || full_stored!=stored || len(full.content)!=stored do return nil,"","request_failed"
+				a.content=full.content
+			}
+			if !vault.is_armored(a.content) {row["content_error"]=json.String("content_not_encrypted")} else {row["content_base64"]=json.String(a.content)}
+		}
+	} else if detail {
 		if mime!="text/plain" && mime!="text/markdown" && mime!="application/json" {row["content_error"]=json.String("unsupported_content_type")} else if stored>128*1024 {row["content_error"]=json.String("content_too_large")} else if a.blob_ref!="" && stored==0 {row["content_error"]=json.String("content_unavailable")} else {row["content"]=json.String(a.content)}
 	}
 	return row,revision,""
 }
+// html-bundle artifacts as stored by ham-ctl, the UI and MCP entry/files creates.
+resource_artifact_is_bundle :: proc(kind,mime:string)->bool {return kind=="html-bundle" && (mime=="application/zip" || mime=="")}

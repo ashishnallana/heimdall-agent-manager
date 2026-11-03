@@ -14,7 +14,28 @@ import agent_service "odin_test:hub/service/agent"
 import project_service "odin_test:hub/service/project"
 import jsonx "odin_test:lib/jsonx"
 
-ARTIFACT_MAX_BYTES :: 50 * 1024 * 1024
+// ARTIFACT_MAX_BYTES is the decoded artifact content limit (contracts.ARTIFACT_MAX_CONTENT_BYTES,
+// 15 MiB). A vault-sealed value is checked against the armored storage bound of that
+// plaintext instead; see validate_artifact_content_size.
+ARTIFACT_MAX_BYTES :: contracts.ARTIFACT_MAX_CONTENT_BYTES
+
+// artifact_content_limit_bytes is the byte limit enforced on stored content: the
+// decoded limit for plain text/binary, or the armored budget of a 15 MiB plaintext
+// when the value is a vault v2 envelope (the Hub cannot see the plaintext length).
+artifact_content_limit_bytes :: proc(content: string) -> int {
+	return domain.text_cap_limit_bytes(content, ARTIFACT_MAX_BYTES)
+}
+
+// validate_artifact_content_size rejects content above the limit with an error that
+// names the actual size and the exact limit in bytes.
+validate_artifact_content_size :: proc(content: string) -> domain.Domain_Error {
+	limit := artifact_content_limit_bytes(content)
+	if len(content) <= limit do return {}
+	if domain.is_vault_armored(content) {
+		return domain.domain_error(.Validation_Failed, fmt.tprintf("artifact is too large: %d encrypted bytes, limit %d (encrypted form of %s of content)", len(content), limit, contracts.ARTIFACT_MAX_CONTENT_LABEL))
+	}
+	return domain.domain_error(.Validation_Failed, fmt.tprintf("artifact is too large: %d bytes, maximum is %s", len(content), contracts.ARTIFACT_MAX_CONTENT_LABEL))
+}
 
 // Built-in template content lives in domain (builtin_templates.odin) so the
 // template API and the agent bootstrap share one compiled-in source.
@@ -218,7 +239,12 @@ mark_messages_read_by_ids :: proc(s:^Content_Service, auth:contracts.Auth_Contex
 // mark_messages_read_by_ids_at also returns the read_at it wrote, so callers can
 // report the committed receipt instead of the pre-mark row (E4).
 mark_messages_read_by_ids_at :: proc(s:^Content_Service, auth:contracts.Auth_Context, message_ids:[]string) -> (int,string,domain.Domain_Error){ owner,ok,err:=ownership.owner_from_auth(auth); if !ok do return 0,"",err; read_at:=platform.clock_now(s.clock); n,mark_err:=iface.content_mark_messages_read(s.content, owner, message_ids, read_at); return n,read_at,mark_err }
-send_message :: proc(s:^Content_Service, auth:contracts.Auth_Context,cid:string,input:Message_Input)->(domain.Chat_Message,bool,domain.Domain_Error){ c,ok,err:=get_conversation(s,auth,cid); if !ok do return {},false,err; if s.agent_configuration_service != nil { if valid, validity_err := agent_service.validate_instance_message_configuration(s.agent_configuration_service,c.owner_user_id,c.agent_instance_id); !valid do return {},false,validity_err } else { if idle, idle_err := agent_service.reconfiguration_require_idle(&agent_service.Agent_Service{agents=s.agents}, c.agent_instance_id); !idle do return {},false,idle_err }; if msg_ok,msg_err:=validate_initial_message_for_owner(s,c.owner_user_id,input); !msg_ok do return {},false,msg_err; now:=platform.clock_now(s.clock); m_type:=input.message_type if input.message_type!="" else "text"; m:=domain.Chat_Message{message_id=platform.generate_id(s.ids,"msg_"),conversation_id=c.conversation_id,owner_user_id=c.owner_user_id,direction="user_to_agent",sender_agent_id=c.agent_id,sender_agent_instance_id=c.agent_instance_id,body=input.body,artifact_ids_json=artifact_json_or_empty(input.artifact_ids_json),message_type=m_type,metadata_json=input.metadata_json,created_at=now}; saved,save_ok,save_err:=save_message(s,m); if !save_ok do return {},false,save_err; c.last_message_preview=input.body; c.last_message_at=now; c.updated_at=now; _,_,_=iface.content_save_conversation(s.content,c); notify_agent_message(s,c,"user_to_agent","user",saved.message_id,"User"); record_activity_and_maybe_nudge(s,c.conversation_id,now); return saved,true,{} }
+send_message :: proc(s:^Content_Service, auth:contracts.Auth_Context,cid:string,input:Message_Input)->(domain.Chat_Message,bool,domain.Domain_Error) {
+ m,ok,err:=persist_user_message(s,auth,cid,input)
+ if !ok do return {},false,err
+ _,_=deliver_user_message(s,auth,cid,m)
+ return m,true,{}
+}
 send_agent_message :: proc(s:^Content_Service, auth:contracts.Auth_Context, instance_id:string, input:Message_Input)->(domain.Chat_Message,bool,domain.Domain_Error){
 	return send_agent_message_with_id(s, auth, instance_id, input, platform.generate_id(s.ids, "msg_"))
 }
@@ -330,7 +356,7 @@ mark_read_with_receipts :: proc(s:^Content_Service, auth:contracts.Auth_Context,
 }
 message_body_for_response :: proc(s:^Content_Service, m:domain.Chat_Message)->string{ if artifact_refs_have_missing(s,m.owner_user_id,m.artifact_ids_json) do return strings.concatenate({m.body,"\n[artifact unavailable/deleted]"}); return m.body }
 
-create_artifact :: proc(s:^Content_Service, auth:contracts.Auth_Context,input:Artifact_Input)->(domain.Artifact,bool,domain.Domain_Error){ owner,ok,err:=ownership.owner_from_auth(auth); if !ok do return {},false,err; if len(input.content)>ARTIFACT_MAX_BYTES do return {},false,domain.domain_error(.Validation_Failed,fmt.tprintf("artifact is too large; maximum size is %d MB", ARTIFACT_MAX_BYTES/(1024*1024))); if ok_ctx,ctx_err:=artifact_context_owned(s,owner,input); !ok_ctx do return {},false,ctx_err; name:=input.name; if name=="" do name=input.filename; if name=="" do name="artifact"; kind:=input.kind; if kind=="" do kind="file"; now:=platform.clock_now(s.clock); a:=domain.Artifact{artifact_id=platform.generate_id(s.ids,"art_"),owner_user_id=owner,kind=kind,name=name,description=input.description,content_type=input.content_type,size_bytes=len(input.content),content=input.content,mime=input.mime,ext=input.ext,sha256=input.sha256,origin_kind=input.origin_kind,origin_ref=input.origin_ref,agent_id=input.agent_id,agent_instance_id=input.agent_instance_id,chain_id=input.chain_id,task_id=input.task_id,project_id=input.project_id,created_at=now,updated_at=now}; return iface.content_save_artifact(s.content,a) }
+create_artifact :: proc(s:^Content_Service, auth:contracts.Auth_Context,input:Artifact_Input)->(domain.Artifact,bool,domain.Domain_Error){ owner,ok,err:=ownership.owner_from_auth(auth); if !ok do return {},false,err; if size_err:=validate_artifact_content_size(input.content); size_err.code!=.None do return {},false,size_err; if ok_ctx,ctx_err:=artifact_context_owned(s,owner,input); !ok_ctx do return {},false,ctx_err; name:=input.name; if name=="" do name=input.filename; if name=="" do name="artifact"; kind:=input.kind; if kind=="" do kind="file"; now:=platform.clock_now(s.clock); a:=domain.Artifact{artifact_id=platform.generate_id(s.ids,"art_"),owner_user_id=owner,kind=kind,name=name,description=input.description,content_type=input.content_type,size_bytes=len(input.content),content=input.content,mime=input.mime,ext=input.ext,sha256=input.sha256,origin_kind=input.origin_kind,origin_ref=input.origin_ref,agent_id=input.agent_id,agent_instance_id=input.agent_instance_id,chain_id=input.chain_id,task_id=input.task_id,project_id=input.project_id,created_at=now,updated_at=now}; return iface.content_save_artifact(s.content,a) }
 list_artifacts :: proc(s: ^Content_Service, auth: contracts.Auth_Context, filter: domain.Artifact_List_Filter) -> ([]domain.Artifact, domain.Domain_Error) {
 	owner, ok, err := ownership.owner_from_auth(auth)
 	if !ok do return nil, err
@@ -550,5 +576,8 @@ pane_capture_json_int :: proc(body,key:string,fallback:int)->int{
 	return jsonx.extract_int(body,key,fallback)
 }
 
-notify_agent_message :: proc(s:^Content_Service, c:domain.Chat_Conversation, direction,sender_instance_id,message_id:string, sender_display_name:string=""){ if s==nil || s.agents==nil || s.bridge_command_sink.send_runtime_command==nil do return; inst,ok,_:=iface.agent_get_instance(s.agents,c.agent_instance_id); if !ok || inst.bridge_id=="" do return; command_id:=platform.generate_id(s.ids,"cmd_"); sndr_dn:=sender_display_name; if sndr_dn=="" && sender_instance_id!="" && sender_instance_id!="user" { if sndr,sndr_ok,_:=iface.agent_get_instance(s.agents,sender_instance_id); sndr_ok do sndr_dn=sndr.display_name }; if sndr_dn=="" && sender_instance_id=="user" do sndr_dn="User"; b:=strings.builder_make(); strings.write_string(&b,"{\"type\":\"notify_agent_message\",\"command_id\":\""); content_json_write(&b,command_id); strings.write_string(&b,"\",\"bridge_id\":\""); content_json_write(&b,inst.bridge_id); strings.write_string(&b,"\",\"agent_instance_id\":\""); content_json_write(&b,c.agent_instance_id); strings.write_string(&b,"\",\"conversation_id\":\""); content_json_write(&b,c.conversation_id); strings.write_string(&b,"\",\"message_id\":\""); content_json_write(&b,message_id); strings.write_string(&b,"\",\"direction\":\""); content_json_write(&b,direction); strings.write_string(&b,"\",\"sender\":\""); content_json_write(&b,sender_instance_id); strings.write_string(&b,"\",\"sender_agent_instance_id\":\""); content_json_write(&b,sender_instance_id); if sndr_dn!="" { strings.write_string(&b,"\",\"sender_display_name\":\""); content_json_write(&b,sndr_dn) }; strings.write_string(&b,"\",\"unread_count\":"); strings.write_string(&b,fmt.tprintf("%d",c.unread_count)); strings.write_string(&b,"}"); _,_=project_service.bridge_command_send_runtime(s.bridge_command_sink,project_service.Runtime_Command{bridge_id=inst.bridge_id,command_id=command_id,body_json=strings.to_string(b)}) }
+notify_agent_message :: proc(s:^Content_Service,c:domain.Chat_Conversation,direction,sender_instance_id,message_id:string,sender_display_name:string="") {
+ _,_=notify_agent_message_checked(s,c,direction,sender_instance_id,message_id,sender_display_name)
+}
+notify_agent_message_checked :: proc(s:^Content_Service, c:domain.Chat_Conversation, direction,sender_instance_id,message_id:string, sender_display_name:string="")->(bool,domain.Domain_Error){ if s==nil || s.agents==nil || s.bridge_command_sink.send_runtime_command==nil do return false,domain.domain_error(.Bridge_Offline,"message delivery unavailable"); inst,ok,_:=iface.agent_get_instance(s.agents,c.agent_instance_id); if !ok || inst.bridge_id=="" do return false,domain.domain_error(.Bridge_Offline,"message delivery unavailable"); command_id:=platform.generate_id(s.ids,"cmd_"); sndr_dn:=sender_display_name; if sndr_dn=="" && sender_instance_id!="" && sender_instance_id!="user" { if sndr,sndr_ok,_:=iface.agent_get_instance(s.agents,sender_instance_id); sndr_ok do sndr_dn=sndr.display_name }; if sndr_dn=="" && sender_instance_id=="user" do sndr_dn="User"; b:=strings.builder_make(); strings.write_string(&b,"{\"type\":\"notify_agent_message\",\"command_id\":\""); content_json_write(&b,command_id); strings.write_string(&b,"\",\"bridge_id\":\""); content_json_write(&b,inst.bridge_id); strings.write_string(&b,"\",\"agent_instance_id\":\""); content_json_write(&b,c.agent_instance_id); strings.write_string(&b,"\",\"conversation_id\":\""); content_json_write(&b,c.conversation_id); strings.write_string(&b,"\",\"message_id\":\""); content_json_write(&b,message_id); strings.write_string(&b,"\",\"direction\":\""); content_json_write(&b,direction); strings.write_string(&b,"\",\"sender\":\""); content_json_write(&b,sender_instance_id); strings.write_string(&b,"\",\"sender_agent_instance_id\":\""); content_json_write(&b,sender_instance_id); if sndr_dn!="" { strings.write_string(&b,"\",\"sender_display_name\":\""); content_json_write(&b,sndr_dn) }; strings.write_string(&b,"\",\"unread_count\":"); strings.write_string(&b,fmt.tprintf("%d",c.unread_count)); strings.write_string(&b,"}"); return project_service.bridge_command_send_runtime(s.bridge_command_sink,project_service.Runtime_Command{bridge_id=inst.bridge_id,command_id=command_id,body_json=strings.to_string(b)}) }
 content_json_write :: proc(b:^strings.Builder, v:string){ contracts.write_json_string(b,v) }

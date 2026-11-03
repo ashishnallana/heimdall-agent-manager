@@ -9,7 +9,10 @@ import ws "odin_test:lib/ws"
 
 bridge_mcp_transform :: proc(conn:^ws.Connection,text:string) {
 	input:struct {command_id:string,job:vault.Control_Job}
-	if len(text)>1024*1024 || json.unmarshal_string(text,&input,.JSON,context.temp_allocator)!=nil do return
+	// Same bound as the dispatcher: 1 MiB for every job except artifact bundle
+	// seal/download jobs (BRIDGE_DISPATCH_MCP_LARGE_BYTES_LIMIT, checked again per
+	// operation/tool by control_job_verify).
+	if len(text)>BRIDGE_DISPATCH_MCP_LARGE_BYTES_LIMIT || json.unmarshal_string(text,&input,.JSON,context.temp_allocator)!=nil do return
 	// Decode creates a second copy of a create payload; wipe both request copies.
 	defer if input.job.payload!="" do crypto.zero_explicit(raw_data(input.job.payload),len(input.job.payload))
 	if input.command_id!=input.job.request_id do return

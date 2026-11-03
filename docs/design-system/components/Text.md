@@ -5,6 +5,7 @@ All typography through one `role`: `<Text role="…" tone="…" as="…">`. Each
 | Role | Style | Use for |
 |---|---|---|
 | `display` | serif 32/38 | The page's single h1 (PageShell sets it) and empty-state headlines |
+| `headline` | serif 32/52 (26/44 below 768px) | The new conversation page's sentence headline, whose nouns are tokens |
 | `heading` | serif 20/28, 500 | Section headings, Panel/Modal titles in detail panes |
 | `title` | sans 15/22, 600 | Card, ticket and row titles; Alert/Toast titles |
 | `body` | sans 14/20 | Default UI text |
@@ -13,6 +14,7 @@ All typography through one `role`: `<Text role="…" tone="…" as="…">`. Each
 | `caption` | sans 11/16, 500 | Timestamps, status bar |
 | `overline` | sans 11/16, 600, +0.06em, uppercase | Section labels (UP NEXT, FINISHED), eyebrows |
 | `code` | mono 13/20 | Paths, branches, commands, IDs |
+| `code-sm` | mono 12/16 | Compact machine text, e.g. the launcher's path/branch meta line |
 
 Agent replies are not a Text role: wrap the chat markdown in the `reading` style (serif 16/26, 72ch).
 

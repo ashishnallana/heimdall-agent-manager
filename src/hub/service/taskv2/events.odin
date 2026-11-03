@@ -104,7 +104,9 @@ append_event :: proc(repo: ^iface.Taskchain_Repository, clock: ^platform.Clock, 
 		kind = kind,
 		payload_json = payload_json if strings.trim_space(payload_json) != "" else "{}",
 	}
-	return iface.taskchain_append_event(repo, ev)
+	saved, ok, err := iface.taskchain_append_event(repo, ev)
+	if ok do fold_cache_note_appended(saved)
+	return saved, ok, err
 }
 
 // now_ms reads the service clock (RFC3339, second precision) as unix ms so that

@@ -3,6 +3,7 @@ import { desktopUpdateMutationGuard } from '../utils/desktopUpdatePreparation';
 import { heimdallApi, setupHeimdallApiListeners } from '../api/heimdallApi';
 import { vaultCacheInvalidationMiddleware } from '../api/vaultCacheInvalidation';
 import { paneDeferralResetMiddleware } from '../api/wsInvalidation';
+import { analyticsMiddleware } from '../analytics/milestones';
 import '../api/endpoints/tasks';
 import '../api/endpoints/chats';
 import '../api/endpoints/agents';
@@ -93,6 +94,8 @@ export const store = configureStore({
       // dispatches, and drops owner-specific deferral state with it.
       paneDeferralResetMiddleware,
       heimdallApi.middleware,
+      // REQ-PH-5: funnel milestones from Hub answers; a no-op while analytics is off (no key).
+      analyticsMiddleware,
     ),
 });
 

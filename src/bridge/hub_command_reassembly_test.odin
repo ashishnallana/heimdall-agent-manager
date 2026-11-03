@@ -16,6 +16,8 @@ import "core:strings"
 import "core:testing"
 import base64 "core:encoding/base64"
 import contracts "odin_test:contracts"
+import vault "odin_test:lib/vault"
+import ws "odin_test:lib/ws"
 
 // _chunk_frame builds one hub->bridge chunk frame. Hand-rolled rather than reusing the
 // hub's builder because src/bridge cannot import a hub package; the cross-direction
@@ -468,3 +470,40 @@ hub_command_reassembly_wire_related_commands_deserialization :: proc(t: ^testing
 	testing.expect(t, len(track.bad_free_array) == 0, "no bad frees")
 }
 
+
+// A full 15 MiB html-bundle MCP job crosses both WS directions: hub->bridge at the
+// 6000-byte chunk size (~4200 chunks) and the bridge's signed reply back at the
+// runtime chunk size, each reassembled byte-exact and admitted to the large lane.
+@(test)
+test_hub_command_reassemble_full_size_mcp_bundle_job_both_directions :: proc(t: ^testing.T) {
+	envelope := vault.CONTROL_JOB_ARTIFACT_PAYLOAD_MAX + 1024 * 1024
+	for prefix in ([]string{`{"type":"mcp_transform","command_id":"req_big","job":{"payload":"`, `{"type":"mcp_transform_result","command_id":"req_big","reply":{"result":"`}) {
+		b := strings.builder_make(0, envelope + 64, context.temp_allocator)
+		strings.write_string(&b, prefix)
+		for strings.builder_len(b) < envelope do strings.write_string(&b, "QUJDRA==")
+		strings.write_string(&b, `"}}`)
+		text := strings.to_string(b)
+		payload := contracts.BRIDGE_WS_HUB_TO_BRIDGE_CHUNK_PAYLOAD_BYTES
+		if strings.has_prefix(prefix, `{"type":"mcp_transform_result"`) do payload = bridge_hub_runtime_chunk_payload_bytes()
+		frames := ws.chunk_frames(text, payload)
+		if !testing.expectf(t, frames != nil, "%d bytes chunk at %d", len(text), payload) do continue
+		buf: [dynamic]Hub_Command_Reassembly
+		assembled: string
+		complete := false
+		for f, i in frames {
+			out, done, ok := hub_command_reassemble(&buf, f)
+			testing.expectf(t, ok, "frame %d accepted", i)
+			if done {assembled = out; complete = true}
+			delete(f)
+		}
+		delete(frames)
+		testing.expect(t, complete && assembled == text, "reassembled byte-exact")
+		if strings.has_prefix(prefix, `{"type":"mcp_transform_result"`) {
+			testing.expect(t, bridge_command_dispatch_is_mcp_large_result(assembled))
+		} else {
+			testing.expect(t, bridge_command_dispatch_is_mcp_large("mcp_transform", len(assembled)) && len(assembled) <= BRIDGE_DISPATCH_MCP_LARGE_BYTES_LIMIT)
+		}
+		if complete do delete(assembled)
+		hub_command_reassemblies_free(&buf)
+	}
+}

@@ -3,7 +3,7 @@ import { useSelector } from 'react-redux';
 import { selectActiveVaultKey } from '../../store/vaultSlice';
 import { VaultText } from '../vault/VaultText';
 import { useAuthUser } from '../auth/AuthUserContext';
-import { isVaultArmored, decryptVaultText } from '../../utils/vaultContent';
+import { isVaultArmored, decryptVaultText, maskVaultArmored } from '../../utils/vaultContent';
 import {
   Badge,
   Button,
@@ -32,16 +32,22 @@ import {
   useRestartAgentInstanceMutation,
   useListAgentIdentitiesQuery,
 } from '../../api/endpoints/agents';
-import {
-  getQueuedWaitingSlotName,
-  formatFleetRoleName,
-} from '../tasks/FleetManagementDrawer';
+import { formatFleetRoleName } from '../tasks/FleetManagementDrawer';
 import ArtifactViewer from '../ArtifactViewer';
 import { HolderName } from '../tasks/HolderName';
 import { buildTaskNames } from '../tasks/taskNames';
 import { ParticipantName } from '../tasks/ParticipantName';
 import Markdown from '../Markdown';
 import { buildRouteHash } from '../../utils/appLocation';
+import {
+  attentionReason,
+  buildMemberCurrentTaskMap,
+  isAttentionNeeded,
+  isOngoingTask,
+  memberTicketText,
+  reviewHolders,
+} from './chainMemberTickets';
+import { normalizeTaskState, TASK_STATE_LABELS } from '../tasks/taskV2Types';
 import {
   readChainOverviewCollapsedState,
   writeChainOverviewCollapsedState,
@@ -116,7 +122,7 @@ function statusTone(status: string): Tone {
   const s = String(status || '').toLowerCase();
   if (s === 'running' || s === 'live' || s === 'validated_good' || s === 'completed') return 'success';
   if (s === 'in_progress' || s === 'in_validation' || s === 'starting') return 'info';
-  if (s === 'queued' || s === 'warning') return 'warning';
+  if (s === 'queued' || s === 'warning' || s === 'in_review') return 'warning';
   if (s === 'stopped' || s === 'failed' || s === 'validated_not_good' || s === 'cancelled') return 'danger';
   return 'neutral';
 }
@@ -127,30 +133,6 @@ function roleTone(role: string): Tone {
   if (r === 'coordinator') return 'warning';
   if (r === 'reviewer') return 'info';
   return 'neutral';
-}
-
-// Helper to determine if a task needs attention
-function isAttentionNeeded(task: any): boolean {
-  const status = String(task.status || '').toLowerCase();
-  if (status === 'validated_not_good') return true;
-  if (status === 'in_validation') {
-    const reviewerRefs = task.reviewer_refs || task.reviewerRefs || [];
-    const reviewers = task.reviewers || [];
-    const noReviewer = reviewerRefs.length === 0 && reviewers.length === 0;
-    const isUserReviewer = Boolean(task.requiresUserApproval ?? task.requires_user_approval) ||
-      reviewerRefs.some((r: any) => r.type === 'user');
-    return noReviewer || isUserReviewer;
-  }
-  return false;
-}
-
-function attentionReason(task: any): string {
-  const status = String(task.status || '').toLowerCase();
-  if (status === 'validated_not_good') return 'Validation rejected (needs fixes)';
-  const reviewerRefs = task.reviewer_refs || task.reviewerRefs || [];
-  const reviewers = task.reviewers || [];
-  if (reviewerRefs.length === 0 && reviewers.length === 0) return 'No reviewer assigned';
-  return 'Review required by user';
 }
 
 // Sub-component for an Attention Task's review action panel
@@ -437,29 +419,14 @@ export default function ChainOverviewPanel({
   const vcsUntrackedCount = useMemo(() => vcsFiles.filter((f) => f.status === 'untracked').length, [vcsFiles]);
 
   // Tasks sections
-  const ongoingTasks = useMemo(() => {
-    return tasks.filter((t) => {
-      const s = String(t.status || '').toLowerCase();
-      return s === 'in_progress' || s === 'in_validation';
-    });
-  }, [tasks]);
+  const ongoingTasks = useMemo(() => tasks.filter(isOngoingTask), [tasks]);
 
   const attentionTasks = useMemo(() => {
     return tasks.filter(isAttentionNeeded);
   }, [tasks]);
 
-  // Member current tasks map
-  const memberCurrentTaskMap = useMemo(() => {
-    const map = new Map<string, any>();
-    for (const t of tasks) {
-      const s = String(t.status || '').toLowerCase();
-      if (s === 'in_progress') {
-        const instId = t.assignee_ref?.agent_instance_id || t.assigneeRef?.agentInstanceId;
-        if (instId) map.set(instId, t);
-      }
-    }
-    return map;
-  }, [tasks]);
+  // What each member is on: the task it holds a work or review lease for.
+  const memberCurrentTaskMap = useMemo(() => buildMemberCurrentTaskMap(tasks), [tasks]);
 
   // Memoized member display name map (instanceId -> displayName)
   const memberNameMap = useMemo(() => {
@@ -630,7 +597,9 @@ export default function ChainOverviewPanel({
               {members.map((member) => {
                 const instId = member.agentInstanceId || member.agent_instance_id;
                 const agentId = member.agentId || member.agent_id || '';
-                const name = member.displayName || member.display_name || instId;
+                // Names arrive opened by the query; a token it could not open (locked
+                // vault, other epoch) is masked, never rendered as ciphertext.
+                const name = maskVaultArmored(member.displayName || member.display_name || instId);
                 const rawStatus = String(member.runtimeStatus || member.runtime_status || 'stopped').toLowerCase();
                 const isStopped = rawStatus === 'stopped' || rawStatus === 'failed';
                 const isRunning = rawStatus === 'running' || rawStatus === 'idle' || rawStatus === 'ready';
@@ -669,10 +638,15 @@ export default function ChainOverviewPanel({
                     </span>
                     <span
                       className="min-w-0 flex-1 truncate text-[11px] text-muted"
-                      title={currentTask ? String(currentTask.title || currentTask.id || '') : 'No ticket'}
+                      data-debug-id={`chain-overview-agent-ticket-${instId}`}
+                      title={memberTicketText(currentTask)}
                     >
                       {currentTask ? (
-                        <VaultText value={currentTask.title || currentTask.id} as="span" className="truncate" />
+                        <>
+                          {currentTask.kind === 'review' && <span className="text-info">Reviewing: </span>}
+                          <VaultText value={currentTask.task.title || currentTask.task.task_id} as="span" className="truncate" />
+                          {currentTask.reviewRole && <span className="text-faint"> ({currentTask.reviewRole})</span>}
+                        </>
                       ) : (
                         <span className="text-faint">No ticket</span>
                       )}
@@ -765,7 +739,7 @@ export default function ChainOverviewPanel({
           {!isCollapsed('attention') && (
             <div className="grid gap-2">
               {attentionTasks.map((task) => {
-                const taskId = task.taskId || task.id;
+                const taskId = String(task.task_id || task.taskId || task.id || '');
                 const isExpanded = expandedAttentionTaskId === taskId;
                 const reason = attentionReason(task);
                 const assignee = resolveAgentName(
@@ -795,17 +769,9 @@ export default function ChainOverviewPanel({
                           <Badge tone={priorityTone(task.priority)}>
                             {task.priority || 'P2'}
                           </Badge>
-                          <StatusPill tone={statusTone(task.status)}>
-                            {task.status}
+                          <StatusPill tone={statusTone(normalizeTaskState(task.state))}>
+                            {TASK_STATE_LABELS[normalizeTaskState(task.state)]}
                           </StatusPill>
-                          {task.status === 'queued' && (
-                            <span
-                              data-debug-id={`chain-overview-attention-queued-slot-${taskId}`}
-                              className="rounded bg-warning-soft px-1.5 py-0.5 text-[11px] font-semibold text-warning"
-                            >
-                              Queued (Waiting for {getQueuedWaitingSlotName(task, agentIdentities)} slot)
-                            </span>
-                          )}
                           <span className="text-[11px] font-medium text-warning truncate">
                             {reason}
                           </span>
@@ -822,7 +788,11 @@ export default function ChainOverviewPanel({
                         )}
                           </span>
                           <span className="truncate max-w-[140px]">
-                            Reviewer: <strong className="text-primary font-normal">{reviewer}</strong>
+                            Reviewer:{' '}{reviewHolders(task)[0] ? (
+                              <HolderName instanceId={reviewHolders(task)[0]} names={names} className="text-primary" />
+                            ) : (
+                              <strong className="text-primary font-normal">{reviewer}</strong>
+                            )}
                           </span>
                         </div>
                       </div>
@@ -886,11 +856,11 @@ export default function ChainOverviewPanel({
 
         {!isCollapsed('ongoingTasks') && (
           ongoingTasks.length === 0 ? (
-            <p className="text-xs text-muted py-1">No active in_progress or in_validation tickets.</p>
+            <p className="text-xs text-muted py-1">No tickets in progress or in review.</p>
           ) : (
             <div className="grid gap-2">
               {ongoingTasks.map((task) => {
-                const taskId = task.taskId || task.id;
+                const taskId = String(task.task_id || task.taskId || task.id || '');
                 const assignee = resolveAgentName(
                   task.assigneeRef || task.assignee_ref || task.assigneeAgentInstanceId || task.assignee_agent_instance_id,
                   'Unassigned'
@@ -915,17 +885,9 @@ export default function ChainOverviewPanel({
                         <Badge tone={priorityTone(task.priority)}>
                           {task.priority || 'P2'}
                         </Badge>
-                        <StatusPill tone={statusTone(task.status)}>
-                          {task.status}
+                        <StatusPill tone={statusTone(normalizeTaskState(task.state))}>
+                          {TASK_STATE_LABELS[normalizeTaskState(task.state)]}
                         </StatusPill>
-                        {task.status === 'queued' && (
-                          <span
-                            data-debug-id={`chain-overview-queued-slot-${taskId}`}
-                            className="rounded bg-warning-soft px-1.5 py-0.5 text-[11px] font-semibold text-warning"
-                          >
-                            Queued (Waiting for {getQueuedWaitingSlotName(task, agentIdentities)} slot)
-                          </span>
-                        )}
                       </div>
                       <span className="font-mono text-[10px] text-muted">{taskId}</span>
                     </div>
@@ -943,7 +905,11 @@ export default function ChainOverviewPanel({
                         )}
                       </span>
                       <span className="truncate max-w-[140px]">
-                        Reviewer: <strong className="text-primary font-normal">{reviewer}</strong>
+                        Reviewer:{' '}{reviewHolders(task)[0] ? (
+                          <HolderName instanceId={reviewHolders(task)[0]} names={names} className="text-primary" />
+                        ) : (
+                          <strong className="text-primary font-normal">{reviewer}</strong>
+                        )}
                       </span>
                     </div>
                   </div>

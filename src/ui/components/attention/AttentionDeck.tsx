@@ -92,7 +92,7 @@ const DECK_CSS = `
 
 function isTyping(target: EventTarget | null): boolean {
   const el = target as HTMLElement | null;
-  return !!el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable);
+  return !!el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' || el.isContentEditable);
 }
 
 /**
@@ -419,7 +419,10 @@ export function AttentionDeck({
     { key: 'a', label: 'Allow', icon: 'check', tone: 'success', debug: 'allow', run: () => decideBlocker(current, 'allow') },
     { key: 'x', label: 'Deny', icon: 'close', tone: 'danger', debug: 'deny', run: () => decideBlocker(current, 'deny') },
     { key: 'o', label: 'Open', icon: 'arrow-right', debug: 'open', run: () => openSource(current) },
-  ]) : current.kind === 'task' && current.details.attention === 'blocked' ? [
+  ]) : current.kind === 'task' && current.details.attention === 'placement' ? [
+    { key: 's', label: 'Snooze', icon: 'clock', debug: 'snooze', run: () => { setComposer(null); setPopover(popover === 'snooze' ? null : 'snooze'); } },
+    { key: 'o', label: 'Open ticket', icon: 'arrow-right', debug: 'open', run: () => openSource(current) },
+  ] : current.kind === 'task' && current.details.attention === 'blocked' ? [
     { key: 'a', label: needsAgentStart(current) ? 'Start agent' : 'Answer', icon: 'chat', tone: 'success', debug: 'answer', run: () => { if (needsAgentStart(current)) { void agentStart.start(current); return; } setPopover(null); setComposer(composer === 'answer' ? null : 'answer'); } },
     { key: 'c', label: 'Comment', icon: 'chat', debug: 'comment', run: () => { setPopover(null); setComposer(composer === 'comment' ? null : 'comment'); } },
     { key: 's', label: 'Snooze', icon: 'clock', debug: 'snooze', run: () => { setComposer(null); setPopover(popover === 'snooze' ? null : 'snooze'); } },
@@ -450,6 +453,9 @@ export function AttentionDeck({
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
+      // A portaled native fleet drawer owns its keyboard interaction.
+      const target = e.target as HTMLElement | null;
+      if (target?.closest?.('[role="dialog"]') && !panelRef.current?.contains(target)) return;
       if (e.key === 'Escape') {
         if (popover) setPopover(null);
         else if (composer) setComposer(null);
@@ -483,7 +489,7 @@ export function AttentionDeck({
   // the rest of the touch. The pointer is captured only after that horizontal
   // lock, and a pointercancel (the browser took the gesture) never navigates.
   const onPointerDown = (e: React.PointerEvent) => {
-    if ((e.target as HTMLElement).closest('button, a, textarea, input, [data-no-drag]')) return;
+    if ((e.target as HTMLElement).closest('button, a, textarea, input, select, [data-no-drag]')) return;
     drag.current = { x: e.clientX, y: e.clientY, id: e.pointerId, t: e.timeStamp, dx: 0, axis: 'pending' };
   };
   const onPointerMove = (e: React.PointerEvent) => {
@@ -598,7 +604,7 @@ export function AttentionDeck({
               }}
               onAnimationEnd={() => setSlide(null)}
             >
-              <AttentionCardBody item={current} now={now}>
+              <AttentionCardBody item={current} now={now} onOpenConfiguration={onClose}>
                 {composer === 'reply' && current.kind === 'message' ? (
                   <AttentionComposer
                     debugId="attention-reply"

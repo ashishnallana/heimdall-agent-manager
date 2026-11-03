@@ -1,8 +1,21 @@
 # Static HTML bundle artifacts
 
-An agent can publish a multi-page static site (HTML, CSS, local images and fonts) as one
-artifact. The user opens it in the Artifact Viewer, which renders it in an isolated iframe
-with no server running.
+An agent or user can publish a multi-page static site (HTML, CSS, local images and fonts,
+plus inert JavaScript and data files) as one artifact. The user opens it in the Artifact
+Viewer, which renders it in an isolated iframe with no server running and no script
+execution.
+
+## Upload paths
+
+| Path | How | Validation |
+|---|---|---|
+| ham-ctl | `artifact create --kind html-bundle --directory … \| --file …` (below) | `src/lib/html_bundle` (format core shared with MCP) via `src/ctl/html_bundle.odin`, before sealing |
+| UI | Artifact upload button / composer: pick a `.zip` | `readHtmlBundle` in the browser before upload; a ZIP that is not a valid bundle (e.g. no manifest) is refused with the reason |
+| HTTP API | `POST /api/v1/artifacts` with `kind: "html-bundle"`, `mime: "application/zip"`, `content_base64` | The Hub stores the (usually vault-sealed) bytes opaquely; it cannot inspect sealed content, so validation happens in the producing client and again in the viewer |
+| MCP | `artifacts.create` with `entry` + `files` (`{"path":{"text"|"base64","type"?}}`), see `docs/mcp-capabilities.md`; `list`/`get` return bundle metadata (`kind`, `content_type: application/zip`, `size_bytes`); `get` with `include_content: true` returns the exact archive as `content_base64` | The Hub validates and packs with `html_bundle_from_entry_files` (`src/lib/html_bundle`), the sealing device/hosted vault re-validates the archive before sealing its exact bytes, and the viewer validates again |
+
+Both ham-ctl and the UI seal the exact archive bytes when the vault is available
+(`encryptVaultBytes` in the UI), so **Download** returns the byte-identical ZIP.
 
 ## CLI
 
@@ -43,8 +56,25 @@ html-bundle`, a ZIP is still uploaded as an ordinary file artifact, and `--direc
 - Members: symlinks, nested archives (by extension or `PK\x03\x04` magic), encrypted entries,
   Zip64, multi-disk archives, other compression methods, overlapping members, and CRC or
   size mismatches.
-- Limits: 10 MiB archive, 50 MiB expanded (declared **and** actual; inflation stops once a
-  member passes its declared size), 1000 entries, 10 MiB per member, 64 KiB manifest.
+- Member types (case-insensitive extension allowlist, `HTML_BUNDLE_ALLOWED_EXTENSIONS` in
+  both layers): pages `.html .htm`; stylesheets `.css`; images `.png .jpg .jpeg .gif .webp
+  .avif .bmp .ico .svg`; fonts `.woff .woff2 .ttf .otf .eot`; **inert** `.js .mjs .json .map
+  .txt .md .xml .csv .webmanifest`. Anything else, including files without an extension
+  (`LICENSE`, `.DS_Store`), `.wasm`, `.php`, executables and media, is rejected.
+- Limits (bytes are binary units; "15 MB" is the artifact limit from REQ-ART-1):
+
+  | Limit | Value | Why |
+  |---|---|---|
+  | Archive (the artifact content) | **15 MB = 15 MiB = 15,728,640 bytes** | Same as `contracts.ARTIFACT_MAX_CONTENT_BYTES`; the ZIP *is* the artifact content. Vault/base64 overhead is budgeted by the Hub separately |
+  | Expanded total | 50 MiB, declared **and** actual | Bounds decompression output; inflation stops once a member passes its declared size |
+  | Per member | 15 MiB | No member can be larger than the archive limit |
+  | Entries | 1000 | Bounds central-directory and per-member work |
+  | Manifest | 64 KiB | |
+  | Member path | 1024 bytes | |
+
+  The archive limit applies to the ZIP as uploaded (with a generated manifest included);
+  the expanded limit applies to the sum of decompressed members. A 15 MiB ZIP of
+  compressible text may still be rejected for expanding past 50 MiB.
 
 ## Viewer
 
@@ -99,6 +129,13 @@ rendering:
     while the bundle is ready. A page switch, version change, close or vault lock stops
     it reading the old document before the old renderer is released. Each page gets a
     fresh iframe element, so a stale route in the page left behind is never re-read.
+- **JavaScript is inert**: `.js`/`.mjs` members are accepted and kept byte-exact in the
+  archive (Download returns them), but the preview never runs them: `<script>` elements
+  (HTML and SVG) and `on*` handlers are removed, no `blob:` URL is ever created for a
+  script, the CSP has no `script-src` (`default-src 'none'`), and the sandbox lacks
+  `allow-scripts`. Pages that had scripts show a note ("JavaScript does not run in the
+  preview") so missing interactivity is not mistaken for a bug. Author bundles so they
+  read correctly without script.
 - **Isolation**: the iframe uses `sandbox="allow-same-origin"` without `allow-scripts`,
   forms, popups or top navigation. Without script, the frame cannot reach the app's DOM,
   storage or credentials. `allow-same-origin` exists only so the host can read the
@@ -112,9 +149,17 @@ rendering:
 
 ## Verification
 
-- `src/ctl/html_bundle_test.odin`: packaging, entry resolution and unsafe-archive rejection.
-- `tests/ui_html_bundle_test.ts`: viewer-side reader, limits, reference resolution and URL
-  cleanup.
+- `src/ctl/html_bundle_test.odin`: packaging, entry resolution, unsafe-archive rejection,
+  the 15 MiB archive boundary and the member type allowlist (ZIP and `--directory`).
+  ```bash
+  nix develop --command odin test src/ctl -collection:odin_test=src -out:$HOME/.cache/heimdall-tests/ctl.bin
+  ```
+- `tests/ui_html_bundle_test.ts`: viewer-side reader, limits (15 MiB boundary), type
+  allowlist, inert JavaScript, a hostile HTML/CSS/SVG page (scripts, handlers,
+  `javascript:`/`data:` links, meta refresh, `<base>`, frames, forms, remote CSS/`@import`,
+  SVG `<use>`/SMIL/`foreignObject`, `is=`), reference resolution and URL cleanup.
+- `tests/ui_artifact_bytes_vault_test.ts`: `encryptVaultBytes` round-trips a binary ZIP
+  (and a full 15 MiB payload) byte-for-byte, as the UI upload path seals it.
 - `tests/ui_artifact_bytes_vault_test.ts` with `tests/fixtures/artifact_binary_vault_v2.json`:
   a binary payload sealed by ham-ctl and opened byte-exact by the UI.
 - `tests/ui_html_bundle_test.ts` also covers page-link routes: round trips, invalid routes,

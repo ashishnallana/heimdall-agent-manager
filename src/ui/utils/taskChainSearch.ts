@@ -1,5 +1,5 @@
 import { apiUrl, ApiError } from '../api/cookieFetch';
-import { cookieJsonFetch } from '../api/cookieFetch';
+import { readBridgeRows } from '../api/endpoints/bridgeSupport';
 import {
   getActiveTaskChainSearchKey,
   getActiveVaultKey,
@@ -167,6 +167,14 @@ async function relayOne(
   return opened;
 }
 
+/** Up to two online, unlocked bridges that can serve a task-chain search. */
+function searchCandidates(bridges: SearchBridge[]): SearchBridge[] {
+  return bridges.filter((bridge) => {
+    const state = String(bridge.status || bridge.runtime_status || '').toLowerCase();
+    return state === 'online' && String(bridge.vault_status || '').toLowerCase() === 'unlocked' && bridge.task_chain_search_ready === true && Boolean(bridge.bridge_id || bridge.id);
+  }).slice(0, 2);
+}
+
 export async function searchTaskChainsEncrypted(
   query: string,
   ownerId: string,
@@ -189,12 +197,12 @@ export async function searchTaskChainsEncrypted(
     if (!getActiveVaultKey()) throw new ApiError('Vault key unavailable', 423, 'vault_locked');
     throw new ApiError('Task-chain search key unavailable', 423, 'search_key_unavailable');
   }
-  const raw = await cookieJsonFetch('/bridges');
-  const bridges: SearchBridge[] = raw?.bridges ?? (Array.isArray(raw) ? raw : []);
-  const candidates = bridges.filter((bridge) => {
-    const state = String(bridge.status || bridge.runtime_status || '').toLowerCase();
-    return state === 'online' && String(bridge.vault_status || '').toLowerCase() === 'unlocked' && bridge.task_chain_search_ready === true && Boolean(bridge.bridge_id || bridge.id);
-  }).slice(0, 2);
+  // The shared bridge-list cache: a search must not cost a GET /bridges each time;
+  // WebSocket bridge events keep status and vault_status current. Only when the
+  // cached list offers no candidate is it re-read, so a stale cache cannot report
+  // bridge_offline.
+  let candidates = searchCandidates(await readBridgeRows());
+  if (!candidates.length) candidates = searchCandidates(await readBridgeRows({ fresh: true }));
   if (!candidates.length) throw new ApiError('No unlocked search Bridge is online', 409, 'bridge_offline');
 
   const requestId = crypto.randomUUID();

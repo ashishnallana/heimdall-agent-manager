@@ -59,8 +59,8 @@ DEFAULT_TIMEOUT_MS :: 20_000
 LONG_TRANSFER_TIMEOUT_MS :: 10 * 60_000
 DEFAULT_STALL_TIMEOUT_MS :: 20_000
 // DEFAULT_MAX_RESPONSE_BYTES must stay well above the largest response a hub
-// legitimately returns: an artifact (content_service.ARTIFACT_MAX_BYTES, 50 MB)
-// comes back inside a JSON document, so escaping can grow it. The deleted
+// legitimately returns: an artifact (contracts.ARTIFACT_MAX_CONTENT_BYTES, 15 MiB decoded,
+// larger once vault-armored) comes back inside a JSON document, so escaping can grow it. The deleted
 // client had no cap; callers talking to third parties set a tight one.
 DEFAULT_MAX_RESPONSE_BYTES :: 256 * 1024 * 1024
 DEFAULT_USER_AGENT :: "heimdall/" + contracts.APP_VERSION

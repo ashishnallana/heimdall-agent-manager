@@ -80,7 +80,7 @@ import {
   artifactUploadName,
   clipboardFilesFromEvent,
 } from '../../utils/artifactUpload';
-import { MAX_UPLOAD_BYTES } from '../ArtifactUpload';
+import { MAX_UPLOAD_BYTES, UPLOAD_TOO_LARGE_ERROR } from '../ArtifactUpload';
 import { ArtifactAttachmentPreview } from '../ArtifactAttachmentPreview';
 import Icon from '../Icon';
 import Markdown from '../Markdown';
@@ -1690,9 +1690,7 @@ export function AgentChatPane({
           file,
           status: tooLarge ? 'error' : 'uploading',
           error: tooLarge
-            ? `File is too large. Maximum upload size is ${Math.round(
-                MAX_UPLOAD_BYTES / (1024 * 1024),
-              )} MB.`
+            ? UPLOAD_TOO_LARGE_ERROR
             : '',
         },
       ];

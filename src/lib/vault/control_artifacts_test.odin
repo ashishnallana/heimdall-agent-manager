@@ -30,3 +30,32 @@ test_artifact_browser_native_signed_content_jobs :: proc(t:^testing.T) {
 	_,ok=control_record_json(&kr,.Artifact,json.Object{"owner_user_id"=json.String("system"),"read_only"=json.Boolean(true),"content"=json.String("No system exception")});testing.expect(t,!ok)
 	_,ok=control_record_json(&kr,.Artifact,json.Object{"owner_user_id"=json.String(keyring_user_id(&kr)),"content_type"=json.String("text/plain"),"content"=json.String(strings.repeat("x",65537,context.temp_allocator))});testing.expect(t,!ok)
 }
+// Artifact jobs (html-bundle capable) may carry a deadline up to 20 s out; every
+// other job keeps the 5 s window.
+@(test)
+test_control_job_deadline_window_is_per_job_kind :: proc(t:^testing.T) {
+	context.allocator=context.temp_allocator
+	testing.expect_value(t,control_job_deadline_max_ms("seal_resource","artifacts.create"),i64(CONTROL_JOB_ARTIFACT_DEADLINE_MAX_MS))
+	testing.expect_value(t,control_job_deadline_max_ms("read","artifacts.get"),i64(CONTROL_JOB_ARTIFACT_DEADLINE_MAX_MS))
+	testing.expect_value(t,control_job_deadline_max_ms("read","artifacts.list"),i64(CONTROL_JOB_DEADLINE_MAX_MS))
+	testing.expect_value(t,control_job_deadline_max_ms("seal_resource","memories.create"),i64(CONTROL_JOB_DEADLINE_MAX_MS))
+	testing.expect_value(t,control_job_deadline_max_ms("read","chains.get"),i64(CONTROL_JOB_DEADLINE_MAX_MS))
+	v:struct {now_ms:i64,keyring_hex,device_id,bridge_device_id:string,entries:[]struct {job:Control_Job,result:string}}
+	if !testing.expect(t,json.unmarshal_string(#load("../../../tests/fixtures/mcp_artifacts_worker_v2.json",string),&v,.JSON,context.temp_allocator)==nil) do return
+	bytes:=make([]byte,len(v.keyring_hex)/2,context.temp_allocator);if !testing.expect(t,hex_decode_into(bytes,v.keyring_hex)) do return
+	kr,parsed:=keyring_parse(bytes,v.entries[0].job.owner);if !testing.expect(t,parsed) do return
+	defer keyring_wipe(&kr)
+	checked:=0
+	for entry in v.entries {
+		job:=entry.job
+		long:=control_job_deadline_max_ms(job.operation,job.tool)==CONTROL_JOB_ARTIFACT_DEADLINE_MAX_MS
+		// Deadline 6 s out: allowed only for artifact bundle-capable jobs.
+		testing.expectf(t,control_job_verify(job,job.owner,job.resource,v.device_id,&kr,job.deadline_ms-6000)==long,"%s %s at -6s",job.operation,job.tool)
+		if long {
+			testing.expect(t,control_job_verify(job,job.owner,job.resource,v.device_id,&kr,job.deadline_ms-CONTROL_JOB_ARTIFACT_DEADLINE_MAX_MS))
+			testing.expect(t,!control_job_verify(job,job.owner,job.resource,v.device_id,&kr,job.deadline_ms-CONTROL_JOB_ARTIFACT_DEADLINE_MAX_MS-1))
+			checked+=1
+		}
+	}
+	testing.expect(t,checked>0)
+}

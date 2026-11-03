@@ -327,8 +327,13 @@ ctl_hub_artifacts :: proc(hub: Ctl_Hub, tokens, args: []string) {
 		name := option_value(args, "--name", "")
 		content := option_value(args, "--content", "")
 		content_base64 := ""
-		if file_path := option_value(args, "--file", ""); file_path != "" { data, err := os.read_entire_file(file_path, context.allocator); if err == nil do content_base64 = base64.encode(data) }
-		if has_flag(args, "--stdin") { data, err := os.read_entire_file("/dev/stdin", context.allocator); if err == nil do content_base64 = base64.encode(data) }
+		if file_path := option_value(args, "--file", ""); file_path != "" {
+			data, err := os.read_entire_file(file_path, context.allocator)
+			if err != nil { fmt.println(ctl_error_json(fmt.tprintf("cannot read --file %q: %v", file_path, err))); os.exit(1) }
+			if size_err := ctl_artifact_content_size_error(len(data)); size_err != "" { fmt.println(ctl_error_json(size_err)); os.exit(1) }
+			content_base64 = base64.encode(data)
+		}
+		if has_flag(args, "--stdin") { data, err := os.read_entire_file("/dev/stdin", context.allocator); if err == nil { if size_err := ctl_artifact_content_size_error(len(data)); size_err != "" { fmt.println(ctl_error_json(size_err)); os.exit(1) }; content_base64 = base64.encode(data) } }
 		if name == "" { fmt.println("usage: ham-ctl hub artifacts create --name <name> [--kind <kind>] [--content <text>|--file <path>|--stdin]"); return }
 		body := Ctl_Artifact_Create_Body{
 			name           = name,

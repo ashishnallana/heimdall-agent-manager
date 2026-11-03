@@ -1,6 +1,7 @@
 #+feature dynamic-literals
 package app
 
+import "core:encoding/base64"
 import "core:encoding/json"
 import "core:testing"
 import "core:strings"
@@ -15,6 +16,7 @@ import content "odin_test:hub/service/content"
 import project "odin_test:hub/service/project"
 import issue "odin_test:hub/service/issue"
 import http "odin_test:hub/transport/http"
+import hb "odin_test:lib/html_bundle"
 
 @(test)
 test_mcp_artifact_native_content_task_results_and_lifecycle :: proc(t:^testing.T) {
@@ -59,6 +61,7 @@ mcp_artifact_test :: proc(t:^testing.T,g:^App_Graph,h:^http.MCP_Control_Handlers
 	json_result:=mcp_task_test_output(t,mcp_resource_heap_call(h,headers,"artifacts.create",json_input));if json_result==nil do return
 	json_row:=mcp_resource_first(t,h,headers,"artifacts.get",json.Object{"artifact_id"=json_result["resource_id"]});if json_row!=nil do testing.expect(t,json_row["content"].(json.String)==`{"ok":true,"label":"π"}`)
 	mcp_artifact_security_test(t,g,h,headers,view,raw,create)
+	mcp_artifact_bundle_test(t,g,h,headers,view)
 	del:=json.Object{"artifact_id"=id,"request_id"=json.String("artifact_delete"),"expected_revision"=row["revision"]}
 	deleted:=mcp_resource_heap_call(h,headers,"artifacts.delete",del);if mcp_task_test_output(t,deleted)==nil do return
 	_,found,_=iface.content_get_artifact(&g.repos.content,string(id));testing.expect(t,!found,"native artifact delete is permanent")
@@ -130,4 +133,119 @@ mcp_artifact_security_test :: proc(t:^testing.T,g:^App_Graph,h:^http.MCP_Control
 	for th in threads {thread.join(th);thread.destroy(th)}
 	context.allocator=allocator
 	for job in jobs do testing.expect(t,job.ok && job.len==jobs[0].len && job.result==jobs[0].result)
+}
+
+@(private="file") mcp_bundle_probe_seen:int
+@(private="file") mcp_bundle_probe_fail:bool
+@(private="file") mcp_bundle_probe :: proc()->string {
+	mcp_bundle_probe_seen=http.mcp_bundle_slots_in_use()
+	return mcp_bundle_probe_fail?"decryption_unavailable":""
+}
+
+// Claude-style entry/files JSON -> MCP handler -> pack -> relay seal -> vault store.
+mcp_artifact_bundle_test :: proc(t:^testing.T,g:^App_Graph,h:^http.MCP_Control_Handlers,headers:[]contracts.HTTP_Header,view:mcp.Access_View) {
+	png:=[]byte{0x89,'P','N','G',0x0d,0x0a,0x1a,0x0a,0x00,0xff};png64,_:=base64.encode(png,allocator=context.temp_allocator)
+	files:=json.Object{"index.html"=json.Object{"text"=json.String("<!doctype html><link rel=stylesheet href=styles.css><img src=logo.png>")},"styles.css"=json.Object{"text"=json.String("body {color:red}")},"logo.png"=json.Object{"base64"=json.String(png64),"type"=json.String("image/png")}}
+	create:=json.Object{"request_id"=json.String("bundle_create"),"name"=json.String("Site"),"description"=json.String("Static site"),"entry"=json.String("index.html"),"files"=files,"task_id"=json.String("task_comment")}
+	response:=mcp_resource_heap_call(h,headers,"artifacts.create",create);result:=mcp_task_test_output(t,response);if result==nil do return
+	id:=string(result["resource_id"].(json.String))
+	testing.expect(t,response.body==mcp_resource_heap_call(h,headers,"artifacts.create",create).body,"bundle create replays its receipt")
+	native,found,_:=iface.content_get_artifact(&g.repos.content,id)
+	testing.expect(t,found && native.kind=="html-bundle" && native.content_type=="application/zip" && native.ext=="zip" && strings.has_prefix(native.content,"vault:v2:") && strings.has_prefix(native.name,"vault:v2:") && native.chain_id=="chain_comment")
+	testing.expect(t,!strings.contains(native.content,"color:red") && !strings.contains(native.content,"doctype"),"stored content is ciphertext only")
+	row:=mcp_resource_first(t,h,headers,"artifacts.get",json.Object{"artifact_id"=json.String(id)})
+	if row!=nil do testing.expect(t,row["kind"].(json.String)=="html-bundle" && row["name"].(json.String)=="Site")
+	// Complete download through the same relay: exact archive bytes, not text.
+	packed,pack_err:=hb.html_bundle_from_entry_files("index.html",files,context.temp_allocator)
+	testing.expect(t,pack_err=="")
+	full:=mcp_resource_first(t,h,headers,"artifacts.get",json.Object{"artifact_id"=json.String(id),"include_content"=json.Boolean(true)})
+	if full!=nil {
+		encoded,typed:=full["content_base64"].(json.String)
+		_,has_text:=full["content"]
+		testing.expectf(t,typed && !has_text,"bundle get returns content_base64 only: %v",full)
+		archive,_:=base64.decode(string(encoded),allocator=context.temp_allocator)
+		testing.expect(t,string(archive)==string(packed.zip),"downloaded archive is byte-exact")
+		checked,err:=hb.html_bundle_from_zip(archive,"",context.temp_allocator)
+		testing.expect(t,err=="" && checked.entry=="index.html")
+	}
+	// Hub-wide bundle bound: with both slots held, a third bundle create and a
+	// bundle download answer busy (retryable); text artifacts are unaffected.
+	testing.expect_value(t,http.mcp_bundle_slots_in_use(),0)
+	for _ in 0..<http.MCP_BUNDLE_MAX_CONCURRENT do testing.expect(t,http.mcp_bundle_slot_acquire())
+	testing.expect(t,!http.mcp_bundle_slot_acquire())
+	busy_create:=json.Object{"request_id"=json.String("bundle_busy"),"name"=json.String("Busy"),"entry"=json.String("index.html"),"files"=files}
+	busy:=mcp_resource_heap_call(h,headers,"artifacts.create",busy_create).body
+	testing.expectf(t,strings.contains(busy,"busy: html-bundle capacity"),"third bundle create: %s",busy)
+	busy_get:=http.mcp_control_handler(h,{method="POST",path="/api/v1/mcp",headers=headers,body=strings.concatenate({`{"jsonrpc":"2.0","id":78,"method":"tools/call","params":{"name":"artifacts.get","arguments":{"artifact_id":"`,id,`","include_content":true}}}`},context.temp_allocator)}).body
+	testing.expectf(t,strings.contains(busy_get,"busy: html-bundle capacity"),"bundle download while full: %s",busy_get)
+	text_ok:=mcp_resource_heap_call(h,headers,"artifacts.create",json.Object{"request_id"=json.String("text_while_busy"),"name"=json.String("Note.md"),"content"=json.String("# still fine"),"content_type"=json.String("text/markdown")})
+	testing.expect(t,mcp_task_test_output(t,text_ok)!=nil,"text artifacts are not bundle-bounded")
+	for _ in 0..<http.MCP_BUNDLE_MAX_CONCURRENT do http.mcp_bundle_slot_release()
+	testing.expect(t,mcp_task_test_output(t,mcp_resource_heap_call(h,headers,"artifacts.create",busy_create))!=nil,"retry after release succeeds")
+	testing.expect_value(t,http.mcp_bundle_slots_in_use(),0)
+	// The create slot is held through the seal/relay step, and released after
+	// success, a transform error and an invalid bundle.
+	mcp_bundle_probe_seen=-1;mcp_bundle_probe_fail=false
+	http.mcp_bundle_transform_probe=mcp_bundle_probe
+	defer http.mcp_bundle_transform_probe=nil
+	held:=json.Object{"request_id"=json.String("bundle_held"),"name"=json.String("Held"),"entry"=json.String("index.html"),"files"=files}
+	testing.expect(t,mcp_task_test_output(t,mcp_resource_heap_call(h,headers,"artifacts.create",held))!=nil)
+	testing.expect_value(t,mcp_bundle_probe_seen,1)
+	testing.expect_value(t,http.mcp_bundle_slots_in_use(),0)
+	mcp_bundle_probe_seen=-1;mcp_bundle_probe_fail=true
+	held["request_id"]=json.String("bundle_transform_error")
+	failed:=mcp_resource_heap_call(h,headers,"artifacts.create",held).body
+	testing.expectf(t,strings.contains(failed,"decryption_unavailable"),"transform error surfaces: %s",failed)
+	testing.expect_value(t,mcp_bundle_probe_seen,1)
+	testing.expect_value(t,http.mcp_bundle_slots_in_use(),0)
+	mcp_bundle_probe_seen=-1;mcp_bundle_probe_fail=false
+	invalid:=json.Object{"request_id"=json.String("bundle_invalid_slot"),"name"=json.String("Bad"),"entry"=json.String("index.html"),"files"=json.Object{"other.html"=json.Object{"text"=json.String("x")}}}
+	testing.expect(t,strings.contains(mcp_resource_heap_call(h,headers,"artifacts.create",invalid).body,"invalid_bundle"))
+	testing.expect_value(t,mcp_bundle_probe_seen,-1)
+	testing.expect_value(t,http.mcp_bundle_slots_in_use(),0)
+	http.mcp_bundle_transform_probe=nil
+	mcp_artifact_bundle_large_test(t,h,headers)
+	// Changed input under the same request_id is a conflict, not a silent replay.
+	files["styles.css"]=json.Object{"text"=json.String("body {color:blue}")}
+	testing.expect(t,strings.contains(mcp_resource_heap_call(h,headers,"artifacts.create",create).body,"idempotency_conflict"))
+	// Validation errors name the reason and store nothing.
+	for bad in ([]json.Object{
+		json.Object{"../x.html"=json.Object{"text"=json.String("x")}},
+		json.Object{"index.html"=json.Object{"text"=json.String("x"),"base64"=json.String("eA==")}},
+		json.Object{"index.html"=json.Object{"text"=json.String("x")},"a.png"=json.Object{"base64"=json.String("%%%")}},
+		json.Object{"index.html"=json.Object{"text"=json.String("x")},"a.exe"=json.Object{"base64"=json.String("eA==")}},
+		json.Object{"other.html"=json.Object{"text"=json.String("x")}},
+	}) {
+		body:=mcp_resource_heap_call(h,headers,"artifacts.create",json.Object{"request_id"=json.String("bundle_bad"),"name"=json.String("Bad"),"entry"=json.String("index.html"),"files"=bad}).body
+		testing.expectf(t,strings.contains(body,"invalid_bundle"),"expected invalid_bundle, got %s",body)
+	}
+	for bad in ([]json.Object{
+		json.Object{"request_id"=json.String("b"),"name"=json.String("B"),"entry"=json.String("index.html")},
+		json.Object{"request_id"=json.String("b"),"name"=json.String("B"),"files"=files},
+		json.Object{"request_id"=json.String("b"),"name"=json.String("B"),"entry"=json.String("index.html"),"files"=files,"content"=json.String("x"),"content_type"=json.String("text/plain")},
+		json.Object{"request_id"=json.String("b"),"name"=json.String("B"),"entry"=json.String("index.html"),"files"=files,"content_type"=json.String("text/plain")},
+		json.Object{"request_id"=json.String("b"),"name"=json.String("B"),"content"=json.String("x"),"content_type"=json.String("application/zip")},
+		json.Object{"request_id"=json.String("b"),"name"=json.String("B"),"entry"=json.String("index.html"),"files"=json.Array{}},
+	}) {_,valid:=http.mcp_arguments("artifacts.create",bad);testing.expect(t,!valid)}
+	// Only artifacts.create with files may exceed the 512 KiB control body.
+	big:=strings.concatenate({`{"jsonrpc":"2.0","id":77,"method":"tools/call","params":{"name":"memories.list","arguments":{"cursor":"`,strings.repeat("x",600*1024,context.temp_allocator),`"}}}`},context.temp_allocator)
+	refused:=http.mcp_control_handler(h,{method="POST",path="/api/v1/mcp",headers=headers,body=big})
+	testing.expect(t,strings.contains(refused.body,"request_too_large"))
+}
+
+// >1 MiB of binary asset through tools/call JSON (body > 512 KiB), relay seal and
+// relay open: create then download returns the identical archive.
+mcp_artifact_bundle_large_test :: proc(t:^testing.T,h:^http.MCP_Control_Handlers,headers:[]contracts.HTTP_Header) {
+	blob:=make([]byte,3*1024*1024+17,context.temp_allocator)
+	copy(blob,[]byte{0x89,'P','N','G',0x0d,0x0a,0x1a,0x0a})
+	x:=u32(2463534242);for i in 8..<len(blob) {x~=x<<13;x~=x>>17;x~=x<<5;blob[i]=byte(x)}
+	blob64,_:=base64.encode(blob,allocator=context.temp_allocator)
+	files:=json.Object{"index.html"=json.Object{"text"=json.String("<!doctype html><img src=photo.png>")},"photo.png"=json.Object{"base64"=json.String(blob64)}}
+	response:=mcp_resource_heap_call(h,headers,"artifacts.create",json.Object{"request_id"=json.String("bundle_large"),"name"=json.String("Large"),"entry"=json.String("index.html"),"files"=files})
+	result:=mcp_task_test_output(t,response);if result==nil do return
+	row:=mcp_resource_first(t,h,headers,"artifacts.get",json.Object{"artifact_id"=result["resource_id"],"include_content"=json.Boolean(true)});if row==nil do return
+	encoded,_:=row["content_base64"].(json.String)
+	archive,_:=base64.decode(string(encoded),allocator=context.temp_allocator)
+	packed,_:=hb.html_bundle_from_entry_files("index.html",files,context.temp_allocator)
+	testing.expectf(t,len(archive)>3*1024*1024 && string(archive)==string(packed.zip),"large download byte-exact (%d vs %d)",len(archive),len(packed.zip))
 }

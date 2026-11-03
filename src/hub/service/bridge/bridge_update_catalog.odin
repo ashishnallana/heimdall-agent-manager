@@ -6,6 +6,8 @@ import "core:os"
 import "core:strconv"
 import "core:strings"
 import "core:sync"
+import "core:thread"
+import "core:time"
 import domain "odin_test:hub/domain"
 
 Bridge_Manifest_Target_Wire :: struct {
@@ -42,10 +44,16 @@ Bridge_Update_Info :: struct {
 
 Bridge_Update_Catalog :: struct {
 	// Wiring supplies the transport. Nil means an offline manifest-only catalog.
+	// Only bridge_catalog_refresh calls it; requests read the snapshot.
 	release_get: Bridge_Catalog_Get,
-	cache_enabled: bool,
-	cache_mutex: sync.Mutex,
-	cache: [14]Bridge_Catalog_Cache_Entry,
+	snapshot_mutex: sync.Mutex,
+	snapshot: [BRIDGE_CATALOG_SLOTS]Bridge_Catalog_Entry, // snapshot_mutex
+	// Background refresher (bridge_catalog_refresher_start/stop).
+	refresh_interval: time.Duration, // 0 = BRIDGE_CATALOG_REFRESH_INTERVAL
+	refresher: ^thread.Thread,
+	refresher_mutex: sync.Mutex,
+	refresher_cond: sync.Cond,
+	refresher_stop: bool, // refresher_mutex
 	manifest_path:         string,
 	override_version:      string,
 	override_commit_sha:   string,

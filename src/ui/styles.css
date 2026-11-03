@@ -3,6 +3,8 @@
 
 /* Design system: page titles, section headings and agent replies are set in the serif. */
 .text-display,
+.text-headline,
+.text-headline-sm,
 .text-heading {
   font-family: var(--font-display);
 }
@@ -1022,6 +1024,27 @@ body {
   .heimdall-pane-enter,
   .heimdall-pane-exit {
     animation: none;
+  }
+}
+
+/* Conversation launcher motion (tailwind.config.js `animation`). Under reduced
+   motion the entrances finish at once and the waiting pulse stops. Scoped to
+   these utilities so existing animations keep their own reduced-motion rules. */
+@media (prefers-reduced-motion: reduce) {
+  .animate-tok-swap,
+  .animate-menu-in,
+  .animate-pop,
+  .animate-fade-slide,
+  .animate-composer-swap,
+  .animate-sheet-in,
+  .animate-menu-out,
+  .animate-sheet-out,
+  .animate-fade-in,
+  .animate-fade-out {
+    animation-duration: 1ms !important;
+  }
+  .animate-breathe {
+    animation: none !important;
   }
 }
 

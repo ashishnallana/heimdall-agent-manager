@@ -1,7 +1,7 @@
 import { useRef, useState } from 'react';
 import { Button, Icon } from '@ui';
 import { useCreateArtifactMutation } from '../../api/endpoints';
-import { MAX_UPLOAD_BYTES } from '../ArtifactUpload';
+import { MAX_UPLOAD_BYTES, UPLOAD_TOO_LARGE_ERROR } from '../ArtifactUpload';
 import {
   artifactIdFromLink,
   artifactKindForFile,
@@ -55,7 +55,7 @@ export function AttentionComposer({
     const localId = `att_${counter.current}`;
     const name = artifactUploadName(file, 'attention-attachment');
     if (file.size > MAX_UPLOAD_BYTES) {
-      setAttachments((prev) => [...prev, { localId, name, status: 'error', id: '', link: '', error: 'File is too large' }]);
+      setAttachments((prev) => [...prev, { localId, name, status: 'error', id: '', link: '', error: UPLOAD_TOO_LARGE_ERROR }]);
       return;
     }
     setAttachments((prev) => [...prev, { localId, name, status: 'uploading', id: '', link: '', error: '' }]);
@@ -129,7 +129,7 @@ export function AttentionComposer({
             <li key={a.localId} className={`inline-flex items-center gap-1 rounded-full border px-2 text-[11px] ${a.status === 'error' ? 'border-danger-soft text-danger' : 'border-subtle text-muted'}`}>
               <Icon name={a.status === 'error' ? 'alert' : 'file'} size={12} />
               <span className="max-w-[160px] truncate">{a.status === 'uploading' ? 'Uploading…' : a.status === 'error' ? a.error : a.name}</span>
-              <button type="button" aria-label="Remove attachment" className="text-faint hover:text-primary" onClick={() => setAttachments((prev) => prev.filter((x) => x.localId !== a.localId))}>
+              <button type="button" data-debug-id={`${debugId}-remove-${a.localId}`} aria-label="Remove attachment" className="text-faint hover:text-primary" onClick={() => setAttachments((prev) => prev.filter((x) => x.localId !== a.localId))}>
                 <Icon name="close" size={10} />
               </button>
             </li>

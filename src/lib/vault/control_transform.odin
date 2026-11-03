@@ -73,6 +73,12 @@ control_record_json :: proc(kr:^Vault_Keyring,kind:Control_Record_Kind,record:js
 		append(&opened,plain);out[key]=json.String(plain)
 	}
 	if kind==.Artifact {
+		if value,present:=out["content_base64"];present {
+			token,typed:=value.(json.String)
+			if _,text:=out["content"];text || !typed do return "",false
+			encoded,ok:=control_artifact_bundle_open(kr,record,string(token));if !ok do return "",false
+			append(&opened,encoded);out["content_base64"]=json.String(encoded)
+		}
 		if value,present:=out["content"];present {
 			text,typed:=value.(json.String)
 			if !typed || !control_artifact_type_ok(out) || !utf8.valid_string(string(text)) || len(text)>65536 || strings.contains(string(text),"\x00") do return "",false

@@ -31,13 +31,14 @@ test_recheck_http_routes_auth_and_result :: proc(t: ^testing.T) {
 	denied := recheck_task_handler(&f.th, req)
 	testing.expect_value(t, denied.status, 403)
 
-	// The owner gets the result: ready, no worker row → a reason, no change.
+	// The first re-check persists the missing-worker placement observation.
+	// Subsequent re-checks are idempotent, with the same waiting reason.
 	resp := recheck_task_handler(&f.th, wire_cookie_request(f, "POST", path, `{}`))
 	testing.expect_value(t, resp.status, 200)
-	testing.expect(t, strings.contains(resp.body, `"changed":false`), resp.body)
-	testing.expect(t, strings.contains(resp.body, `"actions":[]`), resp.body)
+	testing.expect(t, strings.contains(resp.body, `"changed":true`), resp.body)
+	testing.expect(t, strings.contains(resp.body, `"actions":["placement failures reconciled"]`), resp.body)
 	testing.expect(t, strings.contains(resp.body, `no fleet row holds the worker role`), resp.body)
-	testing.expect(t, strings.contains(resp.body, `"message":"nothing to change: `), resp.body)
+	testing.expect(t, strings.contains(resp.body, `"message":"placement failures reconciled"`), resp.body)
 	testing.expect(t, strings.contains(resp.body, `"task":{`), resp.body)
 
 	// The chain-less alias resolves the task's chain itself.

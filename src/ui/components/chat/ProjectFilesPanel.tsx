@@ -512,7 +512,7 @@ export default function ProjectFilesPanel({
     return chainDetailQuery.data?.chain?.directories || [];
   }, [propDirectories, chainDetailQuery.data?.chain?.directories]);
 
-  const bridgesQuery = useListBridgesQuery(undefined, { pollingInterval: 120000 });
+  const bridgesQuery = useListBridgesQuery(undefined);
   const bridges = useMemo(() => bridgesQuery.data?.bridges || [], [bridgesQuery.data?.bridges]);
 
   const [activeDirectoryId, setActiveDirectoryId] = useState<string>('primary');

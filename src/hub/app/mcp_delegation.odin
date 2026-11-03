@@ -13,7 +13,6 @@ import mcp "odin_test:hub/service/mcp"
 import auth_service "odin_test:hub/service/auth"
 import vd "odin_test:hub/service/vault_directory"
 import vault "odin_test:lib/vault"
-import tc "odin_test:hub/service/taskchain"
 
 configure_mcp_delegation :: proc(graph: ^App_Graph) -> (bool, string) {
 	data, err := os.read_entire_file(graph.config.mcp_oauth_key_file, context.temp_allocator)
@@ -50,7 +49,7 @@ configure_mcp_delegation :: proc(graph: ^App_Graph) -> (bool, string) {
 	graph.mcp_delegation={repo=&graph.mcp_repository,keys=keys,issuer=origin,resource=strings.concatenate({origin,"/api/v1/mcp"},runtime.heap_allocator()),clock=&graph.clock,authority_ctx=graph,authority=mcp_account_authority}
 	mcp.init(&graph.mcp_spike) // bounded transient pre-login request handles only
 	graph.mcp_delegation_handlers={auth=&graph.auth,directory=&graph.vault_directory,grant_directory=&graph.mcp_vault_view,service=&graph.mcp_delegation,login_requests=&graph.mcp_spike,origin=origin}
-	graph.mcp_control_handlers={delegation=&graph.mcp_delegation_handlers,control={chains=&graph.taskchains,agents=&graph.agents,providers=&graph.providers,bridges=&graph.repos.bridges},bus=&graph.event_bus,bridge_ctx=graph,bridge_transform=mcp_bridge_transform,create_ctx=graph,create=mcp_create_chain}
+	graph.mcp_control_handlers={delegation=&graph.mcp_delegation_handlers,control={chains=&graph.taskchains,agents=&graph.agents,providers=&graph.providers,bridges=&graph.repos.bridges},bus=&graph.event_bus,bridge_ctx=graph,bridge_transform=mcp_bridge_transform,create_ctx=graph,create=mcp_create_chain,message=mcp_send_chain_message}
 	graph.mcp_control_handlers.comment=mcp_comment_task
 	graph.mcp_control_handlers.mutate_task=mcp_mutate_task
 	graph.mcp_control_handlers.mutate_catalog=mcp_mutate_catalog
@@ -63,16 +62,6 @@ configure_mcp_delegation :: proc(graph: ^App_Graph) -> (bool, string) {
 	graph.mcp_control_handlers.control.resource_page=sqlite.mcp_resource_refs
 	valid=true
 	return true,""
-}
-
-mcp_create_chain :: proc(ctx:rawptr,owner,title,description:string)->(string,bool) {
-	graph:=(^App_Graph)(ctx)
-	impl:sqlite.Taskchain_Repo_SQLite
-	repo:=sqlite.new_taskchain_repository(&impl,&graph.mcp_repository_impl.conn)
-	service:=graph.taskchains
-	service.repo=&repo
-	chain,ok,err:=tc.create_chain(&service,mcp.control_auth(owner),{title=title,description=description})
-	return string(chain.chain_id),ok && err.code==.None
 }
 
 mcp_account_authority :: proc(ctx: rawptr, grant: domain.MCP_Record) -> (bool, domain.Domain_Error) {

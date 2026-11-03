@@ -412,6 +412,16 @@ export async function encryptVaultText(plaintext: string, keyring?: VaultKeyring
   }
 }
 
+/**
+ * Byte form of encryptVaultText for binary content (html-bundle ZIPs): seals the bytes
+ * exactly, without text encoding, so decryptVaultBytes returns them byte-identical.
+ * The caller keeps ownership of `plaintext`.
+ */
+export async function encryptVaultBytes(plaintext: Uint8Array, keyring?: VaultKeyring | null): Promise<string> {
+  const kr = requireKeyring(keyring);
+  return sealVaultEnvelope(plaintext, currentKey(kr), kr.vaultId, kr.currentEpoch);
+}
+
 // ── File write v3 (finding N4 + P4 root binding) ──────────────────────────────
 // File content sent for a bridge to write uses the v2 token format under the current
 // epoch key with AAD

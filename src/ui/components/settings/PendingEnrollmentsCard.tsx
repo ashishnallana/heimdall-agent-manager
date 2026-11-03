@@ -1,41 +1,35 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
+import { useDispatch } from 'react-redux';
 import { Button, Text } from '@ui';
-import {
-  cancelBridgeEnrollment,
-  fetchPendingBridgeEnrollments,
-  type PendingBridgeEnrollment,
-} from '../../api/endpoints/bridges';
+import { heimdallApi } from '../../api/heimdallApi';
+import { useListBridgesWithPendingQuery } from '../../api/endpoints/bridgeSupport';
+import { cancelBridgeEnrollment, selectPendingBridgeEnrollments } from '../../api/endpoints/bridges';
 
-/** Detect enrollments started elsewhere, and observe commit or rollback. */
-const PENDING_REFRESH_MS = 10_000;
+/**
+ * Fallback only: the hub announces every enrollment start, commit and rollback as
+ * resource_changed bridge "bridge_enrollment_changed", which refetches this list
+ * (wsInvalidation.ts). The poll covers a missed event, and only while the page is
+ * visible (skipPollingIfUnfocused).
+ */
+export const PENDING_FALLBACK_POLL_MS = 60_000;
 
 /**
  * REQ-EA-6: bridges approved but not enrolled yet. A bridge is enrolled only once
  * its vault key is delivered; until then it is listed here as "Enrolling…" and
  * nowhere else. Replacements remain usable while their pending attempt is shown.
- * Poll even from an empty list so attempts started elsewhere become visible.
+ * Subscribed even from an empty list so attempts started elsewhere become visible.
  */
-export default function PendingEnrollmentsCard({ refreshKey }: { refreshKey?: unknown }) {
-  const [pending, setPending] = useState<PendingBridgeEnrollment[]>([]);
+export default function PendingEnrollmentsCard() {
+  const dispatch = useDispatch();
+  const query = useListBridgesWithPendingQuery(undefined, {
+    pollingInterval: PENDING_FALLBACK_POLL_MS,
+    skipPollingIfUnfocused: true,
+    refetchOnFocus: true,
+  });
+  // Best-effort: the main bridge list reports load failures.
+  const pending = useMemo(() => selectPendingBridgeEnrollments(query.data?.bridges || []), [query.data]);
   const [cancelling, setCancelling] = useState('');
   const [error, setError] = useState('');
-
-  const load = useCallback(async () => {
-    try {
-      setPending(await fetchPendingBridgeEnrollments());
-    } catch {
-      // Best-effort: the main bridge list reports load failures.
-    }
-  }, []);
-
-  useEffect(() => {
-    void load();
-  }, [load, refreshKey]);
-
-  useEffect(() => {
-    const timer = setInterval(() => void load(), PENDING_REFRESH_MS);
-    return () => clearInterval(timer);
-  }, [load]);
 
   const cancel = useCallback(
     async (bridgeId: string) => {
@@ -43,14 +37,16 @@ export default function PendingEnrollmentsCard({ refreshKey }: { refreshKey?: un
       setError('');
       try {
         await cancelBridgeEnrollment(bridgeId);
-        await load();
+        // A rollback removes a row and a committed race adds one: refresh every
+        // bridge list now rather than wait for the WebSocket event.
+        dispatch(heimdallApi.util.invalidateTags([{ type: 'Bridges', id: 'LIST' }]));
       } catch (err: any) {
         setError(String(err?.message || 'Could not cancel the enrollment'));
       } finally {
         setCancelling('');
       }
     },
-    [load],
+    [dispatch],
   );
 
   if (pending.length === 0) return null;
