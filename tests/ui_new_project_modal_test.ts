@@ -22,7 +22,9 @@ const NEW = '2026-11-02T10:00:00Z';
 
 type Entry = { name: string; is_dir: boolean; hidden?: boolean; modified_at?: string };
 type FileSpec = { content?: string; modified_at?: string; error?: { code: string; cause: string; message: string } };
-type Fs = { dirs: Record<string, Entry[]>; files?: Record<string, FileSpec>; failList?: boolean; truncated?: Record<string, boolean>; listDelayMs?: Record<string, number> };
+// hubSlugs: when set, POST /projects behaves like the hub's create (T17 review): the
+// owner's slugs persist across modal mounts and a clash gets the next -N suffix.
+type Fs = { dirs: Record<string, Entry[]>; files?: Record<string, FileSpec>; failList?: boolean; truncated?: Record<string, boolean>; listDelayMs?: Record<string, number>; hubSlugs?: string[] };
 type Call = { method: string; url: string; path: string; query: URLSearchParams; body: any };
 type Ctx = {
   doc: Document; win: any; calls: Call[]; created: string[];
@@ -87,6 +89,13 @@ async function withModal(fs: Fs, props: Record<string, unknown>, run: (ctx: Ctx)
       const chunk = spec.content!.slice(0, limit);
       const content = await encryptVaultText(chunk, getActiveVaultKey()!);
       return json({ ok: true, path, viewable: true, content, encoding: 'utf8', mime: 'text/markdown', size: spec.content!.length, modified_at: spec.modified_at, truncated: false, offset: 0, bytes_returned: chunk.length, eof: chunk.length >= spec.content!.length });
+    }
+    if (u.pathname.endsWith('/projects') && method === 'POST' && fs.hubSlugs) {
+      const taken = fs.hubSlugs;
+      let slug = String(body.slug || '');
+      for (let n = 2; taken.includes(slug); n += 1) slug = `${body.slug}-${n}`;
+      taken.push(slug);
+      return json({ project_id: `proj_${taken.length}`, name: body.name, slug, default_path: body.default_path, vcs_kind: body.vcs_kind });
     }
     if (u.pathname.endsWith('/projects') && method === 'POST') return json({ project_id: 'proj_new', name: body.name, default_path: body.default_path, vcs_kind: body.vcs_kind });
     return json({});
@@ -192,6 +201,25 @@ test('Browse picks a folder on the selected bridge; name, colocated jj and paylo
     assert.equal(body.slug, 'heimdall', 'the slug is sent explicitly, in plaintext (T17)');
     assert.deepEqual(ctx.created, ['proj_new']);
   });
+});
+
+test('two projects from same-named folders both create (the hub suffixes the slug, T17 review)', async () => {
+  const hubSlugs: string[] = [];
+  const fs: Fs = { dirs: { [`${ROOT}/a/app`]: [{ name: '.git', is_dir: true, hidden: true }], [`${ROOT}/b/app`]: [{ name: '.git', is_dir: true, hidden: true }] }, hubSlugs };
+  const sent: string[] = [];
+  for (const folder of [`${ROOT}/a/app`, `${ROOT}/b/app`]) {
+    await withModal(fs, {}, async (ctx) => {
+      await enterFolder(ctx, folder);
+      assert.equal(field(ctx.doc, 'new-convo-project-name-input').value, 'app');
+      assert.ok(!createButton(ctx.doc).disabled, 'nothing client-side blocks a second project with the same folder name');
+      await click(ctx, createButton(ctx.doc));
+      await until(ctx, () => ctx.created.length === 1, `onCreated for ${folder}`);
+      sent.push(lastCreate(ctx)!.body.slug);
+      assert.ok(!/could not be saved/i.test(squash(ctx.doc.body.textContent)), 'no save error is shown');
+    });
+  }
+  assert.deepEqual(sent, ['app', 'app'], 'the modal sends the folder-derived slug both times');
+  assert.deepEqual(hubSlugs, ['app', 'app-2'], 'the second project gets a distinct slug');
 });
 
 test('VCS: .git only -> git, neither -> none, and the user can override it', async () => {

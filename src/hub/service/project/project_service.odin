@@ -1,5 +1,6 @@
 package project
 
+import "core:fmt"
 import "core:strings"
 import contracts "odin_test:contracts"
 import domain "odin_test:hub/domain"
@@ -127,6 +128,7 @@ bridge_reply_refusal :: proc(reply, bridge_id: string) -> (ok: bool, err: domain
 // client-side when the vault is unlocked) is ciphertext, so it is never copied into
 // the slug: the slug comes from the last segment of default_path instead, lowercased
 // with every run outside [a-z0-9] turned into '-', or "project" when that is empty.
+// For an armored name the result is always allocated with allocator.
 default_project_slug :: proc(name, default_path: string, allocator := context.allocator) -> string {
 	if !domain.is_vault_armored(name) do return name
 	trimmed := strings.trim_right(default_path, "/\\")
@@ -147,7 +149,7 @@ default_project_slug :: proc(name, default_path: string, allocator := context.al
 	}
 	if strings.builder_len(b) == 0 {
 		strings.builder_destroy(&b)
-		return "project"
+		return strings.clone("project", allocator)
 	}
 	return strings.to_string(b)
 }
@@ -158,9 +160,72 @@ create :: proc(service: ^Project_Service, auth: contracts.Auth_Context, input: C
 	if input.name == "" do return domain.Project{}, false, domain.domain_error(.Validation_Failed, "project name is required")
 	if input.default_path == "" do return domain.Project{}, false, domain.domain_error(.Validation_Failed, "default_path is required")
 	now := platform.clock_now(service.clock)
-	slug := input.slug; if slug == "" do slug = default_project_slug(input.name, input.default_path)
-	project := domain.Project{project_id = domain.Project_ID(platform.generate_id(service.ids, "proj_")), owner_user_id = owner, name = input.name, slug = slug, description = input.description, repo_url = input.repo_url, vcs_kind = input.vcs_kind, default_path = input.default_path, created_at = now, updated_at = now}
-	return iface.project_save(service.projects, project)
+	base := input.slug
+	// default_project_slug allocates only for an armored name (a plaintext name is returned as is).
+	owns_base := base == "" && domain.is_vault_armored(input.name)
+	if base == "" do base = default_project_slug(input.name, input.default_path)
+	project := domain.Project{project_id = domain.Project_ID(platform.generate_id(service.ids, "proj_")), owner_user_id = owner, name = input.name, slug = base, description = input.description, repo_url = input.repo_url, vcs_kind = input.vcs_kind, default_path = input.default_path, created_at = now, updated_at = now}
+	saved, saved_ok, save_err := save_with_unique_slug(service, project)
+	if owns_base && (!saved_ok || saved.slug != base) do delete(base)
+	return saved, saved_ok, save_err
+}
+
+// PROJECT_SLUG_SAVE_ATTEMPTS bounds the Conflict retries in save_with_unique_slug
+// (a concurrent create, or a row the owner listing could not see).
+PROJECT_SLUG_SAVE_ATTEMPTS :: 5
+
+// save_with_unique_slug saves a new project whose slug is unique for its owner.
+// projects has UNIQUE(owner_user_id, slug) and archived projects keep their row, so
+// two folders named "app", "My App" next to an existing "my-app", two non-Latin
+// names ("project") or re-creating an archived project would otherwise fail with a
+// bare Conflict. The owner's slugs (every state) are read first and the first free
+// candidate of base, base-2, base-3, ... is used, whether the base came from the
+// client or from default_project_slug. A Conflict on save (a race) moves on to the
+// next candidate; any other error is returned as is.
+save_with_unique_slug :: proc(service: ^Project_Service, project: domain.Project) -> (domain.Project, bool, domain.Domain_Error) {
+	base := project.slug
+	taken := owner_project_slugs(service, project.owner_user_id)
+	n := 1
+	last_err: domain.Domain_Error
+	for _ in 0 ..< PROJECT_SLUG_SAVE_ATTEMPTS {
+		candidate := base
+		for {
+			candidate = base if n == 1 else fmt.tprintf("%s-%d", base, n)
+			if candidate not_in taken do break
+			n += 1
+		}
+		attempt := project
+		attempt.slug = candidate if n == 1 else strings.clone(candidate)
+		saved, ok, err := iface.project_save(service.projects, attempt)
+		if ok do return saved, true, err
+		if n != 1 do delete(attempt.slug)
+		if err.code != .Conflict do return domain.Project{}, false, err
+		last_err = err
+		taken[candidate] = {}
+		n += 1
+	}
+	return domain.Project{}, false, last_err
+}
+
+// owner_project_slugs returns the set of slugs the owner already uses, archived
+// projects included. The set and its keys live in the temp allocator. A listing
+// error yields what was read so far; save_with_unique_slug then relies on its
+// Conflict retries (they also cover rows the created_at cursor skips).
+@(private = "file")
+owner_project_slugs :: proc(service: ^Project_Service, owner: domain.User_ID) -> map[string]struct{} {
+	context.allocator = context.temp_allocator
+	taken := make(map[string]struct{})
+	cursor := ""
+	for {
+		page, err := iface.project_list_by_owner(service.projects, owner, 200, cursor)
+		if err.code != .None || len(page) == 0 do break
+		for p in page do taken[p.slug] = {}
+		if len(page) < 200 do break
+		next := page[len(page) - 1].created_at
+		if next == cursor do break
+		cursor = next
+	}
+	return taken
 }
 
 get :: proc(service: ^Project_Service, auth: contracts.Auth_Context, project_id: domain.Project_ID) -> (domain.Project, bool, domain.Domain_Error) {
