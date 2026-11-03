@@ -29,9 +29,6 @@ import contracts "odin_test:contracts"
 
 TRANSCRIPT_TAIL_MAX :: 64 * 1024
 
-USAGE_SOURCE_CLAUDE :: "claude_transcript"
-USAGE_SOURCE_CODEX :: "codex_rollout"
-
 Transcript_Usage :: contracts.Ext_Usage
 
 // transcript_tail reads at most limit bytes from the end of path. When the read
@@ -70,6 +67,14 @@ transcript_tail :: proc(path: string, limit := TRANSCRIPT_TAIL_MAX) -> (data: []
 	copy(out, data)
 	delete(buf)
 	return out, offset == 0, true
+}
+
+USAGE_SOURCE_CLAUDE :: "claude_transcript"
+
+// claude_usage_reader is the Claude entry of the usage-source table
+// (usage_source.odin): it takes the hook's transcript_path itself.
+claude_usage_reader :: proc(root: json.Object) -> (Transcript_Usage, bool) {
+	return claude_transcript_usage(json_get_string(root, "transcript_path"))
 }
 
 // claude_transcript_usage reads the Claude transcript tail. See file header.
@@ -167,6 +172,13 @@ claude_assistant_usage :: proc(value: json.Value) -> (usage: json.Object, msg_id
 claude_usage_int :: proc(obj: json.Object, key: string) -> i64 {
 	n, _ := json_get_int(obj, key)
 	return i64(max(n, 0))
+}
+
+USAGE_SOURCE_CODEX :: "codex_rollout"
+
+// codex_usage_reader is the Codex entry of the usage-source table.
+codex_usage_reader :: proc(root: json.Object) -> (Transcript_Usage, bool) {
+	return codex_transcript_usage(json_get_string(root, "transcript_path"))
 }
 
 // codex_transcript_usage reads the Codex rollout tail. See file header.

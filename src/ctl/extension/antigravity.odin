@@ -396,6 +396,7 @@ antigravity_map_hook :: proc(raw: string, ts: string, permission_timeout_ms := 0
 			pb_str(&a, "reason", term_reason)
 			if fully_idle, ok := root["fullyIdle"].(json.Boolean); ok do pb_bool(&a, "fully_idle", bool(fully_idle))
 			eb := ext_event_begin("activity", ts, root, ANTIGRAVITY_PROVIDER, ANTIGRAVITY_EXT_VERSION)
+			ext_event_finish_usage(&eb, ANTIGRAVITY_PROVIDER, root, true) // no reader: no usage
 			append(&out.events, ext_event_end(&eb, pb_done(&a)))
 		}
 	}

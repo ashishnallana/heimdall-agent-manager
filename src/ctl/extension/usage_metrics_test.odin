@@ -429,3 +429,54 @@ test_transcript_usage_latency_on_10mb_transcript :: proc(t: ^testing.T) {
 		size, base, full, added, read_one)
 	testing.expectf(t, added < 50 * time.Millisecond, "added hook latency %v must stay far below the 500 ms RPC budget", added)
 }
+
+// ---- usage-source table -----------------------------------------------------
+
+@(test)
+test_usage_source_table_covers_readers_and_antigravity_has_none :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	defer free_all(context.temp_allocator)
+	dir := scratch_dir(t, "table")
+	defer _ = os.remove_all(dir)
+	claude_path := fmt.tprintf("%s/claude.jsonl", dir)
+	codex_path := fmt.tprintf("%s/codex.jsonl", dir)
+	write_file(t, claude_path, without_first_line(CLAUDE_TAIL))
+	write_file(t, codex_path, CODEX_TAIL)
+	missing := fmt.tprintf("%s/missing.jsonl", dir)
+
+	Case :: struct { provider, path, source: string, ctx: i64 }
+	for c in ([]Case{
+		{CLAUDE_PROVIDER, claude_path, USAGE_SOURCE_CLAUDE, CLAUDE_CTX},
+		{CODEX_PROVIDER, codex_path, USAGE_SOURCE_CODEX, CODEX_CTX},
+	}) {
+		reader, has := usage_reader_for(c.provider)
+		testing.expectf(t, has, "%s must have a usage reader", c.provider)
+		if !has do continue
+		root := fmt.tprintf(`{{"session_id":"s","transcript_path":"%s"}}`, c.path)
+		val, perr := json.parse_string(root)
+		testing.expect_value(t, perr, json.Error.None)
+		u, ok := reader(val.(json.Object))
+		testing.expectf(t, ok, "%s fixture must yield usage", c.provider)
+		testing.expect_value(t, u.context_tokens, c.ctx)
+		testing.expect_value(t, u.source, c.source)
+
+		// Reader present but transcript unreadable: counter instead of usage.
+		eb := ext_event_begin("activity", UTS, val.(json.Object), c.provider, "x")
+		bad, _ := json.parse_string(fmt.tprintf(`{{"session_id":"s","transcript_path":"%s"}}`, missing))
+		ext_event_finish_usage(&eb, c.provider, bad.(json.Object), true)
+		ev := parse_one(t, ext_event_end(&eb, "{}"))
+		testing.expect(t, !ev.has_usage && ev.usage_unavailable)
+		// want_usage=false emits nothing.
+		eb2 := ext_event_begin("activity", UTS, val.(json.Object), c.provider, "x")
+		ext_event_finish_usage(&eb2, c.provider, bad.(json.Object), false)
+		ev2 := parse_one(t, ext_event_end(&eb2, "{}"))
+		testing.expect(t, !ev2.has_usage && !ev2.usage_unavailable)
+	}
+	_, has := usage_reader_for(ANTIGRAVITY_PROVIDER)
+	testing.expect(t, !has, "antigravity has no usage reader")
+	root, _ := json.parse_string(`{"session_id":"s","transcript_path":"/x"}`)
+	eb := ext_event_begin("activity", UTS, root.(json.Object), ANTIGRAVITY_PROVIDER, "x")
+	ext_event_finish_usage(&eb, ANTIGRAVITY_PROVIDER, root.(json.Object), true)
+	ev := parse_one(t, ext_event_end(&eb, "{}"))
+	testing.expect(t, !ev.has_usage && !ev.usage_unavailable)
+}

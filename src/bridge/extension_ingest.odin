@@ -32,6 +32,8 @@ Bridge_Ext_Instance_State :: struct {
 	model:             string,
 	provider_profile:  string,
 	resolved_model:    string,
+	// session_id whose usage_unavailable was already logged (once per session).
+	usage_dark_logged_session: string,
 }
 
 Bridge_Ext_Ingest_Result :: struct {
@@ -146,6 +148,11 @@ bridge_ext_ingest :: proc(rec: Bridge_Local_Agent_Token_Record, params: string, 
 		s.last_event_at_ms = now
 		s.events_accepted += 1
 		token_changed := bridge_ext_token_usage_apply(&s.token_usage, ev, now)
+		if ev.usage_unavailable && ev.session_id != "" && s.usage_dark_logged_session != ev.session_id {
+			delete(s.usage_dark_logged_session)
+			s.usage_dark_logged_session = strings.clone(ev.session_id)
+			fmt.eprintfln("extension: %s transcript usage unavailable for instance %s session %s; context usage will not be reported (logged once per session)", ev.provider, instance_id, ev.session_id)
+		}
 		sync.mutex_unlock(&bridge_ext_mutex)
 		// Only the throttled snapshot goes upstream (agent_instance_status.token_usage).
 		if token_changed do bridge_ext_token_enqueue_due(now, instance_id)
@@ -291,6 +298,7 @@ bridge_ext_note_launch :: proc(instance_id, provider, model, provider_profile: s
 	sync.mutex_lock(&bridge_ext_mutex)
 	s := bridge_ext_state_locked(instance_id)
 	if s != nil {
+		delete(s.usage_dark_logged_session); s.usage_dark_logged_session = ""
 		delete(s.launch_provider); delete(s.model); delete(s.provider_profile); delete(s.resolved_model)
 		s.launch_provider = strings.clone(provider)
 		s.model = strings.clone(model)
