@@ -402,6 +402,19 @@ ctxwin_write_str :: proc(b: ^strings.Builder, key, value: string) {
 	strings.write_string(b, `"`)
 }
 
+// ctxwin_instance_live reports whether an instance is still running. Stopped,
+// failed or unreachable instances keep their extension state (final usage
+// snapshots) but must not drive the settings' reported-window overlay.
+@(private = "file")
+ctxwin_instance_live :: proc(instance_id: string) -> bool {
+	inst, ok := bridge_runtime_instance_snapshot(instance_id)
+	if !ok do return false
+	switch inst.runtime_status {
+	case "stopped", "stopping", "failed", "unreachable": return false
+	}
+	return true
+}
+
 // bridge_context_window_state_json renders the list payload members (no braces):
 // thresholds, the shipped entries, the overrides and the resolved windows.
 bridge_context_window_state_json :: proc(b: ^strings.Builder, extra_provider: string = "", extra_model: string = "") {
@@ -440,6 +453,7 @@ bridge_context_window_state_json :: proc(b: ^strings.Builder, extra_provider: st
 		if r.source != .Override {
 			for inst in insts {
 				if inst.provider != p.provider || inst.model != p.model || inst.reported_window <= 0 do continue
+				if !ctxwin_instance_live(inst.agent_instance_id) do continue
 				if reported == 0 || (inst.window_mismatch && !mismatch) {
 					reported, mismatch = inst.reported_window, inst.window_mismatch
 				}

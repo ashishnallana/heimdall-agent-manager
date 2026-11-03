@@ -348,6 +348,57 @@ test_ctxwin_state_json_carries_reported_window_and_mismatch :: proc(t: ^testing.
 	testing.expect(t, !strings.contains(row, "reported_window"), row)
 }
 
+// A stopped instance keeps its final usage but must not drive the settings
+// overlay: stopped-only shows no reported fields; a stopped mismatching
+// instance never beats a live matching one.
+@(test)
+test_ctxwin_state_json_ignores_stopped_instances :: proc(t: ^testing.T) {
+	sync.mutex_lock(&bridge_test_config_mutex); defer sync.mutex_unlock(&bridge_test_config_mutex)
+	saved, scratch := ctxwin_scratch_begin("liststopped")
+	defer ctxwin_scratch_end(saved, scratch)
+
+	old_id, live_id := "inst_test_ctxwin_stopped_old", "inst_test_ctxwin_stopped_live"
+	defer ctxwin_forget_launch(old_id)
+	defer ctxwin_forget_launch(live_id)
+	bridge_runtime_mark_start_success(old_id)
+	bridge_ext_note_launch(old_id, "codex", "gpt-6.1-sol", "")
+	ingest :: proc(id: string, window: int, now: i64) {
+		raw := fmt.tprintf(`{{"schema":"ham.ext.v1","provider":"codex","ext_version":"0.1.0","event":"tool.end","ts":"2026-11-02T06:00:%02dZ","session_id":"s-st","tool":{{"name":"Read","use_id":"tu_%d"}},"usage":{{"context_tokens":1000,"context_window":%d,"source":"codex_transcript"}}}}`, int(now % 50), int(now), window)
+		res := bridge_ext_ingest(Bridge_Local_Agent_Token_Record{agent_instance_id = id, instance_token = "tok_test", role = .Agent}, raw, now)
+		bridge_ext_ingest_result_destroy(&res)
+	}
+	window_row :: proc() -> string {
+		b := strings.builder_make(context.temp_allocator)
+		bridge_context_window_state_json(&b)
+		s := strings.to_string(b)
+		w := strings.index(s, `"windows":[`)
+		if w < 0 do return ""
+		i := strings.index(s[w:], `{"provider":"codex","model":"gpt-6.1-sol"`)
+		if i < 0 do return ""
+		i += w
+		j := strings.index_byte(s[i:], '}')
+		return s[i:i + j + 1]
+	}
+	now := bridge_runtime_now_ms()
+	ingest(old_id, 999_999, now)
+	row := window_row()
+	testing.expect(t, strings.contains(row, `"source":"reported","reported_window":999999`), row) // running: overlay applies
+
+	bridge_runtime_set_status(old_id, "stopped", "idle")
+	row = window_row()
+	testing.expect(t, strings.contains(row, `"source":"config"`) || !strings.contains(row, "reported"), row)
+	testing.expect(t, !strings.contains(row, "reported_window"), row)
+	testing.expect(t, !strings.contains(row, "window_mismatch"), row)
+
+	bridge_runtime_mark_start_success(live_id)
+	bridge_ext_note_launch(live_id, "codex", "gpt-6.1-sol", "")
+	ingest(live_id, 490_000, now + 1) // within 10% of 475000
+	row = window_row()
+	testing.expect(t, strings.contains(row, `"source":"reported","reported_window":490000`), row)
+	testing.expect(t, !strings.contains(row, "window_mismatch"), row)
+	testing.expect(t, !strings.contains(row, "999999"), row)
+}
+
 // The shipped map (R1 research, docs/transient-extension-signals.md): every
 // model id seen on our bridges resolves to its documented window. Claude 5.x
 // and Opus 4.7+ run at a native 1M in Claude Code; opus/sonnet-4-6 and
