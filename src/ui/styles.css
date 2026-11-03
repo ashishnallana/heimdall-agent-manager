@@ -49,6 +49,14 @@
      why a box that uses it is unchanged on desktop. See the BOTTOM-PINNED note below. */
   --app-viewport-bottom-offset: 0px;
 
+  /* REQ-VIEWPORT-ORIGIN-1: where the visible region BEGINS inside the layout viewport
+     (`visualViewport.offsetTop`, floored at 0), written by `appViewportHeight.ts` from the same
+     sample as the two above. Tabbed iOS Safari pans the visual viewport ~84px down with the
+     keyboard up even though `body` is fixed, so a shell anchored at `top: 0` sat that far
+     above what the user could see. `0px` is the fallback and the value on every surface that
+     does not pan. See the ORIGIN note below for how it is applied. */
+  --app-viewport-offset-top: 0px;
+
   font-family: var(--fd-font-body);
   background: var(--color-canvas, var(--fd-canvas));
 }
@@ -108,7 +116,29 @@ body,
  * No keyboard detection, no scroll management, no focus handlers — those were all tried and
  * deleted in REQ-KBD-3. Do not reintroduce them.
  */
+/*
+ * ---------------------------------------------------------------------------------------
+ * ORIGIN — THE VISIBLE REGION DOES NOT ALWAYS START AT 0. (REQ-VIEWPORT-ORIGIN-1)
+ * ---------------------------------------------------------------------------------------
+ * The height above is right; the anchor was not. With the keyboard up, tabbed iOS Safari
+ * pans the visual viewport inside the layout viewport (measured: innerHeight 630, visible
+ * 377 tall starting at 84), so a box at `top: 0` with the correct height still showed 84px
+ * of empty canvas above the keyboard and hid its own top 84px. So every box sized to the
+ * visible region is also PLACED at its origin:
+ *
+ *     body                    top: var(--app-viewport-offset-top)   (the in-flow tree)
+ *     .app-viewport-height    top: var(--app-viewport-offset-top)   (every fixed shell/overlay)
+ *
+ * Applied with `top`, NEVER `transform`: a transformed ancestor becomes the containing block
+ * of every fixed descendant (portalled menus, the mobile sidebar, overlays) and would move
+ * them a second time. Each fixed box resolves `top` against the layout viewport on its own,
+ * so `body`'s offset and `AppShell`'s offset do not add up. This utility therefore belongs
+ * ONLY on `position: fixed` boxes — which is how every caller already spells it
+ * (`fixed inset-x-0 top-0 app-viewport-height`); it overrides the `top-0` there because it
+ * is declared after `@tailwind utilities`. `tests/ui_app_viewport_origin_test.ts` guards that.
+ */
 .app-viewport-height {
+  top: var(--app-viewport-offset-top);
   height: var(--app-viewport-height);
   max-height: var(--app-viewport-height);
 }
@@ -211,6 +241,9 @@ body {
      pinning the body removes the document scroll box entirely. */
   position: fixed;
   inset: 0;
+  /* REQ-VIEWPORT-ORIGIN-1: follow the visible region's origin (see ORIGIN above). `bottom`
+     from `inset` is ignored because the height is set, so the box is origin..origin+height. */
+  top: var(--app-viewport-offset-top);
   background: var(--color-canvas, var(--fd-canvas));
   color: var(--color-text-primary, var(--fd-ink));
 }
@@ -491,11 +524,14 @@ body {
 
 /* REQ-FROST-1: bottom padding of the floating composer form. The dock itself is plain CSS
    (`absolute bottom-0` in a shell sized `var(--app-viewport-height)`), so it already ends where
-   the software keyboard begins. The home-indicator safe area is only needed while the dock
-   sits at the screen edge: once a keyboard occludes `--app-viewport-bottom-offset` px, the
-   subtraction goes negative and the floor of 0.75rem wins, so no gap opens above the keys. */
+   the visible region ends. The padding is static geometry only: a 0.75rem floor or the
+   home-indicator safe area, whichever is larger. It deliberately does NOT read
+   `--app-viewport-bottom-offset`: that value is the occluded height, i.e. an inferred keyboard
+   height, and the composer must not resize itself from it (user directive, morphing-composer
+   chain). A dock whose padding changed with the keyboard also changed its own height mid-raise,
+   which moved the transcript inset that tracks it. */
 .ui-float-dock-pad {
-  padding-bottom: max(0.75rem, calc(env(safe-area-inset-bottom, 0px) - var(--app-viewport-bottom-offset)));
+  padding-bottom: max(0.75rem, env(safe-area-inset-bottom, 0px));
 }
 
 /* REQ-FROST-1: a floating dock passes touches in the gaps around its cards through to

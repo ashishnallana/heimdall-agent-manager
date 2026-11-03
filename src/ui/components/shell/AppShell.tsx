@@ -1899,22 +1899,9 @@ function AuthenticatedShell({ user }: { user: AuthUser }) {
     };
   }, []);
 
-  // Clamp any rogue window scroll back to the origin. The app owns the full viewport
-  // (body is position: fixed), so a non-zero window offset can only come from a browser
-  // heuristic -- e.g. mobile WebKit scrolling the document to reveal a focused element or
-  // a control under the keyboard accessory bar -- and it permanently hides the top chrome.
-  useEffect(() => {
-    const clampWindowScroll = () => {
-      if (window.scrollY !== 0 || window.scrollX !== 0) {
-        window.scrollTo(0, 0);
-      }
-    };
-    window.addEventListener('scroll', clampWindowScroll, { passive: true });
-    clampWindowScroll();
-    return () => {
-      window.removeEventListener('scroll', clampWindowScroll);
-    };
-  }, []);
+  // No window-scroll clamp here. The body is position: fixed and the shell is placed at the
+  // visible region's origin (appViewportHeight.ts), so a WebKit reveal pan cannot hide the top
+  // chrome. Resetting window scroll would fight that pan and is a prohibited scroll reset.
 
   const actionsAccess = useActionsAccess();
   const primary = filterActionsNavEntries(NAV_ROUTES.filter((item) => item.group === 'primary'), actionsAccess);

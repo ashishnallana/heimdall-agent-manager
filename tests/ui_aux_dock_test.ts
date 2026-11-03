@@ -13,7 +13,9 @@ const tabContentSource = fs.readFileSync(path.join(REPO_ROOT, 'src/ui/components
 const artifactViewerSource = fs.readFileSync(path.join(REPO_ROOT, 'src/ui/components/ArtifactViewer.tsx'), 'utf8');
 
 test('mobile aux sheet stays above fixed shell chrome while it transitions', () => {
-  assert.match(auxDockSource, /fixed inset-0 z-\[70\].*translate-x-full/s);
+  // REQ-VIEWPORT-ORIGIN-1: the sheet is the visible region (origin + height), not `inset-0`.
+  assert.match(auxDockSource, /fixed inset-x-0 top-0 app-viewport-height z-\[70\].*translate-x-full/s);
+  assert.doesNotMatch(auxDockSource, /fixed inset-0 z-\[70\]/);
 });
 
 test('new tab launcher searches safe titles and requires explicit bridge choice when needed', () => {
