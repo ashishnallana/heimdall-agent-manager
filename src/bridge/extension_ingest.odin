@@ -298,7 +298,8 @@ bridge_ext_note_launch :: proc(instance_id, provider, model, provider_profile: s
 	sync.mutex_lock(&bridge_ext_mutex)
 	s := bridge_ext_state_locked(instance_id)
 	if s != nil {
-		delete(s.usage_dark_logged_session); delete(s.launch_provider); delete(s.model); delete(s.provider_profile); delete(s.resolved_model)
+		delete(s.usage_dark_logged_session); s.usage_dark_logged_session = ""
+		delete(s.launch_provider); delete(s.model); delete(s.provider_profile); delete(s.resolved_model)
 		s.launch_provider = strings.clone(provider)
 		s.model = strings.clone(model)
 		s.provider_profile = strings.clone(provider_profile)
