@@ -81,6 +81,7 @@ write_chain_token_usage_json :: proc(b: ^strings.Builder, chain_id: string, usag
 		write_chain_token_figures_json(b, agent.lifetime)
 		if agent.context_pct >= 0 {
 			strings.write_string(b, fmt.tprintf(",\"context\":{{\"pct\":%d,\"tokens\":%d,\"window\":%d", agent.context_pct, agent.context_tokens, agent.context_window))
+			if agent.context_estimate do write_json_str_field(b, "context_source", domain.AGENT_TOKEN_ESTIMATE_SOURCE)
 			write_json_str_field(b, "agent_instance_id", agent.context_instance_id)
 			strings.write_byte(b, '}')
 		}
@@ -112,6 +113,10 @@ write_chain_token_instance_json :: proc(b: ^strings.Builder, row: domain.Chain_T
 		if s.run_count > 0 do strings.write_string(b, fmt.tprintf(",\"run_count\":%d", s.run_count))
 		if row.context_pct >= 0 do strings.write_string(b, fmt.tprintf(",\"context_pct\":%d", row.context_pct))
 		if s.has_context do strings.write_string(b, fmt.tprintf(",\"context_tokens\":%d", s.context_tokens))
+		if row.context_estimate {
+			write_json_str_field(b, "context_source", domain.AGENT_TOKEN_ESTIMATE_SOURCE)
+			strings.write_string(b, fmt.tprintf(",\"estimated_context_tokens\":%d", row.context_tokens))
+		}
 		if s.context_window > 0 do strings.write_string(b, fmt.tprintf(",\"context_window\":%d", s.context_window))
 		if s.window_source != "" do write_json_str_field(b, "window_source", s.window_source)
 	}

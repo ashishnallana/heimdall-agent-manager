@@ -124,6 +124,8 @@ export function windowSourceLabel(source: WindowSource): string {
 export type ContextTrackingState = 'value' | 'waiting' | 'unsupported';
 
 export function contextTrackingState(usage: TokenUsageSnapshot): ContextTrackingState {
+  // A figure (provider or tool-traffic estimate) always renders, even when the provider lacks the usage capability.
+  if (usage.contextPct !== null) return 'value';
   if (usage.usageSupported === false) return 'unsupported';
   return usage.contextPct === null ? 'waiting' : 'value';
 }
