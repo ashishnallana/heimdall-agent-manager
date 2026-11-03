@@ -5,13 +5,13 @@ Supersedes `oom_t4`, which exhausted its attempt budget.
 
 ## Verdict
 
-**Confirmed: leak at `src/bridge/hub_command_dispatch.odin:690-716`** (`bridge_command_dispatch_worker`).
-The 14 dispatch worker threads (`BRIDGE_DISPATCH_WORKER_CLASSES`, `:142`) run every hub command for the life of the process. Handlers allocate from the per-thread `context.temp_allocator`, and nothing in the worker loop ever reset it. As a result, each worker retained every temp allocation it had ever made, plus every arena block grown for a large payload.
+**Confirmed (dominant leak): `src/bridge/hub_command_dispatch.odin:690-716`** (`bridge_command_dispatch_worker`).
+The 14 dispatch worker threads (`BRIDGE_DISPATCH_WORKER_CLASSES`, `:142`) run every hub command for the life of the process. Handlers allocate from the per-thread `context.temp_allocator`, and nothing in the worker loop ever reset it, so each worker retains every temp allocation it has made. The A/B below shows that this is the dominant ham-bridge leak under command load (1,420 MiB/h vs 23 MiB/h). A small residual remains (13–15 MiB/h post-warm-up over a short window) and is not yet explained.
 
-This explains all three riverwood observations:
-- **Growth tracks command volume rather than time:** ~5 MB/h when quiet, 60–150 MiB/h when busy.
-- **Step jumps the size of a payload:** +604 MiB within one minute at 07:31Z.
-- **RSS above the tracked heap:** oom_t4's tracking wrapper only covered `context.allocator`, not the temp arena.
+**Consistent with the riverwood observations, but not proven against them.** No riverwood command or payload attribution was captured.
+- **Growth follows activity:** ~5 MB/h while quiet versus 78–92 MiB/h over busy Prometheus segments and ~150 MiB/h in the 48-min live sample (oom_t2 fits). A per-command arena leak predicts exactly this.
+- **Step jumps (+108 MiB at 07:07Z, +604 MiB within one minute at 07:31Z):** a single large command can permanently grow a worker's arena by roughly its payload size. *Hypothesis:* this soak only used 4 MB payloads, and the commands behind those two jumps were not identified.
+- **RSS above oom_t4's tracked heap:** that tracking wrapper covered `context.allocator`, not the temp arena, so this leak was invisible to it.
 
 Fix (`f904c37b`): `free_all(context.temp_allocator)` after `bridge_command_dispatch_finish` in each iteration.
 `runtime.arena_free_all` frees every block except the first and resets it, so a large-payload block is returned to the OS.
