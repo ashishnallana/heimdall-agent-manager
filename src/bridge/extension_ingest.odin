@@ -32,7 +32,8 @@ Bridge_Ext_Instance_State :: struct {
 	model:             string,
 	provider_profile:  string,
 	resolved_model:    string,
-	// session_id whose usage_unavailable was already logged (once per session).
+	// session_id whose usage_unavailable was already logged (once per session;
+	// only logged when the provider hello advertised the usage capability).
 	usage_dark_logged_session: string,
 }
 
@@ -148,7 +149,7 @@ bridge_ext_ingest :: proc(rec: Bridge_Local_Agent_Token_Record, params: string, 
 		s.last_event_at_ms = now
 		s.events_accepted += 1
 		token_changed := bridge_ext_token_usage_apply(&s.token_usage, ev, now)
-		if ev.usage_unavailable && ev.session_id != "" && s.usage_dark_logged_session != ev.session_id {
+		if ev.usage_unavailable && s.token_usage.usage_supported && ev.session_id != "" && s.usage_dark_logged_session != ev.session_id {
 			delete(s.usage_dark_logged_session)
 			s.usage_dark_logged_session = strings.clone(ev.session_id)
 			fmt.eprintfln("extension: %s transcript usage unavailable for instance %s session %s; context usage will not be reported (logged once per session)", ev.provider, instance_id, ev.session_id)

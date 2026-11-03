@@ -496,6 +496,7 @@ test_ctxwin_usage_dark_log_state_survives_relaunch :: proc(t: ^testing.T) {
 	id := "inst_test_usage_dark_relaunch"
 	bridge_runtime_mark_start_success(id)
 	rec := Bridge_Local_Agent_Token_Record{agent_instance_id = id, instance_token = "tok_test", role = .Agent}
+	hello := `{"schema":"ham.ext.v1","provider":"claude","ext_version":"0.1.0","event":"hello","ts":"2026-11-02T05:59:00Z","payload":{"capabilities":["usage"]}}`
 	raw := `{"schema":"ham.ext.v1","provider":"claude","ext_version":"0.1.0","event":"tool.end","ts":"2026-11-02T06:00:00Z","session_id":"s-dark","tool":{"name":"Read"},"usage_unavailable":true}`
 	logged :: proc(id: string) -> string {
 		sync.mutex_lock(&bridge_ext_mutex); defer sync.mutex_unlock(&bridge_ext_mutex)
@@ -504,14 +505,71 @@ test_ctxwin_usage_dark_log_state_survives_relaunch :: proc(t: ^testing.T) {
 	}
 	now := bridge_runtime_now_ms()
 	bridge_ext_note_launch(id, "claude", "sonnet", "")
-	res := bridge_ext_ingest(rec, raw, now)
+	res := bridge_ext_ingest(rec, hello, now)
+	bridge_ext_ingest_result_destroy(&res)
+	res = bridge_ext_ingest(rec, raw, now)
 	bridge_ext_ingest_result_destroy(&res)
 	testing.expect_value(t, logged(id), "s-dark")
 	// Relaunch clears the marker (no dangling string), repeated launch is safe.
 	bridge_ext_note_launch(id, "claude", "sonnet", "")
 	testing.expect_value(t, logged(id), "")
 	bridge_ext_note_launch(id, "claude", "sonnet", "")
+	res = bridge_ext_ingest(rec, hello, now + 1)
+	bridge_ext_ingest_result_destroy(&res)
 	res = bridge_ext_ingest(rec, raw, now + 1)
 	bridge_ext_ingest_result_destroy(&res)
 	testing.expect_value(t, logged(id), "s-dark")
+}
+
+// usage_unavailable is logged only when the hello advertised `usage`, once per
+// session_id (the marker field records the last logged session).
+@(test)
+test_ctxwin_usage_dark_log_gated_on_usage_supported :: proc(t: ^testing.T) {
+	sync.mutex_lock(&bridge_test_config_mutex); defer sync.mutex_unlock(&bridge_test_config_mutex)
+	saved, scratch := ctxwin_scratch_begin("inst")
+	defer ctxwin_scratch_end(saved, scratch)
+
+	ev :: proc(sid: string) -> string {
+		return fmt.tprintf(`{{"schema":"ham.ext.v1","provider":"claude","ext_version":"0.1.0","event":"tool.end","ts":"2026-11-02T06:00:00Z","session_id":"%s","tool":{{"name":"Read"}},"usage_unavailable":true}}`, sid)
+	}
+	logged :: proc(id: string) -> string {
+		sync.mutex_lock(&bridge_ext_mutex); defer sync.mutex_unlock(&bridge_ext_mutex)
+		for s in bridge_ext_states do if s.agent_instance_id == id do return strings.clone(s.usage_dark_logged_session, context.temp_allocator)
+		return "?"
+	}
+	feed :: proc(rec: Bridge_Local_Agent_Token_Record, raw: string, now: i64) {
+		res := bridge_ext_ingest(rec, raw, now)
+		bridge_ext_ingest_result_destroy(&res)
+	}
+	now := bridge_runtime_now_ms()
+
+	// No hello (usage_supported absent): no log.
+	id_a := "inst_test_usage_dark_nohello"
+	bridge_runtime_mark_start_success(id_a)
+	rec_a := Bridge_Local_Agent_Token_Record{agent_instance_id = id_a, instance_token = "tok_test", role = .Agent}
+	bridge_ext_note_launch(id_a, "claude", "sonnet", "")
+	feed(rec_a, ev("s1"), now)
+	testing.expect_value(t, logged(id_a), "")
+
+	// Hello without the usage capability (usage_supported=false): no log.
+	id_b := "inst_test_usage_dark_unsupported"
+	bridge_runtime_mark_start_success(id_b)
+	rec_b := Bridge_Local_Agent_Token_Record{agent_instance_id = id_b, instance_token = "tok_test", role = .Agent}
+	bridge_ext_note_launch(id_b, "claude", "sonnet", "")
+	feed(rec_b, `{"schema":"ham.ext.v1","provider":"claude","ext_version":"0.1.0","event":"hello","ts":"2026-11-02T05:59:00Z","payload":{"capabilities":[]}}`, now)
+	feed(rec_b, ev("s1"), now)
+	testing.expect_value(t, logged(id_b), "")
+
+	// Supported: logs once per session_id, again for a new session_id.
+	id_c := "inst_test_usage_dark_supported"
+	bridge_runtime_mark_start_success(id_c)
+	rec_c := Bridge_Local_Agent_Token_Record{agent_instance_id = id_c, instance_token = "tok_test", role = .Agent}
+	bridge_ext_note_launch(id_c, "claude", "sonnet", "")
+	feed(rec_c, `{"schema":"ham.ext.v1","provider":"claude","ext_version":"0.1.0","event":"hello","ts":"2026-11-02T05:59:00Z","payload":{"capabilities":["usage"]}}`, now)
+	feed(rec_c, ev("s1"), now)
+	testing.expect_value(t, logged(id_c), "s1")
+	feed(rec_c, ev("s1"), now + 1) // same session: marker unchanged, no second log
+	testing.expect_value(t, logged(id_c), "s1")
+	feed(rec_c, ev("s2"), now + 2) // new session: logs again
+	testing.expect_value(t, logged(id_c), "s2")
 }
