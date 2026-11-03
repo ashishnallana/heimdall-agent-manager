@@ -114,16 +114,24 @@ test_ctxwin_alias_via_resolved_model :: proc(t: ^testing.T) {
 	testing.expect_value(t, r, Bridge_Context_Window_Resolution{200_000, .Default})
 	r = bridge_context_window_resolve("claude", "default", bridge_context_window_resolved_in(models[:], "default"))
 	testing.expect_value(t, r, Bridge_Context_Window_Resolution{1_000_000, .Config})
+	// Conservative map: an alias with no resolved model is small, with a
+	// verified 1M resolved id it is large; unknown pi anthropic ids are small.
+	r = bridge_context_window_resolve("claude", "opus")
+	testing.expect_value(t, r, Bridge_Context_Window_Resolution{200_000, .Config})
+	r = bridge_context_window_resolve("claude", "opus", "claude-opus-5-5")
+	testing.expect_value(t, r, Bridge_Context_Window_Resolution{1_000_000, .Config})
+	r = bridge_context_window_resolve("pi", "anthropic/claude-sonnet-6")
+	testing.expect_value(t, r, Bridge_Context_Window_Resolution{200_000, .Config})
 	// An unknown alias falls through to its resolved_model.
 	r = bridge_context_window_resolve("claude", "my-alias", "claude-sonnet-4-6")
 	testing.expect_value(t, r, Bridge_Context_Window_Resolution{200_000, .Config})
 	r = bridge_context_window_resolve("claude", "big", bridge_context_window_resolved_in(models[:], "big"))
 	testing.expect_value(t, r, Bridge_Context_Window_Resolution{1_000_000, .Config})
-	// The configured model is tried first: an alias matching an entry keeps it.
+	// The resolved model is tried first: the concrete id beats the alias entry.
 	r = bridge_context_window_resolve("claude", "opus[1m]", "claude-opus-4-6")
-	testing.expect_value(t, r, Bridge_Context_Window_Resolution{1_000_000, .Config})
+	testing.expect_value(t, r, Bridge_Context_Window_Resolution{200_000, .Config})
 	r = bridge_context_window_resolve("claude", "sonnet", "claude-sonnet-4-6")
-	testing.expect_value(t, r, Bridge_Context_Window_Resolution{1_000_000, .Config})
+	testing.expect_value(t, r, Bridge_Context_Window_Resolution{200_000, .Config})
 }
 
 @(test)
@@ -297,12 +305,12 @@ test_ctxwin_shipped_map_known_model_ids :: proc(t: ^testing.T) {
 		want:            Bridge_Context_Window_Resolution,
 	}
 	cases := [?]Case {
-		// Claude Code aliases (resolve to the 5.5 / 5.1 models on the Anthropic API).
-		{"claude", "default", {1_000_000, .Config}},
-		{"claude", "opus", {1_000_000, .Config}},
-		{"claude", "sonnet", {1_000_000, .Config}},
-		{"claude", "haiku", {1_000_000, .Config}},
-		{"claude", "fable", {1_000_000, .Config}},
+		// Claude Code aliases with no resolved model: conservative 200K.
+		{"claude", "default", {200_000, .Config}},
+		{"claude", "opus", {200_000, .Config}},
+		{"claude", "sonnet", {200_000, .Config}},
+		{"claude", "haiku", {200_000, .Config}},
+		{"claude", "fable", {200_000, .Config}},
 		// Claude 5.x and Opus 4.7 / 4.8: native 1M.
 		{"claude", "claude-opus-5-5", {1_000_000, .Config}},
 		{"claude", "claude-sonnet-5-5", {1_000_000, .Config}},
@@ -325,7 +333,7 @@ test_ctxwin_shipped_map_known_model_ids :: proc(t: ^testing.T) {
 		{"claude", "claude-opus-4-5", {200_000, .Default}},
 		// Pi: ids are <provider>/<model>; windows from `pi --list-models`.
 		{"pi", "anthropic/claude-opus-4-5", {200_000, .Config}},
-		{"pi", "anthropic/claude-sonnet-4-6", {1_000_000, .Config}},
+		{"pi", "anthropic/claude-sonnet-4-6", {200_000, .Config}},
 		{"pi", "openai-codex/gpt-5.3-codex-spark", {128_000, .Config}},
 		{"pi", "openai-codex/gpt-6.1-sol", {272_000, .Config}},
 		{"pi", "zai/glm-4.7", {204_800, .Config}},

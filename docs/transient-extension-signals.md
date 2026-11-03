@@ -55,7 +55,7 @@ launch (`src/bridge/context_window.odin`) from, in order:
    ships `warn_pct` 40 and `rollover_pct` 70;
 3. the 200000 default.
 
-The shipped map (first match wins; `src/bridge/context_window_test.odin`
+The shipped map (first match wins, trying `resolved_model` before the configured model; `src/bridge/context_window_test.odin`
 resolves every id below):
 
 | Provider | `model_regex` | Window | Why | Source / confidence |
@@ -63,12 +63,12 @@ resolves every id below):
 | claude | `.*\[1m\].*` | 1000000 | explicit 1M variant | Anthropic docs |
 | claude | `.*haiku-4-5.*` | 200000 | no 1M variant | Anthropic docs |
 | claude | `.*(opus\|sonnet)-4-6.*` | 200000 | Claude Code needs `[1m]` for 1M on these | Claude Code model-config docs |
-| claude | `(default\|opus\|sonnet\|haiku\|fable)` | 1000000 | aliases; on the Anthropic API they resolve to the 5.5 / 5.1 models | Claude Code model-config docs |
+| claude | `(default\|opus\|sonnet\|haiku\|fable)` | 200000 | unresolved alias: could be on a 200K plan, so resolve small; a known `resolved_model` is matched first and gets its own row | unverified alias target; conservative |
 | claude | `claude-(opus\|sonnet\|haiku\|fable)-(5\|4-7\|4-8).*` | 1000000 | Claude 5.x and Opus 4.7+ run at a native 1M in Claude Code | Anthropic docs |
 | codex | `gpt-6\.1-(sol\|terra).*` | 475000 | Codex `model_context_window`, 95% of 500K (observed on this host) | Codex rollout on this host |
 | codex | `gpt-.*` | 258400 | 95% of Codex's default 272K; conservative for the rest | openai/codex issue 53336; conservative |
 | pi | `anthropic/claude-(opus\|sonnet\|haiku)-4-5.*` | 200000 | Claude 4.5 models | `pi --list-models`; authoritative |
-| pi | `anthropic/.*` | 1000000 | every other Anthropic model in pi, including opus/sonnet-4-6 | `pi --list-models`; authoritative |
+| pi | `anthropic/.*` | 200000 | every other Anthropic model in pi, including unknown or newer ids; no id is verified at 1M, so none maps large | conservative; override per model |
 | pi | `openai-codex/gpt-5\.3-codex-spark.*` | 128000 | Codex Spark | `pi --list-models`; authoritative |
 | pi | `openai-codex/.*` | 272000 | gpt-5.5, 5.6-\*, 6-\*, 6.1-sol | `pi --list-models`; authoritative |
 | pi | `zai/glm-4\.7.*` | 204800 | GLM-4.7 | `pi --list-models`; authoritative |

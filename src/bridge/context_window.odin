@@ -10,8 +10,9 @@ package main
 //      the entries and their sources (and the CLAUDE_CODE_DISABLE_1M_CONTEXT
 //      caveat) are listed in docs/transient-extension-signals.md;
 //   3. the default (200 000).
-// The model id tried is the configured model (which may be an alias such as
-// `default` or `opus`) and then, when discovery knows it, its resolved_model.
+// The model id tried is the resolved_model when discovery knows it, then the
+// configured model (which may be an alias such as `default` or `opus`); an alias
+// with no known resolved id resolves small (200K), never large.
 // The hub reaches this through the `context_window_op` frame (list/set/clear).
 
 import "base:runtime"
@@ -295,12 +296,15 @@ bridge_context_window_clear :: proc(provider, model: string) -> Bridge_Context_W
 	return .None
 }
 
-// bridge_context_window_resolve: override (exact provider + model or
-// resolved_model) > first matching shipped entry (model, then resolved_model)
-// > default. Pure lookup; never probes a provider.
+// bridge_context_window_resolve: override (exact provider + resolved_model or
+// model) > first matching shipped entry (resolved_model, then model) > default.
+// resolved_model is tried first: it is the concrete id, so an alias such as
+// `opus` gets the window of the model it resolves to, and only an alias with no
+// known resolved id falls back to its (conservative, 200K) alias entry.
+// Pure lookup; never probes a provider.
 bridge_context_window_resolve :: proc(provider, model: string, resolved_model: string = "") -> Bridge_Context_Window_Resolution {
 	provider := strings.trim_space(provider)
-	candidates: [2]string = {strings.trim_space(model), strings.trim_space(resolved_model)}
+	candidates: [2]string = {strings.trim_space(resolved_model), strings.trim_space(model)}
 	sync.mutex_lock(&bridge_ctxwin_mu); defer sync.mutex_unlock(&bridge_ctxwin_mu)
 	ctxwin_config_load_locked()
 	ctxwin_overrides_load_locked()
