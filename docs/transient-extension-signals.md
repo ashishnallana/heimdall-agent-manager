@@ -35,6 +35,50 @@ card (a hub aggregate) refetches only while it is shown, at most once per
 15 seconds per chain (`src/ui/api/chainTokenUsageRefresh.ts`); a chain whose
 events arrived while hidden refetches once when shown.
 
+### Usage capability
+
+An adapter's `ham.ext.v1` hello lists `usage` when the provider can emit
+`usage.context_tokens` (Claude, Codex; not Antigravity, and Pi has no
+extension). The bridge stores it as `usage_supported` on the snapshot, only
+once a hello was seen (`test_ext_tokens_usage_supported_from_hello`), so the
+hub and UI can tell "unsupported" (`usage_supported:false`, no figure) from
+"no signal yet" (`true`, no figure) and from "unknown" (field absent). The UI
+shows "Context tracking unavailable for <provider>" or "Waiting for signal"
+accordingly (`tests/ui_extension_token_usage_test.ts`: `usage_supported:
+unavailable copy when false, "waiting for signal" when true without a figure`;
+chain rows: `chain rows: waiting / unavailable(provider) come from LIVE
+instances only`). The bridge logs `usage_unavailable` once per session, only
+when `usage_supported` is true (`test_ctxwin_usage_dark_log_gated_on_usage_supported`,
+`test_ctxwin_usage_dark_log_state_survives_relaunch`). The `ham-ctl extension`
+adapters read transcripts through one usage-source table
+(`src/ctl/extension/transcript_usage.odin`;
+`test_usage_source_table_covers_readers_and_antigravity_has_none`).
+
+### Idle from `pane_diff` drives rollover
+
+Rollover used to advance only on extension events. Activity detected from the
+tmux pane (`pane_diff`) is now also fed to the state machine
+(`bridge_rollover_on_activity`, `src/bridge/context_rollover.odin`): only an
+explicit `idle` counts as a finished turn. `waiting_user` / `waiting_approval`
+do not (`test_rollover_pane_diff_idle_advances_rollover`,
+`test_rollover_pane_diff_waiting_is_not_idle`), idle reported by two sources acts
+once (`test_rollover_duplicate_idle_from_two_sources_acts_once`) and idle that
+was withheld is acted on when re-reported
+(`test_rollover_pane_diff_idle_withheld_then_rereported`). An estimate-only
+stream reaches the pending state (`test_rollover_pending_from_estimate_only_stream`).
+
+### Thresholds: one source
+
+`warn_pct` (40) and `rollover_pct` (70) are defined only in
+`src/bridge/context_windows.json`. The bridge copies them onto every snapshot
+and `context_window_op_result`; the hub stores and returns them per row, and the
+UI reads them from the row (`CONTEXT_WARN_PCT` / `CONTEXT_ROLLOVER_PCT` and the
+hub constants are fallbacks for rows from older bridges only).
+Tests: `test_ctxwin_snapshot_thresholds_match_shipped_config`,
+`test_agent_token_usage_thresholds_round_trip`,
+`test_chain_token_usage_per_row_thresholds`, UI `contexts use their own
+snapshot thresholds, not the first/historical pair`.
+
 ## Context window
 
 Each snapshot also carries `context_window`, `window_source`
@@ -101,7 +145,7 @@ are authoritative. Antigravity does not document its in-app limit: the rows are
 set low so rollover fires before the platform compacts. Pi has no Heimdall
 extension yet, so the bridge gets no `context_tokens` for a Pi agent; its rows
 apply to the tool-traffic estimate described below until a Pi usage source
-exists. Copilot is not in the map (no models were listed; it needed
+exists (Pi therefore rolls over on the estimate). Copilot is not in the map (no models were listed; it needed
 authentication on dawnstar).
 
 ### Estimate fallback (`context_source: "estimate"`)
