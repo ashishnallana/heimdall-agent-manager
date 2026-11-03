@@ -378,7 +378,6 @@ test_ctxwin_snapshot_thresholds_match_shipped_config :: proc(t: ^testing.T) {
 }
 
 @(test)
-@(test)
 test_ctxwin_usage_dark_log_state_survives_relaunch :: proc(t: ^testing.T) {
 	sync.mutex_lock(&bridge_test_config_mutex); defer sync.mutex_unlock(&bridge_test_config_mutex)
 	saved, scratch := ctxwin_scratch_begin("inst")
