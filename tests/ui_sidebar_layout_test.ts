@@ -145,3 +145,24 @@ test('REQ-BAR-3: vault status module lives in the bottom status bar; no lock/unl
   // The password-era lock surfaces are gone.
   assert.doesNotMatch(source, /setUnlockModalOpen|lockAllConnectedBridges|lockVault\(/);
 });
+
+test('T14: list/detail pages start right under the top spacer and run down to the status bar', () => {
+  // The desktop two-pane route frame keeps its inline padding but takes no vertical
+  // padding: the spacer already clears the cluster, and PageShell owns the rest.
+  const frameStart = source.indexOf('data-debug-id="shell-route-frame"');
+  assert.ok(frameStart > 0, 'route frame carries a debug id');
+  const frame = source.slice(frameStart, source.indexOf('>', source.indexOf('}', frameStart + 200)));
+  const [twoPane, other] = frame.split("\n            : '");
+  assert.match(twoPane, /h-full min-h-0/);
+  assert.doesNotMatch(twoPane, /(^|\s)(sm:|lg:)?py-\d/, 'two-pane frame has no vertical padding');
+  // Home, forms and mobile keep the original rhythm.
+  assert.match(other, /py-2 sm:px-4 sm:py-4 lg:px-5 lg:py-5/);
+
+  const css = fs.readFileSync(path.join(REPO_ROOT, 'src/ui/components/ui/composites/PageShell.css'), 'utf8');
+  assert.match(css, /\.ui-pageshell-header \{[^}]*padding: var\(--ps-pad-top\) var\(--ps-pad-x\) var\(--space-4\);/);
+  assert.match(css, /data-rhythm='banded'\] \.ui-pageshell-body \{[^}]*padding: 0 var\(--ps-pad-x\) var\(--ps-pad-bottom\);/);
+  assert.match(css, /--ps-pad-top: var\(--space-4\);[\s\S]*--ps-pad-bottom: var\(--space-4\);/);
+  assert.match(css, /@media \(min-width: 640px\)[^}]*--ps-pad-top: var\(--space-3\);/);
+  assert.doesNotMatch(css, /--ps-pad-y/, 'the old shared top/bottom pad is gone');
+  assert.doesNotMatch(css, /var\(--space-8\)/, 'no 32px tail under the banded body');
+});

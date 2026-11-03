@@ -1241,10 +1241,16 @@ function RouteOutlet({
           : 'min-w-0 min-h-0 flex-1 overflow-auto overflow-x-hidden bg-canvas'
       }
     >
+      {/* Two-pane list/detail pages take no vertical padding here: the shell-top-spacer
+          already clears the top-left cluster above them and PageShell owns the rest
+          (header top, banded body bottom), so the title sits right under the spacer and
+          the panels run down to the status bar (T14). Other routes (Home, forms, mobile)
+          keep their padding. */}
       <section
+        data-debug-id="shell-route-frame"
         className={
           isDesktopTwoPaneRoute
-            ? 'mx-auto flex h-full min-h-0 w-full max-w-6xl min-w-0 flex-1 flex-col overflow-hidden px-0 py-2 sm:px-4 sm:py-4 lg:px-5 lg:py-5 [&>*]:max-w-full [&>*]:h-full [&>*]:min-h-0 [&>*]:flex-1'
+            ? 'mx-auto flex h-full min-h-0 w-full max-w-6xl min-w-0 flex-1 flex-col overflow-hidden px-0 sm:px-4 lg:px-5 [&>*]:max-w-full [&>*]:h-full [&>*]:min-h-0 [&>*]:flex-1'
             : 'mx-auto flex min-h-full w-full max-w-6xl min-w-0 flex-col items-start overflow-x-hidden px-0 py-2 sm:px-4 sm:py-4 lg:px-5 lg:py-5 [&>*]:max-w-full'
         }
       >
