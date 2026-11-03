@@ -283,7 +283,7 @@ test_ctxwin_instance_snapshot_carries_window_and_pct :: proc(t: ^testing.T) {
 
 	frame := bridge_instance_status_json(id)
 	defer delete(frame)
-	testing.expect(t, strings.contains(frame, `"context_window":999999,"window_source":"reported","reported_window":999999,"window_mismatch":true,"context_pct":28`))
+	testing.expect(t, strings.contains(frame, `"context_window":999999,"window_source":"reported","warn_pct":40,"rollover_pct":70,"reported_window":999999,"window_mismatch":true,"context_pct":28`))
 
 	// An override re-resolves the live instance; a session reset keeps the window.
 	testing.expect_value(t, bridge_context_window_set("codex", "gpt-6.1-sol", 1_000_000), Bridge_Context_Window_Error.None)

@@ -86,12 +86,23 @@ test_provider_version_probe_kills_and_reaps_at_deadline :: proc(t: ^testing.T) {
 
 @(test)
 test_provider_discovery_coalesces_identical_concurrent_scans :: proc(t: ^testing.T) {
+	sync.mutex_lock(&bridge_test_config_mutex); defer sync.mutex_unlock(&bridge_test_config_mutex)
 	filter := []string{"provider-that-is-not-in-the-catalog"}
+	// Other tests resolve provider paths concurrently and start their own scans, so
+	// the global scan count is not ours alone: count only scans for this test's key.
+	filter_key := bridge_provider_discovery_key(filter)
+	defer delete(filter_key)
 	sync.mutex_lock(&bridge_provider_discovery_mutex)
-	before := bridge_provider_discovery_scan_count
+	bridge_provider_discovery_test_key = filter_key
+	bridge_provider_discovery_test_key_scans = 0
 	sync.mutex_unlock(&bridge_provider_discovery_mutex)
 	bridge_provider_discovery_test_delay = 100 * time.Millisecond
-	defer { bridge_provider_discovery_test_delay = 0 }
+	defer {
+		bridge_provider_discovery_test_delay = 0
+		sync.mutex_lock(&bridge_provider_discovery_mutex)
+		bridge_provider_discovery_test_key = ""
+		sync.mutex_unlock(&bridge_provider_discovery_mutex)
+	}
 
 	jobs := [2]Provider_Discovery_Test_Job{{filter = filter}, {filter = filter}}
 	workers: [2]^thread.Thread
@@ -110,9 +121,9 @@ test_provider_discovery_coalesces_identical_concurrent_scans :: proc(t: ^testing
 	}
 
 	sync.mutex_lock(&bridge_provider_discovery_mutex)
-	after := bridge_provider_discovery_scan_count
+	scans := bridge_provider_discovery_test_key_scans
 	sync.mutex_unlock(&bridge_provider_discovery_mutex)
-	testing.expect_value(t, after - before, u64(1))
+	testing.expect_value(t, scans, u64(1))
 	testing.expect_value(t, len(jobs[0].results), len(jobs[1].results))
 }
 

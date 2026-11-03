@@ -2,8 +2,13 @@ package main
 
 import "base:runtime"
 import "core:strings"
+import "core:sync"
 import "core:testing"
 import "core:time"
+
+// Serializes tests that read or seed the process-global process-tree cache, so
+// a seeded fixture is never observed by another test's endpoint response.
+process_tree_cache_fixture_mu: sync.Mutex
 
 // REQ-PTREE-1: Portable POSIX ps parser handles Linux and macOS Darwin output cleanly.
 @(test)
@@ -206,6 +211,8 @@ test_process_tree_prometheus_formatting :: proc(t: ^testing.T) {
 
 @(test)
 test_process_tree_endpoint_matchers :: proc(t: ^testing.T) {
+	sync.mutex_lock(&process_tree_cache_fixture_mu)
+	defer sync.mutex_unlock(&process_tree_cache_fixture_mu)
 	testing.expect(t, bridge_telemetry_looks_like_processes("GET /api/v1/telemetry/processes HTTP/1.1"), "valid GET matches")
 	testing.expect(t, bridge_telemetry_looks_like_processes("GET /api/v1/telemetry/processes"), "prefix matches")
 	testing.expect(t, bridge_telemetry_looks_like_processes("GET /api/v1/telemetry/processes?format=prom"), "query param matches")
@@ -222,8 +229,19 @@ test_process_tree_endpoint_matchers :: proc(t: ^testing.T) {
 
 @(test)
 test_process_tree_cache_ttl :: proc(t: ^testing.T) {
+	sync.mutex_lock(&process_tree_cache_fixture_mu)
+	defer sync.mutex_unlock(&process_tree_cache_fixture_mu)
 	process_tree_reset_cache()
 	defer process_tree_reset_cache()
+
+	// Seed a fresh cache entry instead of collecting live data: a live collection
+	// queries the process-global pty-host daemon socket (other tests point it at
+	// mocks) and can outlast the 2s TTL under load, making p1 != p2.
+	sync.mutex_lock(&process_tree_cache_mu)
+	process_tree_cached_prometheus = strings.clone("seeded_metric 1\n", runtime.heap_allocator())
+	process_tree_cache_tick = time.tick_now()
+	process_tree_has_cache = true
+	sync.mutex_unlock(&process_tree_cache_mu)
 
 	p1 := process_tree_get_cached_prometheus(context.allocator)
 	defer delete(p1)
@@ -231,6 +249,7 @@ test_process_tree_cache_ttl :: proc(t: ^testing.T) {
 	p2 := process_tree_get_cached_prometheus(context.allocator)
 	defer delete(p2)
 
+	testing.expect_value(t, p1, "seeded_metric 1\n")
 	testing.expect_value(t, p1, p2)
 }
 

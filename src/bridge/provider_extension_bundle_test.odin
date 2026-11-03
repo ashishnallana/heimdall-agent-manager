@@ -4,11 +4,46 @@ import "core:fmt"
 import "core:os"
 import "core:path/filepath"
 import "core:strings"
+import "core:sync"
 import "core:testing"
 import "core:time"
 
+// bundle_fixture_begin points HEIMDALL_BRIDGE_DATA_DIR at a private tree holding
+// extensions/{antigravity,claude,codex}, so the "default" resolution tests do not
+// depend on cwd, the executable location or a packaged share dir. The env var is
+// process-wide: callers hold bridge_test_config_mutex and defer bundle_fixture_end.
+Bundle_Fixture :: struct {
+	root:    string,
+	saved:   string,
+	has_env: bool,
+}
+
+bundle_fixture_begin :: proc(name: string) -> (f: Bundle_Fixture) {
+	f.root = fmt.aprintf("%s/test_bridge_bundle_%s_%d", bridge_scratch_root(context.temp_allocator), name, time.to_unix_nanoseconds(time.now()))
+	for provider in ([]string{"antigravity", "claude", "codex"}) {
+		dir, _ := filepath.join({f.root, "extensions", provider}, context.temp_allocator)
+		_ = bridge_make_directory_all(dir)
+	}
+	f.saved, f.has_env = os.lookup_env("HEIMDALL_BRIDGE_DATA_DIR", context.allocator)
+	_ = os.set_env("HEIMDALL_BRIDGE_DATA_DIR", f.root)
+	return
+}
+
+bundle_fixture_end :: proc(f: ^Bundle_Fixture) {
+	if f.has_env {
+		_ = os.set_env("HEIMDALL_BRIDGE_DATA_DIR", f.saved)
+		delete(f.saved)
+	} else {
+		_ = os.unset_env("HEIMDALL_BRIDGE_DATA_DIR")
+	}
+	_ = os.remove_all(f.root)
+	delete(f.root)
+}
+
 @(test)
 test_bridge_get_bundled_extension_path_default :: proc(t: ^testing.T) {
+	sync.mutex_lock(&bridge_test_config_mutex); defer sync.mutex_unlock(&bridge_test_config_mutex)
+	fixture := bundle_fixture_begin("default"); defer bundle_fixture_end(&fixture)
 	path := bridge_get_bundled_extension_path("antigravity", context.allocator)
 	defer delete(path)
 	testing.expect(t, len(path) > 0, "path should not be empty")
@@ -33,6 +68,7 @@ test_bridge_get_bundled_extension_path_default :: proc(t: ^testing.T) {
 
 @(test)
 test_bridge_get_bundled_extension_path_env_override :: proc(t: ^testing.T) {
+	sync.mutex_lock(&bridge_test_config_mutex); defer sync.mutex_unlock(&bridge_test_config_mutex)
 	root := bridge_scratch_root(context.temp_allocator)
 	test_dir := fmt.aprintf("%s/test_bridge_ext_%d", root, time.to_unix_nanoseconds(time.now()))
 	defer {
@@ -64,6 +100,7 @@ test_bridge_get_bundled_extension_path_env_override :: proc(t: ^testing.T) {
 
 @(test)
 test_bridge_get_bundled_extension_path_nonexistent :: proc(t: ^testing.T) {
+	sync.mutex_lock(&bridge_test_config_mutex); defer sync.mutex_unlock(&bridge_test_config_mutex)
 	path := bridge_get_bundled_extension_path("nonexistent_provider_xyz_123", context.allocator)
 	defer delete(path)
 	testing.expect_value(t, path, "")
@@ -71,6 +108,8 @@ test_bridge_get_bundled_extension_path_nonexistent :: proc(t: ^testing.T) {
 
 @(test)
 test_bridge_get_bundled_extensions_dir :: proc(t: ^testing.T) {
+	sync.mutex_lock(&bridge_test_config_mutex); defer sync.mutex_unlock(&bridge_test_config_mutex)
+	fixture := bundle_fixture_begin("dir"); defer bundle_fixture_end(&fixture)
 	dir := bridge_get_bundled_extensions_dir(context.allocator)
 	defer delete(dir)
 	testing.expect(t, len(dir) > 0, "extensions dir should not be empty")
