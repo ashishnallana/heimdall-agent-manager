@@ -101,3 +101,37 @@ test('overview mounts the section; token_usage_changed refreshes the chain usage
   assert.match(ws, /tokenChanged \|\| change === 'created'[\s\S]{0,200}requestChainTokenUsageRefresh\(tokenChainId[\s\S]{0,120}type: 'ChainTokenUsage', id \}/);
   assert.match(read('../src/ui/api/endpoints/taskChains.ts'), /\/task-chains\/\$\{encodeURIComponent\(chainId\)\}\/token-usage/);
 });
+
+test('chain rows: waiting / unavailable(provider) come from LIVE instances only', async () => {
+  const inst = (id: string, live: boolean, extra: Record<string, unknown>) => ({
+    agent_instance_id: id, display_name: id, runtime_status: live ? 'running' : 'stopped', live, has_data: true,
+    snapshot_counted: false, lifetime: fig(1000, 10, 10, 1), ...extra,
+  });
+  const agent = (id: string, instances: any[]) => ({ agent_id: id, agent_name: id, has_data: true, live_instances: instances.filter((i) => i.live).length, lifetime: fig(1000, 10, 10, 1), instances });
+  const payload = {
+    has_data: true, total: fig(1000, 10, 10, 1),
+    agents: [
+      agent('a_wait', [inst('w1', true, { provider: 'claude', usage_supported: true })]),
+      agent('a_off', [inst('o1', true, { provider: 'antigravity', usage_supported: false })]),
+      // stopped supported instance must not hide the live unsupported one
+      agent('a_mixed1', [inst('m1', false, { provider: 'claude', usage_supported: true }), inst('m2', true, { provider: 'antigravity', usage_supported: false })]),
+      // stopped unsupported + live unknown => unknown (dash), not unavailable
+      agent('a_mixed2', [inst('n1', false, { provider: 'antigravity', usage_supported: false }), inst('n2', true, { provider: 'claude' })]),
+      agent('a_stopped', [inst('s1', false, { provider: 'antigravity', usage_supported: false })]),
+    ],
+  };
+  const u = model.normalizeChainTokenUsage(payload)!;
+  const cap = Object.fromEntries(u.agents.map((a: any) => [a.agentId, a.contextCapability]));
+  assert.deepEqual(cap, { a_wait: 'waiting', a_off: 'unsupported', a_mixed1: 'unsupported', a_mixed2: 'unknown', a_stopped: 'none' });
+  assert.deepEqual(u.agents.find((a: any) => a.agentId === 'a_mixed1')!.unsupportedProviders, ['antigravity']);
+
+  const html = await render(view.ChainTokenUsageView({ usage: u }));
+  const cell = (id: string) => html.match(new RegExp(`data-debug-id="${id}"[^>]*>[^<]*`))![0];
+  assert.match(cell('chain-token-usage-agent-context-a_wait'), /data-context-state="waiting"[^>]*title="Waiting for signal"/);
+  assert.match(cell('chain-token-usage-agent-context-a_off'), /data-context-state="unsupported"[^>]*title="Context tracking unavailable for antigravity"/);
+  assert.match(cell('chain-token-usage-agent-context-a_mixed1'), /unavailable for antigravity/);
+  assert.match(cell('chain-token-usage-agent-context-a_mixed2'), />—$/);
+  assert.match(cell('chain-token-usage-agent-context-a_stopped'), />—$/);
+  assert.match(cell('chain-token-usage-instance-context-o1'), /unavailable for antigravity/);
+  assert.match(cell('chain-token-usage-instance-context-w1'), /data-context-state="waiting"/);
+});

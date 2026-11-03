@@ -31,12 +31,16 @@ export interface ChainTokenInstance {
   instanceId: string;
   displayName: string;
   runtimeStatus: string;
+  /** Provider id (claude, codex, ...); '' when the hub did not send it. */
+  provider: string;
   live: boolean;
   hasData: boolean;
   lifetime: ChainTokenFigures;
   runCount: number | null;
   /** Current % of window; null unless live with a reported context. */
   context: ChainTokenContext | null;
+  /** false = provider cannot report context usage; null = not reported. */
+  usageSupported: boolean | null;
 }
 
 export interface ChainTokenAgent {
@@ -48,6 +52,16 @@ export interface ChainTokenAgent {
   lifetime: ChainTokenFigures;
   /** Highest current context % among live instances; null when none. */
   context: (ChainTokenContext & { instanceId: string }) | null;
+  /**
+   * Context capability of the agent's LIVE instances (stopped ones are history):
+   *  unsupported = every live instance reports usage_supported=false;
+   *  waiting     = some live instance can report but has no figure yet;
+   *  unknown     = live instances exist but capability is not (fully) reported;
+   *  none        = no live instance.
+   */
+  contextCapability: 'unsupported' | 'waiting' | 'unknown' | 'none';
+  /** Providers of the live unsupported instances, de-duplicated (for the unavailable copy). */
+  unsupportedProviders: string[];
   instances: ChainTokenInstance[];
 }
 
@@ -98,12 +112,24 @@ function normalizeInstance(raw: unknown): ChainTokenInstance | null {
     instanceId,
     displayName: String(raw.display_name || '').trim(),
     runtimeStatus: String(raw.runtime_status || ''),
+    provider: String(raw.provider || '').trim(),
     live,
     hasData: raw.has_data === true,
     lifetime: normalizeFigures(raw.lifetime),
     runCount: count(raw.run_count),
     context: live ? makeContext(count(raw.context_pct), raw.context_tokens, raw.context_window) : null,
+    usageSupported: typeof raw.usage_supported === 'boolean' ? raw.usage_supported : null,
   };
+}
+
+function liveCapability(instances: ChainTokenInstance[]): Pick<ChainTokenAgent, 'contextCapability' | 'unsupportedProviders'> {
+  const live = instances.filter((i) => i.live);
+  const off = live.filter((i) => i.usageSupported === false);
+  const unsupportedProviders = [...new Set(off.map((i) => i.provider).filter(Boolean))];
+  if (live.length === 0) return { contextCapability: 'none', unsupportedProviders: [] };
+  if (live.some((i) => i.usageSupported === true)) return { contextCapability: 'waiting', unsupportedProviders };
+  if (off.length === live.length) return { contextCapability: 'unsupported', unsupportedProviders };
+  return { contextCapability: 'unknown', unsupportedProviders };
 }
 
 function normalizeAgent(raw: unknown): ChainTokenAgent | null {
@@ -122,6 +148,7 @@ function normalizeAgent(raw: unknown): ChainTokenAgent | null {
     liveInstances: count(raw.live_instances) ?? 0,
     lifetime: normalizeFigures(raw.lifetime),
     context: context ? { ...context, instanceId: String(ctx?.agent_instance_id || '') } : null,
+    ...liveCapability(instances),
     instances,
   };
 }

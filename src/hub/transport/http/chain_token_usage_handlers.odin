@@ -98,6 +98,7 @@ write_chain_token_instance_json :: proc(b: ^strings.Builder, row: domain.Chain_T
 	strings.write_byte(b, '{')
 	write_json_str_field(b, "agent_instance_id", row.agent_instance_id, true)
 	write_json_str_field(b, "display_name", row.display_name)
+	if row.provider != "" do write_json_str_field(b, "provider", row.provider)
 	write_json_str_field(b, "runtime_status", row.runtime_status)
 	strings.write_string(b, fmt.tprintf(",\"live\":%v,\"has_data\":%v,\"snapshot_counted\":%v,\"lifetime\":", row.live, row.has_data, row.snapshot_counted))
 	write_chain_token_figures_json(b, row.lifetime)
@@ -107,6 +108,7 @@ write_chain_token_instance_json :: proc(b: ^strings.Builder, row: domain.Chain_T
 	}
 	if row.has_snapshot {
 		s := row.snapshot
+		if s.has_usage_supported do strings.write_string(b, fmt.tprintf(",\"usage_supported\":%v", s.usage_supported))
 		if s.run_count > 0 do strings.write_string(b, fmt.tprintf(",\"run_count\":%d", s.run_count))
 		if row.context_pct >= 0 do strings.write_string(b, fmt.tprintf(",\"context_pct\":%d", row.context_pct))
 		if s.has_context do strings.write_string(b, fmt.tprintf(",\"context_tokens\":%d", s.context_tokens))

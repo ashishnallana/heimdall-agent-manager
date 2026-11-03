@@ -4,7 +4,7 @@
 // The agent instance JSON carries, when known:
 //   token_usage  {tool_calls, est_tokens_total, context_tokens?, context_window?,
 //                 window_source?, context_pct?, output_tokens_total?, compactions,
-//                 run_count?, updated_at_ms}  (latest bridge snapshot)
+//                 run_count?, usage_supported?, updated_at_ms}  (latest bridge snapshot)
 //   token_totals {total_context_tokens, total_est_tool_tokens, total_output_tokens,
 //                 runs_counted, last_run_counted}  (added at each hub stop/restart)
 
@@ -26,6 +26,8 @@ export interface TokenUsageSnapshot {
   outputTokensTotal: number | null;
   compactions: number;
   runCount: number | null;
+  /** Provider emits usage.context_tokens (hello "usage" capability); null = not reported (Pi, older bridge). */
+  usageSupported: boolean | null;
 }
 
 export interface TokenTotals {
@@ -64,6 +66,7 @@ export function normalizeTokenUsage(raw: unknown): TokenUsageSnapshot | null {
     outputTokensTotal: count(raw.output_tokens_total),
     compactions: count(raw.compactions) ?? 0,
     runCount: count(raw.run_count),
+    usageSupported: typeof raw.usage_supported === 'boolean' ? raw.usage_supported : null,
   };
 }
 
@@ -107,17 +110,41 @@ export function windowSourceLabel(source: WindowSource): string {
   }
 }
 
+/** What the context UI shows: a figure, "waiting for signal", or "unavailable" (provider cannot report). */
+export type ContextTrackingState = 'value' | 'waiting' | 'unsupported';
+
+export function contextTrackingState(usage: TokenUsageSnapshot): ContextTrackingState {
+  if (usage.usageSupported === false) return 'unsupported';
+  return usage.contextPct === null ? 'waiting' : 'value';
+}
+
+export function contextUnavailableText(provider?: unknown): string {
+  const name = typeof provider === 'string' ? provider.trim() : '';
+  return `Context tracking unavailable for ${name || 'this provider'}`;
+}
+
+export const CONTEXT_WAITING_TEXT = 'Waiting for signal';
+
 export interface ContextBadgeModel {
-  pct: number;
+  pct: number | null;
+  /** value = figure; waiting = capable provider, no signal yet; unsupported = provider cannot report. */
+  state: ContextTrackingState;
   tone: ContextTone;
   label: string;
   tooltip: string;
 }
 
-/** The instance-list context badge, or null when there is no context figure. */
+/** The instance-list context badge, or null when there is nothing to say (no snapshot, or unknown capability without a figure). */
 export function contextBadge(instance: any): ContextBadgeModel | null {
   const usage = normalizeTokenUsage(instance?.token_usage);
-  if (!usage || usage.contextPct === null) return null;
+  if (!usage) return null;
+  if (contextTrackingState(usage) === 'unsupported') {
+    return { pct: null, state: 'unsupported', tone: 'neutral', label: 'ctx n/a', tooltip: contextUnavailableText(instance?.provider) };
+  }
+  if (usage.contextPct === null) {
+    if (usage.usageSupported !== true) return null;
+    return { pct: null, state: 'waiting', tone: 'neutral', label: 'ctx …', tooltip: CONTEXT_WAITING_TEXT };
+  }
   const pct = usage.contextPct;
   const window = usage.contextWindow ? formatTokens(usage.contextWindow) : '';
   const source = windowSourceLabel(usage.windowSource);
@@ -125,5 +152,5 @@ export function contextBadge(instance: any): ContextBadgeModel | null {
     `Context ${formatTokens(usage.contextTokens ?? 0)}${window ? ` of ${window}` : ''} tokens (${pct}%)`,
     source ? `window: ${source}` : '',
   ].filter(Boolean).join(' · ');
-  return { pct, tone: contextTone(pct), label: `ctx ${pct}%`, tooltip };
+  return { pct, state: 'value', tone: contextTone(pct), label: `ctx ${pct}%`, tooltip };
 }

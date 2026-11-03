@@ -1,5 +1,7 @@
 package domain
 
+import "core:fmt"
+import "core:strings"
 import "core:testing"
 
 @(test)
@@ -19,4 +21,22 @@ test_agent_token_usage_canonicalizes_and_validates :: proc(t: ^testing.T) {
 		testing.expectf(t, !ok, "rejects %q", bad)
 	}
 	testing.expect_value(t, agent_token_totals_json(Agent_Instance{}, context.temp_allocator), "")
+}
+
+@(test)
+test_agent_token_usage_usage_supported_round_trip :: proc(t: ^testing.T) {
+	for flag in ([]string{"true", "false"}) {
+		raw := fmt.tprintf(`{{"tool_calls":1,"est_tokens_total":2,"usage_supported":%s,"compactions":0,"updated_at_ms":9}}`, flag)
+		u, ok := agent_token_usage_from_json(raw)
+		testing.expect(t, ok)
+		testing.expect(t, u.has_usage_supported)
+		testing.expect_value(t, agent_token_usage_json(u, context.temp_allocator), fmt.tprintf(`{{"tool_calls":1,"est_tokens_total":2,"usage_supported":%s,"compactions":0,"updated_at_ms":9}}`, flag))
+	}
+	// Absent or non-boolean: omitted from the canonical JSON.
+	for raw in ([]string{`{"tool_calls":1,"est_tokens_total":2,"compactions":0,"updated_at_ms":9}`, `{"tool_calls":1,"est_tokens_total":2,"usage_supported":"yes","compactions":0,"updated_at_ms":9}`}) {
+		u, ok := agent_token_usage_from_json(raw)
+		testing.expect(t, ok)
+		testing.expect(t, !u.has_usage_supported)
+		testing.expect(t, !strings.contains(agent_token_usage_json(u, context.temp_allocator), "usage_supported"))
+	}
 }

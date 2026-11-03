@@ -41,6 +41,7 @@ Chain_Token_Instance :: struct {
 	agent_instance_id: string,
 	agent_id:          string,
 	display_name:      string,
+	provider:          string,
 	runtime_status:    string,
 	live:              bool, // runtime is active (see agent_runtime_status_live)
 	has_data:          bool, // a snapshot or counted totals exist
@@ -96,6 +97,7 @@ chain_token_instance_from :: proc(inst: Agent_Instance) -> Chain_Token_Instance 
 		agent_instance_id = inst.agent_instance_id,
 		agent_id = inst.agent_id,
 		display_name = inst.display_name,
+		provider = inst.provider,
 		runtime_status = inst.runtime_status,
 		live = agent_runtime_status_live(inst.runtime_status),
 		context_pct = -1,

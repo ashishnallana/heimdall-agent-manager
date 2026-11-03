@@ -20,6 +20,8 @@ export interface AgentInstanceTokenUsage {
   output_tokens_total?: number;
   compactions: number;
   run_count?: number;
+  /** Provider emits usage.context_tokens; absent when the bridge did not report it. */
+  usage_supported?: boolean;
   updated_at_ms: number;
 }
 

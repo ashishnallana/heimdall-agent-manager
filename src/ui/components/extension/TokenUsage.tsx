@@ -6,7 +6,10 @@ import { ProgressBar, StatusPill } from '@ui';
 import {
   CONTEXT_ROLLOVER_PCT,
   CONTEXT_WARN_PCT,
+  CONTEXT_WAITING_TEXT,
   contextBadge,
+  contextTrackingState,
+  contextUnavailableText,
   contextTone,
   formatTokens,
   normalizeTokenTotals,
@@ -22,7 +25,7 @@ export function ContextUsageBadge({ instance, instanceId }: { instance: any; ins
   const badge = contextBadge(instance);
   if (!badge) return null;
   return (
-    <span data-debug-id={`live-instance-context-${instanceId}`} data-context-tone={badge.tone} title={badge.tooltip}>
+    <span data-debug-id={`live-instance-context-${instanceId}`} data-context-tone={badge.tone} data-context-state={badge.state} title={badge.tooltip}>
       <StatusPill tone={BADGE_TONE[badge.tone]}>{badge.label}</StatusPill>
     </span>
   );
@@ -34,10 +37,19 @@ export function ContextMeter({ instance }: { instance: any }) {
   if (!usage) return null;
   const source = windowSourceLabel(usage.windowSource);
   const window = usage.contextWindow ? formatTokens(usage.contextWindow) : '';
+  const state = contextTrackingState(usage);
+  if (state === 'unsupported') {
+    return (
+      <div data-debug-id="live-instance-context-meter" data-context-tone="none" data-context-state="unsupported" className="text-body-sm text-muted">
+        {contextUnavailableText(instance?.provider)}
+        {` · ${usage.toolCalls} tool calls, ~${formatTokens(usage.estTokensTotal)} tool tokens`}
+      </div>
+    );
+  }
   if (usage.contextPct === null) {
     return (
-      <div data-debug-id="live-instance-context-meter" data-context-tone="none" className="text-body-sm text-muted">
-        No context reported yet{window ? ` · window ${window}${source ? ` (${source})` : ''}` : ''}
+      <div data-debug-id="live-instance-context-meter" data-context-tone="none" data-context-state="waiting" className="text-body-sm text-muted">
+        {usage.usageSupported === true ? CONTEXT_WAITING_TEXT : 'No context reported yet'}{window ? ` · window ${window}${source ? ` (${source})` : ''}` : ''}
         {` · ${usage.toolCalls} tool calls, ~${formatTokens(usage.estTokensTotal)} tool tokens`}
       </div>
     );

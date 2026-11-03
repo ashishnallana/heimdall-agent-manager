@@ -6,6 +6,7 @@ package extension
 // shapes follow the hook docs / older Claude releases).
 
 import json "core:encoding/json"
+import "core:slice"
 import "core:strings"
 import "core:testing"
 import contracts "odin_test:contracts"
@@ -56,7 +57,8 @@ test_claude_session_start_maps_hello_and_session :: proc(t: ^testing.T) {
 	if len(evs) != 2 do return
 	testing.expect_value(t, evs[0].ev.kind, contracts.Ext_Event_Kind.Hello)
 	testing.expect_value(t, evs[0].ev.session_id, "cf4b17bd-aa1d-4d65-8f7d-63529dbb8b9f")
-	testing.expect_value(t, len(evs[0].ev.capabilities), 5)
+	testing.expect_value(t, len(evs[0].ev.capabilities), 6)
+	testing.expect(t, slice.contains(evs[0].ev.capabilities[:], "usage"), "claude declares the usage capability")
 	want := CLAUDE_CAPABILITIES
 	for c, i in want do if i < len(evs[0].ev.capabilities) do testing.expect_value(t, evs[0].ev.capabilities[i], c)
 	testing.expect_value(t, evs[1].ev.kind, contracts.Ext_Event_Kind.Session)

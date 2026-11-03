@@ -16,7 +16,8 @@ CODEX_EXT_VERSION :: "0.1.0"
 // Native view_image PostToolUse includes a base64 image, often several MiB.
 // Match the bounded CLI stdin reader; output remains capped independently below.
 CODEX_HOOK_INPUT_MAX :: HOOK_INPUT_MAX
-CODEX_CAPABILITIES :: [?]string{"activity", "subagents", "permissions", "file_edits", "session_id"}
+// "usage" = this provider emits usage.context_tokens (ham.ext.v1).
+CODEX_CAPABILITIES :: [?]string{"activity", "subagents", "permissions", "file_edits", "session_id", "usage"}
 
 Codex_Error :: enum { None, Too_Large, Malformed_Json }
 Codex_Mapped :: struct {

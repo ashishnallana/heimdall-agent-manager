@@ -287,3 +287,33 @@ test_ext_tokens_piggyback_on_status_frame :: proc(t: ^testing.T) {
 	// Unchanged snapshot: still nothing, however long the interval.
 	testing.expect_value(t, bridge_ext_token_enqueue_due(now + 600_000, id), 0)
 }
+
+@(test)
+test_ext_tokens_usage_supported_from_hello :: proc(t: ^testing.T) {
+	u: Bridge_Ext_Token_Usage
+	defer bridge_ext_token_usage_destroy(&u)
+	// No hello (Pi has no extension): the flag stays absent from the snapshot.
+	_ = tok_apply(t, &u, tok_event("tool.end", "s1", tok_metrics("5")), 500)
+	b := strings.builder_make(context.temp_allocator)
+	bridge_ext_token_usage_write_json(&b, u)
+	testing.expect(t, !strings.contains(strings.to_string(b), "usage_supported"))
+
+	testing.expect(t, tok_apply(t, &u, tok_event("hello", "s1", `,"payload":{"capabilities":["activity","usage"]}`), 1000))
+	testing.expect(t, u.has_usage_cap && u.usage_supported)
+	b = strings.builder_make(context.temp_allocator)
+	bridge_ext_token_usage_write_json(&b, u)
+	testing.expect(t, strings.contains(strings.to_string(b), `"usage_supported":true`))
+
+	// Survives the session-start reset that follows the hello.
+	_ = tok_apply(t, &u, tok_event("session", "s1", `,"payload":{"phase":"start","source":"startup"}`), 2000)
+	testing.expect(t, u.has_usage_cap && u.usage_supported)
+
+	// Antigravity-style hello without "usage": reported as false.
+	u2: Bridge_Ext_Token_Usage
+	defer bridge_ext_token_usage_destroy(&u2)
+	testing.expect(t, tok_apply(t, &u2, tok_event("hello", "s2", `,"payload":{"capabilities":["activity"]}`), 1000))
+	b = strings.builder_make(context.temp_allocator)
+	bridge_ext_token_usage_write_json(&b, u2)
+	testing.expect(t, strings.contains(strings.to_string(b), `"usage_supported":false`))
+	testing.expect(t, u2.updated_at_ms == 1000 && u2.dirty, "hello makes the snapshot reportable")
+}
