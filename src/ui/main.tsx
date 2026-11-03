@@ -14,6 +14,7 @@ import { bridgeUnsealTransport } from './api/endpoints/bridges';
 import { fetchMcpRecipients, deliverMcpEpochWrap } from './api/endpoints/mcp';
 import { apiUrl } from './api/cookieFetch';
 import { installAppViewportHeightSync } from './utils/appViewportHeight';
+import { installChunkReloadRecovery } from './utils/chunkReload';
 import { ShortcutProvider } from './services/shortcuts/ShortcutContext';
 import { ChordHud } from './components/shortcuts/ChordHud';
 import { ShortcutCheatsheetModal } from './components/shortcuts/ShortcutCheatsheetModal';
@@ -48,6 +49,11 @@ import { heimdallApi } from './api/heimdallApi';
 // are outside the React tree. See src/ui/utils/appViewportHeight.ts for why this needs a
 // settling tick and why it must never subtract `visualViewport.offsetTop`.
 if (typeof window !== 'undefined') installAppViewportHeightSync(window as never);
+
+// REQ-UI-CHUNK-RELOAD-1: a window loaded before a deploy (typically the long-lived
+// desktop window) reloads once when a lazy page's old chunk is gone, instead of
+// showing "Failed to fetch dynamically imported module". See utils/chunkReload.ts.
+if (typeof window !== 'undefined') installChunkReloadRecovery(window);
 
 installElectronApiFetchBridge();
 installDesktopUpdatePreparation(desktopCapabilities().desktopUpdates);
