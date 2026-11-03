@@ -148,18 +148,21 @@ export function ConversationComposerBody({
           onClick={onAttach}
         />
         {agentChip}
-        <span className="flex-1" aria-hidden="true" />
-        {mobile ? null : <Kbd data-debug-id="new-convo-send-shortcut">{SEND_SHORTCUT_HINT}</Kbd>}
-        {runtimeChip}
-        <IconButton
-          type="submit"
-          icon="arrow-up"
-          label="Start conversation"
-          variant="primary"
-          size={mobile ? 'md' : 'sm'}
-          data-debug-id="new-convo-composer-send-btn"
-          disabled={sendDisabled}
-        />
+        {/* One right-aligned group, so a narrow toolbar wraps it as a unit and the
+            send button never ends up alone on the left (§3.7). */}
+        <div data-debug-id="new-convo-composer-send-group" className="ml-auto flex min-w-0 items-center gap-2">
+          {mobile ? null : <Kbd data-debug-id="new-convo-send-shortcut">{SEND_SHORTCUT_HINT}</Kbd>}
+          {runtimeChip}
+          <IconButton
+            type="submit"
+            icon="arrow-up"
+            label="Start conversation"
+            variant="primary"
+            size={mobile ? 'md' : 'sm'}
+            data-debug-id="new-convo-composer-send-btn"
+            disabled={sendDisabled}
+          />
+        </div>
       </div>
     </>
   );
@@ -231,7 +234,7 @@ export function ShellComposerBody({
           disabled={openDisabled}
           onClick={onOpen}
           data-debug-id="new-shell-open"
-          className="active:scale-[.96] motion-reduce:active:scale-100"
+          className="active:scale-[.96] motion-reduce:active:scale-100 max-md:min-h-11"
         >
           {busy ? 'Opening…' : 'Open shell'}
         </Button>

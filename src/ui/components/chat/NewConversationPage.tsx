@@ -53,6 +53,14 @@ export function bridgeIssueText(mode: LauncherMode, bridgeClauseShown: boolean):
 export const NO_BRIDGE_EXIT_MS = 120;
 
 /**
+ * Spec §3.7: below 768px the composer docks to the bottom of the scroll area,
+ * lifted clear of the bottom tab bar (`--ui-bottom-chrome`) or the safe area.
+ * The canvas backdrop and top padding keep scrolled content from showing behind it.
+ * The page drops these classes while a launcher menu is open.
+ */
+export const LAUNCH_DOCK_MOBILE = 'max-md:sticky max-md:bottom-[max(var(--ui-bottom-chrome,0px),env(safe-area-inset-bottom,0px))] max-md:z-sticky max-md:bg-canvas max-md:pb-3 max-md:pt-2';
+
+/**
  * Which no-bridge state the page shows (spec §3.5 / §3.6, user-confirmed rule):
  *  - `full`: the full-screen NoBridgeOnline, only decided once, on the first
  *    bridge list of a cold start, when zero non-revoked bridges are online and the
@@ -124,6 +132,11 @@ export default function NewConversationPage({ embedded = false, footer, onLaunch
   const [pendingWrites, setPendingWrites] = useState(0);
   const [projectOpen, setProjectOpen] = useState(false);
   const [runtimeMenuOpen, setRuntimeMenuOpen] = useState(false);
+  const [headlineMenu, setHeadlineMenu] = useState<string | null>(null);
+  const [agentMenuOpen, setAgentMenuOpen] = useState(false);
+  // Spec §3.7: while any launcher menu is open (a bottom sheet on mobile) the
+  // composer drops out of its sticky dock, so it never sits above the scrim.
+  const menuOpen = Boolean(headlineMenu) || runtimeMenuOpen || agentMenuOpen;
   const [projectName, setProjectName] = useState('');
   const [projectDescription, setProjectDescription] = useState('');
   const [managementError, setManagementError] = useState('');
@@ -392,7 +405,7 @@ export default function NewConversationPage({ embedded = false, footer, onLaunch
   }
 
   return <section data-debug-id="new-conversation-page" data-no-bridge={showBanner ? 'banner' : undefined} className="w-full px-4 sm:px-8">
-    <div className={`mx-auto flex w-full max-w-[760px] flex-col gap-6 pb-16 pt-12 md:pt-[120px] ${swapInLauncher ? 'animate-composer-swap' : ''}`} onAnimationEnd={() => setSwapInLauncher(false)}>
+    <div className={`mx-auto flex w-full max-w-[760px] flex-col gap-6 pb-0 pt-12 md:pb-16 md:pt-[120px] ${swapInLauncher ? 'animate-composer-swap' : ''}`} onAnimationEnd={() => setSwapInLauncher(false)}>
       <LaunchHeadline
         mode={paneMode}
         onModeChange={setPaneMode}
@@ -406,9 +419,10 @@ export default function NewConversationPage({ embedded = false, footer, onLaunch
         onRuntimeChange={chooseRuntime}
         branch={branch}
         disabled={sending || !hydrated}
+        onMenuOpenChange={setHeadlineMenu}
       />
       {showBanner ? <NoBridgeBanner bridges={bridges} onCheckAgain={() => void bridgesQuery.refetch()} checking={bridgesQuery.isFetching} /> : null}
-      <div ref={composerRef} data-debug-id="new-convo-launch-dock" className={`relative w-full ${transitioning ? 'z-20' : ''}`}>
+      <div ref={composerRef} data-debug-id="new-convo-launch-dock" data-docked={menuOpen ? undefined : ''} className={`relative w-full ${menuOpen ? '' : LAUNCH_DOCK_MOBILE} ${transitioning ? 'z-20' : ''}`}>
         <LaunchComposer mode={paneMode} disabled={showBanner} onSubmit={paneMode === 'agent' ? submit : (event) => { event.preventDefault(); openShell(); }}>
           {paneMode === 'agent' ? (
             <ConversationComposerBody
@@ -435,6 +449,7 @@ export default function NewConversationPage({ embedded = false, footer, onLaunch
                 creating={createAgentState.isLoading}
                 error={managementError}
                 disabled={!hydrated || sending}
+                onOpenChange={setAgentMenuOpen}
               />}
               runtimeChip={<RuntimeMenu
                 capabilities={capabilities}
@@ -472,7 +487,7 @@ export default function NewConversationPage({ embedded = false, footer, onLaunch
         </div>
         {alertText ? <div role="alert" data-debug-id="new-convo-launch-error" className="flex flex-wrap items-center gap-2">
           <Text as="span" role="body-sm" tone="danger" className="m-0">{alertText}</Text>
-          {preferenceError ? <Button size="sm" tone="danger" data-debug-id="new-convo-retry-preferences-btn" disabled={pendingWrites > 0} onClick={() => { for (const field of Object.keys(preferenceFailures) as ('agent_id' | 'project_id' | 'bridge_id')[]) remember(field, latestSelections.current[field] || ''); }}>Retry saving selections</Button> : null}
+          {preferenceError ? <Button size="sm" tone="danger" className="max-md:min-h-11" data-debug-id="new-convo-retry-preferences-btn" disabled={pendingWrites > 0} onClick={() => { for (const field of Object.keys(preferenceFailures) as ('agent_id' | 'project_id' | 'bridge_id')[]) remember(field, latestSelections.current[field] || ''); }}>Retry saving selections</Button> : null}
         </div> : null}
       </div>
       <div data-debug-id="new-convo-footer" className={`flex items-center justify-center ${transitioning ? 'pointer-events-none opacity-0' : ''} transition-opacity duration-base`}>{footer}</div>

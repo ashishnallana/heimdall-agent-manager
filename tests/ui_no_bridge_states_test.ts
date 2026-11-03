@@ -256,6 +256,13 @@ test('cold start with zero online bridges shows the full screen with copy, panel
     const check = q(ctx.doc, 'no-bridge-check-again')!;
     assert.equal(check.tagName, 'BUTTON');
     assert.match(check.className, /bg-accent/, 'Check again is primary');
+    // Spec §3.7: below 768px the actions stack full width with 44px targets.
+    const actions = q(ctx.doc, 'no-bridge-actions')!.className.split(/\s+/);
+    for (const cls of ['flex-col', 'w-full', 'md:flex-row', 'md:w-auto']) assert.ok(actions.includes(cls), `actions have ${cls}`);
+    for (const el of [check, q(ctx.doc, 'no-bridge-download')!]) {
+      const cls = el.className.split(/\s+/);
+      assert.ok(cls.includes('w-full') && cls.includes('md:w-auto') && cls.includes('max-md:min-h-11'), 'full-width 44px action below md');
+    }
     const download = q(ctx.doc, 'no-bridge-download') as HTMLAnchorElement;
     assert.equal(download.tagName, 'A');
     assert.equal(download.getAttribute('href'), 'https://www.ninjy.ai/download');

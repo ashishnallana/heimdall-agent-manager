@@ -47,13 +47,13 @@ type Ctx = {
 };
 
 async function withPage(
-  setup: { bridges?: any[]; prefs?: Record<string, unknown>; reducedMotion?: boolean; storage?: Record<string, string>; failPreferenceWrites?: boolean },
+  setup: { bridges?: any[]; prefs?: Record<string, unknown>; reducedMotion?: boolean; storage?: Record<string, string>; failPreferenceWrites?: boolean; width?: number },
   run: (ctx: Ctx) => Promise<void>,
 ) {
   const { JSDOM } = await import('jsdom');
   const dom = new JSDOM('<!DOCTYPE html><html><body><main><div id="root"></div></main></body></html>', { url: 'http://localhost/' });
   const win = dom.window as any;
-  Object.defineProperty(win, 'innerWidth', { value: 1280, configurable: true });
+  Object.defineProperty(win, 'innerWidth', { value: setup.width ?? 1280, configurable: true });
   win.matchMedia = (q: string) => ({
     matches: Boolean(setup.reducedMotion) && q.includes('prefers-reduced-motion'),
     media: q, addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {},
@@ -365,5 +365,69 @@ test('a failed preference save shows its error and Retry in shell mode too', asy
     await until(ctx, () => !retry.disabled, 'Retry enabled');
     await click(ctx, retry);
     await until(ctx, () => patches().length > before, 'retry re-sends the preference write');
+  });
+});
+
+// Spec §3.7 (T9): below 768px every launcher menu is a bottom sheet, and the composer
+// docks to the bottom (sticky, above --ui-bottom-chrome) except while a sheet is open.
+test('mobile (390px): all five menus open as bottom sheets and the composer undocks while one is open', async () => {
+  await withPage({ width: 390, bridges: [RIVER, DAWN] }, async (ctx) => {
+    await ctx.render();
+    await until(ctx, () => !/Loading/.test(issuesText(ctx.doc)) && Boolean(q(ctx.doc, 'new-convo-runtime-picker')), 'hydration');
+    const dock = q(ctx.doc, 'new-convo-launch-dock')!;
+    const docked = () => dock.hasAttribute('data-docked') && dock.className.includes('max-md:sticky');
+    assert.ok(docked(), 'composer docked at rest');
+    for (const cls of ['max-md:bottom-[max(var(--ui-bottom-chrome,0px),env(safe-area-inset-bottom,0px))]', 'max-md:z-sticky', 'max-md:bg-canvas']) {
+      assert.ok(dock.className.includes(cls), `dock has ${cls}`);
+    }
+    // Page padding 48px 16px 0 on mobile.
+    const column = q(ctx.doc, 'new-convo-headline')!.closest('div.mx-auto') as HTMLElement;
+    for (const cls of ['pt-12', 'pb-0', 'md:pb-16']) assert.ok(column.className.split(/\s+/).includes(cls), `column has ${cls}`);
+    assert.ok(q(ctx.doc, 'new-conversation-page')!.className.split(/\s+/).includes('px-4'));
+    // No Kbd hint; the model name is hidden on the chip below md.
+    assert.ok(!q(ctx.doc, 'new-convo-send-shortcut'), 'no Kbd on mobile');
+    await until(ctx, () => Boolean(q(ctx.doc, 'new-convo-runtime-picker')!.querySelector('[data-runtime-chip-model]')), 'model on the chip');
+    const model = q(ctx.doc, 'new-convo-runtime-picker')!.querySelector('[data-runtime-chip-model]') as HTMLElement;
+    assert.ok(model && model.className.includes('hidden') && model.className.includes('md:inline'), 'model name hidden below md');
+    // 44px touch targets on the composer controls.
+    for (const id of ['new-convo-attach-btn', 'new-convo-composer-send-btn']) assert.ok(q(ctx.doc, id)!.className.includes('h-11'), `${id} is 44px`);
+
+    for (const token of ['new-convo-mode-token', 'new-convo-project-token', 'new-convo-machine-token', 'new-convo-agent-picker', 'new-convo-runtime-picker']) {
+      const trigger = q(ctx.doc, token);
+      assert.ok(trigger, `${token} rendered`);
+      assert.ok(/(^|\s)(min-)?h-11(\s|$)/.test(trigger!.className), `${token} is >= 44px`);
+      await click(ctx, trigger);
+      const sheet = ctx.doc.querySelector('[role="dialog"]') as HTMLElement | null;
+      assert.ok(sheet, `${token} opens a sheet`);
+      for (const cls of ['rounded-t-[var(--radius-xl)]', 'pb-[env(safe-area-inset-bottom)]', 'animate-sheet-in']) {
+        assert.ok(sheet!.className.includes(cls), `${token} sheet has ${cls}`);
+      }
+      assert.ok(sheet!.parentElement!.className.includes('bg-scrim'), `${token} sheet has a scrim`);
+      const handle = sheet!.querySelector('span[aria-hidden="true"]') as HTMLElement | null;
+      assert.ok(handle && handle.className.includes('w-9') && handle.className.includes('h-1'), `${token} sheet has a handle`);
+      if (token === 'new-convo-runtime-picker') {
+        const columns = q(ctx.doc, 'new-convo-model-column')!.parentElement as HTMLElement;
+        assert.ok(columns.className.includes('flex-col') || columns.className.includes('grid-cols-1'), 'provider menu columns stack');
+      }
+      assert.ok(!docked(), `${token}: composer is static while the sheet is open`);
+      await ctx.act(() => { ctx.doc.activeElement!.dispatchEvent(new ctx.win.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); });
+      await ctx.settle();
+      const closing = ctx.doc.querySelector('[role="dialog"]');
+      if (closing) await ctx.act(() => { closing.dispatchEvent(new ctx.win.Event('animationend', { bubbles: true })); });
+      await ctx.settle();
+      assert.ok(!ctx.doc.querySelector('[role="dialog"]'), `${token} sheet closed`);
+      assert.ok(docked(), `${token}: composer docks again after close`);
+    }
+  });
+});
+
+test('desktop (1280px): the composer is not docked by mobile rules and the Kbd hint shows', async () => {
+  await withPage({}, async (ctx) => {
+    await ctx.render();
+    await until(ctx, () => Boolean(q(ctx.doc, 'new-convo-runtime-picker')), 'hydration');
+    assert.ok(q(ctx.doc, 'new-convo-send-shortcut'), 'Kbd on desktop');
+    // The dock classes are all max-md: scoped, so nothing applies at >= 768px.
+    const dock = q(ctx.doc, 'new-convo-launch-dock')!;
+    assert.ok(dock.className.split(/\s+/).filter((c) => /sticky|bottom-|bg-canvas/.test(c)).every((c) => c.startsWith('max-md:')));
   });
 });

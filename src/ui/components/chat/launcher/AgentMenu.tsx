@@ -75,6 +75,8 @@ export interface AgentMenuProps {
   debugPrefix?: string;
   side?: 'bottom' | 'top';
   align?: 'start' | 'end';
+  /** Told whenever the menu opens or closes (the page undocks the mobile composer while a sheet is up). */
+  onOpenChange?: (open: boolean) => void;
 }
 
 /** Plain-text agent name (vault-armored names are never shown as ciphertext). */
@@ -119,6 +121,7 @@ export function AgentMenu({
   debugPrefix = 'new-convo',
   side = 'bottom',
   align = 'start',
+  onOpenChange,
 }: AgentMenuProps) {
   const [open, setOpen] = useState(false);
   const [view, setView] = useState<'list' | 'edit'>('list');
@@ -145,6 +148,7 @@ export function AgentMenu({
       setSwaps(0);
     }
     setOpen(next);
+    onOpenChange?.(next);
   }
 
   async function toggle(agentId: string, favorite: boolean) {

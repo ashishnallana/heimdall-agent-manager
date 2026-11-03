@@ -95,10 +95,14 @@ export function WithThisMachineSetup({ manager, offlineIds, children }: {
   return <ThisMachineProbe manager={resolved}>{detection => children(thisMachineSetupAction(detection, offlineIds))}</ThisMachineProbe>;
 }
 
+/** Below 768px every action is at least 44px tall (spec §3.7 touch targets). */
+const TOUCH_TARGET = 'max-md:min-h-11';
+
 function SetupWizardButton({ setup, size = 'sm' }: { setup: Exclude<ThisMachineSetup, null>; size?: 'sm' | 'md' }) {
   return <Button
     variant="secondary"
     size={size}
+    className={TOUCH_TARGET}
     leading={<Icon name="gear" size="sm" />}
     data-debug-id={SETUP_WIZARD_DEBUG_ID}
     data-setup-kind={setup.kind}
@@ -113,7 +117,7 @@ function DownloadLink({ size = 'md', className }: { size?: 'sm' | 'md' | 'lg'; c
     rel="noopener"
     variant="secondary"
     size={size}
-    className={className}
+    className={[TOUCH_TARGET, className].filter(Boolean).join(' ')}
     leading={<Icon name="download" size="sm" />}
     data-debug-id="no-bridge-download"
   >Download the bridge</ButtonLink>;
@@ -179,9 +183,9 @@ export function NoBridgeOnline({ bridges, onCheckAgain, checking = false, leavin
           <SetupWizardButton setup={setup} />
         </div> : null}
       </Panel> : null}
-      <div className="flex w-full flex-col gap-3 sm:w-auto sm:flex-row sm:flex-wrap sm:justify-center">
-        <Button variant="primary" size="lg" width="full" className="sm:w-auto" leading={<Icon name="refresh" size="sm" />} loading={checking} data-debug-id="no-bridge-check-again" onClick={onCheckAgain}>Check again</Button>
-        <DownloadLink size="lg" className="w-full sm:w-auto" />
+      <div data-debug-id="no-bridge-actions" className="flex w-full flex-col gap-3 md:w-auto md:flex-row md:flex-wrap md:justify-center">
+        <Button variant="primary" size="lg" width="full" className={`${TOUCH_TARGET} md:w-auto`} leading={<Icon name="refresh" size="sm" />} loading={checking} data-debug-id="no-bridge-check-again" onClick={onCheckAgain}>Check again</Button>
+        <DownloadLink size="lg" className="w-full md:w-auto" />
       </div>
       <Text role="body-sm" tone="muted" className="m-0">New machine? Get the bridge at <Link href={BRIDGE_DOWNLOAD_URL} target="_blank" rel="noopener" data-debug-id="no-bridge-download-note">ninjy.ai/download</Link>, install it, and sign in.</Text>
       <p role="status" data-debug-id="no-bridge-waiting" className="m-0 inline-flex items-center gap-2">
@@ -207,14 +211,14 @@ export function NoBridgeBanner({ bridges, onCheckAgain, checking = false, deskto
   const seenLine = mostRecentlySeenLine(bridges, nowMs ?? Date.now());
   return <div data-debug-id="no-bridge-banner" className="animate-composer-swap">
     <Alert tone="warning" title="No machine is online" className="p-4">
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-start">
+      <div className="flex flex-col gap-3 md:flex-row md:items-start">
         <div className="flex min-w-0 flex-1 flex-col gap-1">
           <Text as="span" role="body-sm" tone="primary" className="m-0">Conversations and shells run through a bridge on one of your machines. Start one and it shows up here.</Text>
           {seenLine ? <Text as="span" role="caption" tone="muted" className="m-0" data-debug-id="no-bridge-last-seen">{seenLine}</Text> : null}
         </div>
         <WithThisMachineSetup manager={desktopManager} offlineIds={offlineIds}>{setup => (
           <div className="flex flex-none flex-wrap gap-2">
-            <Button size="sm" variant="secondary" loading={checking} data-debug-id="no-bridge-check-again" onClick={onCheckAgain}>Check again</Button>
+            <Button size="sm" variant="secondary" className={TOUCH_TARGET} loading={checking} data-debug-id="no-bridge-check-again" onClick={onCheckAgain}>Check again</Button>
             <DownloadLink size="sm" />
             {setup ? <SetupWizardButton setup={setup} /> : null}
           </div>

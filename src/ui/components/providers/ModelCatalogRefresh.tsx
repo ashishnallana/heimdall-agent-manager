@@ -12,7 +12,7 @@ export default function ModelCatalogRefresh({ bridgeId, provider, profileId, onl
   const [error, setError] = useState('');
   const entry = status.currentData?.providers?.find((row: any) => row.provider === provider && (row.profile_id || row.provider) === (profileId || provider));
   return <div className="space-y-1">
-    <Button size="sm" variant="ghost" data-debug-id={`${debugPrefix}-model-refresh-btn`}
+    <Button size="sm" variant="ghost" className="max-md:min-h-11" data-debug-id={`${debugPrefix}-model-refresh-btn`}
       disabled={disabled || !bridgeId || !online || isLoading}
       leading={isLoading ? <Spinner size="sm" /> : <Icon name="refresh" size={14} />}
       onClick={async () => {
