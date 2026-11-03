@@ -633,7 +633,9 @@ MIGRATION_192_EXTENSION_VERSION_SYNC :: #load("migrations/192_extension_version_
 
 MIGRATION_193_EXTENSION_VERSION_SYNC :: #load("migrations/193_extension_version_sync_0_5_43.sql", string)
 
-migration_order :: [197]string {
+MIGRATION_194_EXTENSION_VERSION_SYNC :: #load("migrations/194_extension_version_sync_0_5_44.sql", string)
+
+migration_order :: [198]string {
 	"001_foundation.sql",
 	"002_owner_scoped_core.sql",
 	"003_device_tokens.sql",
@@ -831,6 +833,7 @@ migration_order :: [197]string {
 	"191_extension_version_sync_0_5_41.sql",
 	"192_extension_version_sync_0_5_42.sql",
 	"193_extension_version_sync_0_5_43.sql",
+	"194_extension_version_sync_0_5_44.sql",
 }
 
 // stop_before is a TEST SEAM: when non-empty, the apply loop stops in front of
@@ -1320,6 +1323,7 @@ migration_sql :: proc(name, migrations_dir: string) -> string {
 			return string(data)
 		}
 	}
+	if name == "194_extension_version_sync_0_5_44.sql" do return strings.clone(MIGRATION_194_EXTENSION_VERSION_SYNC)
 	if name == "193_extension_version_sync_0_5_43.sql" do return strings.clone(MIGRATION_193_EXTENSION_VERSION_SYNC)
 	if name == "192_extension_version_sync_0_5_42.sql" do return strings.clone(MIGRATION_192_EXTENSION_VERSION_SYNC)
 	if name == "191_extension_version_sync_0_5_41.sql" do return strings.clone(MIGRATION_191_EXTENSION_VERSION_SYNC)
