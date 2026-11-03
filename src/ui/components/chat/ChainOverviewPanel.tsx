@@ -3,7 +3,7 @@ import { useSelector } from 'react-redux';
 import { selectActiveVaultKey } from '../../store/vaultSlice';
 import { VaultText } from '../vault/VaultText';
 import { useAuthUser } from '../auth/AuthUserContext';
-import { isVaultArmored, decryptVaultText } from '../../utils/vaultContent';
+import { isVaultArmored, decryptVaultText, maskVaultArmored } from '../../utils/vaultContent';
 import {
   Badge,
   Button,
@@ -597,7 +597,9 @@ export default function ChainOverviewPanel({
               {members.map((member) => {
                 const instId = member.agentInstanceId || member.agent_instance_id;
                 const agentId = member.agentId || member.agent_id || '';
-                const name = member.displayName || member.display_name || instId;
+                // Names arrive opened by the query; a token it could not open (locked
+                // vault, other epoch) is masked, never rendered as ciphertext.
+                const name = maskVaultArmored(member.displayName || member.display_name || instId);
                 const rawStatus = String(member.runtimeStatus || member.runtime_status || 'stopped').toLowerCase();
                 const isStopped = rawStatus === 'stopped' || rawStatus === 'failed';
                 const isRunning = rawStatus === 'running' || rawStatus === 'idle' || rawStatus === 'ready';

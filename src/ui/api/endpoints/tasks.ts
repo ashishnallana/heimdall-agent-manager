@@ -5,7 +5,7 @@ import { upsertTaskLogEvent } from '../taskCache';
 import { heimdallApi, withSessionQuery } from '../heimdallApi';
 import { cookieJsonFetch, cookieJsonFetchEnvelope, cookieMutation } from '../cookieFetch';
 import { isVaultArmored, encryptVaultText, decryptVaultText, getActiveVaultKey } from '../../utils/vaultContent';
-import { decryptChainRecord, decryptChainList } from '../../utils/vaultChains';
+import { decryptChainRecord, decryptChainList, decryptChainMembers } from '../../utils/vaultChains';
 import { decryptTaskRecord, decryptTaskList, decryptTaskComments } from '../../utils/vaultTasks';
 import { taskCreateBridgeFields, taskPatchBridgeFields } from '../../utils/taskBridgePin';
 import { publishErrorMessage } from '../../utils/taskBrief';
@@ -712,11 +712,16 @@ export const tasksApi = heimdallApi.injectEndpoints({
         if (!chainId) return { data: { chain: null } };
         try {
           const raw = await cookieJsonFetch(`/task-chains/${encodeURIComponent(chainId)}`);
-          const data = unwrapData(raw);
-          let chain = data ? normalizeTaskChainDetail(data) : null;
+          let data = unwrapData(raw);
           const state: any = api?.getState?.();
           const isUnlocked = Boolean(state?.vault?.isUnlocked);
           const activeKey = getActiveVaultKey();
+          // Open member names on the wire record, before normalizing copies them
+          // into task assignee/reviewer refs.
+          if (isUnlocked && activeKey && data && Array.isArray(data.members)) {
+            data = { ...data, members: await decryptChainMembers(data.members, activeKey) };
+          }
+          let chain = data ? normalizeTaskChainDetail(data) : null;
           if (isUnlocked && activeKey && chain) {
             chain = await decryptChainRecord(chain, activeKey);
             if (Array.isArray(chain.tasks)) {
