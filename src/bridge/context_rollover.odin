@@ -423,12 +423,13 @@ bridge_rollover_on_ext_event :: proc(instance_id: string, idle: bool, now: i64) 
 // bridge_rollover_on_activity feeds an activity report that did not come from
 // extension ingest (the pane_diff screen detector, for providers without an
 // extension such as Pi) into the state machine. Only pane_diff is accepted: it
-// observes the instance's main pane, so it is always the main agent. Repeated
-// idle from several sources is harmless: Requested / restart_requested make
-// the transitions idempotent.
+// observes the instance's main pane, so it is always the main agent. Only an
+// explicit "idle" counts as a finished turn: waiting_user / waiting_approval
+// are blocked prompts, not rollover-safe. Repeated idle from several sources
+// is harmless: Requested / restart_requested make the transitions idempotent.
 bridge_rollover_on_activity :: proc(instance_id, activity, source: string, now: i64) {
 	if source != "pane_diff" || strings.trim_space(instance_id) == "" do return
-	bridge_rollover_on_ext_event(instance_id, bridge_runtime_normalize_activity_status(activity) == "idle", now)
+	bridge_rollover_on_ext_event(instance_id, activity == "idle", now)
 }
 
 // bridge_rollover_intercept_chat_send handles agent.chat.send. handled=false

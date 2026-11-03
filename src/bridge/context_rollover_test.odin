@@ -453,6 +453,33 @@ test_rollover_pane_diff_idle_advances_rollover :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(roll_rec.restarts), 1)
 }
 
+// waiting_user / waiting_approval are blocked prompts (the presentation layer
+// maps them to idle), so they must never deliver the handoff or restart.
+@(test)
+test_rollover_pane_diff_waiting_is_not_idle :: proc(t: ^testing.T) {
+	roll_begin()
+	id := "inst_test_roll_pane_wait"
+	defer roll_end(id)
+	now := bridge_runtime_now_ms()
+	roll_event(id, 85, false, now)
+	testing.expect_value(t, bridge_rollover_phase_of(id), Bridge_Rollover_Phase.Pending)
+	bridge_rollover_on_activity(id, "waiting_user", "pane_diff", now + 1)
+	bridge_rollover_on_activity(id, "waiting_approval", "pane_diff", now + 2)
+	testing.expect_value(t, bridge_rollover_phase_of(id), Bridge_Rollover_Phase.Pending)
+	testing.expect_value(t, len(roll_rec.requests), 0)
+	bridge_rollover_on_activity(id, "idle", "pane_diff", now + 3)
+	testing.expect_value(t, bridge_rollover_phase_of(id), Bridge_Rollover_Phase.Requested)
+	testing.expect_value(t, len(roll_rec.requests), 1)
+
+	rec := Bridge_Local_Agent_Token_Record{agent_instance_id = id, instance_token = "itok", role = .Agent}
+	_ = bridge_local_handle_agent_method("req_w", "agent.chat.send", strings.concatenate({`{"to":"`, id, `","body":"handoff"}`}, context.temp_allocator), rec)
+	testing.expect_value(t, bridge_rollover_phase_of(id), Bridge_Rollover_Phase.Restarting)
+	bridge_rollover_on_activity(id, "waiting_user", "pane_diff", now + 4)
+	testing.expect_value(t, len(roll_rec.restarts), 0)
+	bridge_rollover_on_activity(id, "idle", "pane_diff", now + 5)
+	testing.expect_value(t, len(roll_rec.restarts), 1)
+}
+
 // ext + pane_diff both reporting idle in one tick yield a single request/restart.
 @(test)
 test_rollover_duplicate_idle_from_two_sources_acts_once :: proc(t: ^testing.T) {
