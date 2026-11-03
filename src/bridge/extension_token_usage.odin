@@ -21,11 +21,20 @@ BRIDGE_EXT_TOKEN_PUSH_DELTA_PP :: 5
 BRIDGE_EXT_TOKEN_DEFAULT_WINDOW :: 200_000
 // A context drop to (100 - this)% or less of the previous value is a compaction.
 BRIDGE_EXT_COMPACTION_DROP_PCT :: 50
+// Conservative context estimate for an instance with no provider usage block
+// (Antigravity: metrics only; Pi: no extension): the tool-traffic sum
+// (est_tokens_total) understates the real context (prompts, replies, thinking),
+// so it is scaled by this factor. Only used while the provider reported no
+// context size (context_source = "estimate"); reported usage always wins. The
+// estimate restarts from zero on a session start and on a compaction event.
+BRIDGE_EXT_ESTIMATE_MULTIPLIER :: 1.5
+BRIDGE_EXT_ESTIMATE_SOURCE :: "estimate"
 
 Bridge_Ext_Token_Usage :: struct {
 	session_id:          string, // owned; provider session the counters belong to
 	tool_calls:          i64,
 	est_tokens_total:    i64, // sum of tool.end metrics.est_tokens
+	est_base:           i64, // est_tokens_total at the last compaction; the estimate counts from here
 	has_context:         bool,
 	context_tokens:      i64, // latest provider-reported context size
 	context_source:      string, // owned; usage.source of context_tokens
@@ -90,6 +99,12 @@ bridge_ext_token_usage_apply :: proc(u: ^Bridge_Ext_Token_Usage, ev: contracts.E
 		if !u.has_usage_cap || u.usage_supported != supported do changed = true
 		u.has_usage_cap, u.usage_supported = true, supported
 	}
+	if ev.kind == .Compaction {
+		// Both phases: the context shrank (or is about to), so the tool-traffic
+		// estimate restarts. est_tokens_total itself is a lifetime sum and stays.
+		if u.est_base != u.est_tokens_total do changed = true
+		u.est_base = u.est_tokens_total
+	}
 	if ev.kind == .Tool_End {
 		u.tool_calls += 1
 		if ev.has_metrics do u.est_tokens_total += max(ev.metrics.est_tokens, 0)
@@ -136,11 +151,31 @@ bridge_ext_token_usage_set_window :: proc(u: ^Bridge_Ext_Token_Usage, r: Bridge_
 	return true
 }
 
-// bridge_ext_token_usage_context_pct is context_tokens as a whole percentage of
-// the resolved window (floor); -1 until the provider reported a context size.
+// bridge_ext_token_usage_estimated_context is the tool-traffic estimate of the
+// context size: (est_tokens_total since the last reset/compaction) *
+// BRIDGE_EXT_ESTIMATE_MULTIPLIER. ok=false until a tool.end carried metrics.
+bridge_ext_token_usage_estimated_context :: proc(u: Bridge_Ext_Token_Usage) -> (tokens: i64, ok: bool) {
+	if u.est_tokens_total <= 0 do return 0, false
+	return i64(f64(max(u.est_tokens_total - u.est_base, 0)) * BRIDGE_EXT_ESTIMATE_MULTIPLIER), true
+}
+
+// bridge_ext_token_usage_effective_context is the context size rollover and the
+// hub act on: the provider-reported size when one was seen (source = its
+// usage.source), else the tool-traffic estimate (source = "estimate"), else
+// ok=false.
+bridge_ext_token_usage_effective_context :: proc(u: Bridge_Ext_Token_Usage) -> (tokens: i64, source: string, ok: bool) {
+	if u.has_context do return u.context_tokens, u.context_source, true
+	est, has_est := bridge_ext_token_usage_estimated_context(u)
+	if !has_est do return 0, "", false
+	return est, BRIDGE_EXT_ESTIMATE_SOURCE, true
+}
+
+// bridge_ext_token_usage_context_pct is the effective context as a whole
+// percentage of the resolved window (floor); -1 when there is no signal at all.
 bridge_ext_token_usage_context_pct :: proc(u: Bridge_Ext_Token_Usage) -> i64 {
-	if !u.has_context do return -1
-	return u.context_tokens * 100 / bridge_ext_token_usage_window(u)
+	tokens, _, ok := bridge_ext_token_usage_effective_context(u)
+	if !ok do return -1
+	return tokens * 100 / bridge_ext_token_usage_window(u)
 }
 
 // bridge_ext_token_push_due: a changed snapshot goes upstream when the per-instance
@@ -149,7 +184,8 @@ bridge_ext_token_push_due :: proc(u: Bridge_Ext_Token_Usage, now: i64) -> bool {
 	if !u.dirty do return false
 	if !u.has_pushed do return true
 	if now - u.last_push_at_ms >= BRIDGE_EXT_TOKEN_PUSH_MIN_INTERVAL_MS do return true
-	delta := abs(u.context_tokens - u.last_push_context)
+	cur, _, _ := bridge_ext_token_usage_effective_context(u)
+	delta := abs(cur - u.last_push_context)
 	return delta * 100 >= BRIDGE_EXT_TOKEN_PUSH_DELTA_PP * bridge_ext_token_usage_window(u)
 }
 
@@ -225,7 +261,7 @@ bridge_ext_token_mark_pushed :: proc(u: ^Bridge_Ext_Token_Usage, now: i64) {
 	u.dirty = false
 	u.has_pushed = true
 	u.last_push_at_ms = now
-	u.last_push_context = u.context_tokens
+	u.last_push_context, _, _ = bridge_ext_token_usage_effective_context(u^)
 }
 
 // bridge_ext_token_usage_write_json writes the snapshot object. context_tokens,
@@ -238,6 +274,11 @@ bridge_ext_token_usage_write_json :: proc(b: ^strings.Builder, u: Bridge_Ext_Tok
 		strings.write_string(b, fmt.tprintf(",\"context_tokens\":%d,\"context_source\":\"", u.context_tokens))
 		bridge_local_write_json_string(b, u.context_source)
 		strings.write_byte(b, '"')
+	}
+	if !u.has_context {
+		if est, ok := bridge_ext_token_usage_estimated_context(u); ok {
+			strings.write_string(b, fmt.tprintf(",\"context_source\":\"%s\",\"estimated_context_tokens\":%d", BRIDGE_EXT_ESTIMATE_SOURCE, est))
+		}
 	}
 	strings.write_string(b, fmt.tprintf(",\"context_window\":%d,\"window_source\":\"%s\"", bridge_ext_token_usage_window(u), bridge_context_window_source_name(u.window_source)))
 	if pct := bridge_ext_token_usage_context_pct(u); pct >= 0 do strings.write_string(b, fmt.tprintf(",\"context_pct\":%d", pct))

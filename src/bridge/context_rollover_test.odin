@@ -402,3 +402,27 @@ test_rollover_ingest_stop_triggers_request_and_withholds_idle :: proc(t: ^testin
 	_, _, pct := bridge_ext_context_window_for(id)
 	testing.expect_value(t, pct, -1)
 }
+
+// Antigravity-style stream: tool.end with metrics only, no usage block. The
+// estimate (x1.5) drives the state machine to Pending at >= 70% of 200K.
+@(test)
+test_rollover_pending_from_estimate_only_stream :: proc(t: ^testing.T) {
+	roll_begin()
+	id := "inst_test_roll_estimate"
+	defer roll_end(id)
+	bridge_runtime_mark_start_success(id)
+	now := bridge_runtime_now_ms()
+	ev :: proc(est: string) -> string {
+		return strings.concatenate({`{"schema":"ham.ext.v1","provider":"antigravity","ext_version":"0.1.0","event":"tool.end","ts":"2026-11-02T06:00:00Z","session_id":"s","tool":{"name":"Read","use_id":"tu"},"metrics":{"input_bytes":1,"response_bytes":1,"est_tokens":`, est, `}}`}, context.temp_allocator)
+	}
+	for raw in ([]string{ev("50000"), ev("30000")}) { // 80K * 1.5 = 120K = 60%
+		res := bridge_ext_ingest(Bridge_Local_Agent_Token_Record{agent_instance_id = id, instance_token = "tok_test", role = .Agent}, raw, now)
+		bridge_ext_ingest_result_destroy(&res)
+	}
+	testing.expect_value(t, bridge_rollover_phase_of(id), Bridge_Rollover_Phase.Normal)
+	res := bridge_ext_ingest(Bridge_Local_Agent_Token_Record{agent_instance_id = id, instance_token = "tok_test", role = .Agent}, ev("15000"), now + 1) // 95K*1.5 = 142.5K = 71%
+	bridge_ext_ingest_result_destroy(&res)
+	_, _, pct := bridge_ext_context_window_for(id)
+	testing.expect(t, pct >= 70, "estimate pct >= 70")
+	testing.expect_value(t, bridge_rollover_phase_of(id), Bridge_Rollover_Phase.Pending)
+}

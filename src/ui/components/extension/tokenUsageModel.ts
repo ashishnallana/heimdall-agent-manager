@@ -2,7 +2,8 @@
 // Pure logic, no React and no fetch (tests/ui_extension_token_usage_test.ts).
 //
 // The agent instance JSON carries, when known:
-//   token_usage  {tool_calls, est_tokens_total, context_tokens?, context_window?,
+//   token_usage  {tool_calls, est_tokens_total, context_tokens?, context_source?,
+//                 estimated_context_tokens? (context_source "estimate": tool-traffic estimate), context_window?,
 //                 window_source?, context_pct?, output_tokens_total?, compactions,
 //                 run_count?, usage_supported?, updated_at_ms}  (latest bridge snapshot)
 //   token_totals {total_context_tokens, total_est_tool_tokens, total_output_tokens,
@@ -19,6 +20,10 @@ export interface TokenUsageSnapshot {
   toolCalls: number;
   estTokensTotal: number;
   contextTokens: number | null;
+  /** True when contextPct comes from the bridge's tool-traffic estimate (no provider usage block). */
+  isEstimate: boolean;
+  /** Tokens behind contextPct: the provider figure, else the estimate. */
+  effectiveContextTokens: number | null;
   contextWindow: number | null;
   windowSource: WindowSource;
   /** Whole % of the window; null until the provider reported a context size. */
@@ -53,13 +58,18 @@ export function normalizeTokenUsage(raw: unknown): TokenUsageSnapshot | null {
   const contextTokens = count(raw.context_tokens);
   const contextWindow = count(raw.context_window) || null;
   const source = raw.window_source;
+  const estimated = raw.context_source === 'estimate' ? count(raw.estimated_context_tokens) : null;
+  const isEstimate = contextTokens === null && estimated !== null;
+  const effectiveContextTokens = contextTokens ?? (isEstimate ? estimated : null);
   let contextPct = count(raw.context_pct);
-  if (contextPct === null && contextTokens !== null && contextWindow) contextPct = Math.floor((contextTokens * 100) / contextWindow);
-  if (contextTokens === null) contextPct = null;
+  if (contextPct === null && effectiveContextTokens !== null && contextWindow) contextPct = Math.floor((effectiveContextTokens * 100) / contextWindow);
+  if (effectiveContextTokens === null) contextPct = null;
   return {
     toolCalls,
     estTokensTotal: est,
     contextTokens,
+    isEstimate,
+    effectiveContextTokens,
     contextWindow,
     windowSource: source === 'override' || source === 'config' || source === 'default' ? source : '',
     contextPct,
@@ -123,6 +133,8 @@ export function contextUnavailableText(provider?: unknown): string {
   return `Context tracking unavailable for ${name || 'this provider'}`;
 }
 
+export const CONTEXT_ESTIMATE_TEXT = 'estimated from tool traffic';
+
 export const CONTEXT_WAITING_TEXT = 'Waiting for signal';
 
 export interface ContextBadgeModel {
@@ -149,8 +161,9 @@ export function contextBadge(instance: any): ContextBadgeModel | null {
   const window = usage.contextWindow ? formatTokens(usage.contextWindow) : '';
   const source = windowSourceLabel(usage.windowSource);
   const tooltip = [
-    `Context ${formatTokens(usage.contextTokens ?? 0)}${window ? ` of ${window}` : ''} tokens (${pct}%)`,
+    `Context ${usage.isEstimate ? '~' : ''}${formatTokens(usage.effectiveContextTokens ?? 0)}${window ? ` of ${window}` : ''} tokens (${usage.isEstimate ? '~' : ''}${pct}%)`,
+    usage.isEstimate ? CONTEXT_ESTIMATE_TEXT : '',
     source ? `window: ${source}` : '',
   ].filter(Boolean).join(' · ');
-  return { pct, state: 'value', tone: contextTone(pct), label: `ctx ${pct}%`, tooltip };
+  return { pct, state: 'value', tone: contextTone(pct), label: `ctx ${usage.isEstimate ? '~' : ''}${pct}%`, tooltip };
 }

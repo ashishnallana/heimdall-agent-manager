@@ -317,3 +317,63 @@ test_ext_tokens_usage_supported_from_hello :: proc(t: ^testing.T) {
 	testing.expect(t, strings.contains(strings.to_string(b), `"usage_supported":false`))
 	testing.expect(t, u2.updated_at_ms == 1000 && u2.dirty, "hello makes the snapshot reportable")
 }
+
+// Estimate fallback: no provider usage block => tool traffic * multiplier.
+@(test)
+test_ext_tokens_estimate_used_when_no_usage :: proc(t: ^testing.T) {
+	u: Bridge_Ext_Token_Usage
+	defer bridge_ext_token_usage_destroy(&u)
+	testing.expect_value(t, bridge_ext_token_usage_context_pct(u), i64(-1))
+	_ = tok_apply(t, &u, tok_event("tool.end", "s1", tok_metrics("20000")), 1_000)
+	tokens, source, ok := bridge_ext_token_usage_effective_context(u)
+	testing.expect(t, ok)
+	testing.expect_value(t, tokens, i64(30_000)) // 20000 * 1.5
+	testing.expect_value(t, source, "estimate")
+	testing.expect_value(t, bridge_ext_token_usage_context_pct(u), i64(15)) // of the 200K default window
+	testing.expect(t, !u.has_context, "raw provider context stays unset")
+
+	b := strings.builder_make(context.temp_allocator)
+	bridge_ext_token_usage_write_json(&b, u)
+	js := strings.to_string(b)
+	testing.expect(t, strings.contains(js, `"context_source":"estimate","estimated_context_tokens":30000`), js)
+	testing.expect(t, strings.contains(js, `"context_pct":15`), js)
+	testing.expect(t, !strings.contains(js, `"context_tokens"`), js)
+}
+
+@(test)
+test_ext_tokens_provider_usage_overrides_estimate :: proc(t: ^testing.T) {
+	u: Bridge_Ext_Token_Usage
+	defer bridge_ext_token_usage_destroy(&u)
+	_ = tok_apply(t, &u, tok_event("tool.end", "s1", tok_metrics("20000")), 1_000)
+	_ = tok_apply(t, &u, tok_event("tool.end", "s1", tok_usage("10000")), 2_000)
+	tokens, source, ok := bridge_ext_token_usage_effective_context(u)
+	testing.expect(t, ok)
+	testing.expect_value(t, tokens, i64(10_000))
+	testing.expect_value(t, source, "claude_transcript")
+	b := strings.builder_make(context.temp_allocator)
+	bridge_ext_token_usage_write_json(&b, u)
+	testing.expect(t, !strings.contains(strings.to_string(b), "estimated_context_tokens"), strings.to_string(b))
+}
+
+@(test)
+test_ext_tokens_estimate_resets_on_compaction_and_session :: proc(t: ^testing.T) {
+	u: Bridge_Ext_Token_Usage
+	defer bridge_ext_token_usage_destroy(&u)
+	_ = tok_apply(t, &u, tok_event("tool.end", "s1", tok_metrics("40000")), 1_000)
+	testing.expect_value(t, bridge_ext_token_usage_context_pct(u), i64(30))
+	// Both compaction phases restart the estimate; the lifetime sum is kept.
+	_ = tok_apply(t, &u, tok_event("compaction", "s1", `,"payload":{"phase":"pre","trigger":"auto"}`), 2_000)
+	testing.expect_value(t, bridge_ext_token_usage_context_pct(u), i64(0))
+	testing.expect_value(t, u.est_tokens_total, i64(40_000))
+	_ = tok_apply(t, &u, tok_event("tool.end", "s1", tok_metrics("20000")), 3_000)
+	testing.expect_value(t, bridge_ext_token_usage_context_pct(u), i64(15))
+	_ = tok_apply(t, &u, tok_event("compaction", "s1", `,"payload":{"phase":"post","trigger":"auto"}`), 4_000)
+	testing.expect_value(t, bridge_ext_token_usage_context_pct(u), i64(0))
+	// A compact-source session restart does not reset; a real start does.
+	_ = tok_apply(t, &u, tok_event("tool.end", "s1", tok_metrics("20000")), 5_000)
+	_ = tok_apply(t, &u, tok_event("session", "s1", `,"payload":{"phase":"start","source":"compact"}`), 6_000)
+	testing.expect_value(t, bridge_ext_token_usage_context_pct(u), i64(15))
+	_ = tok_apply(t, &u, tok_event("session", "s2", `,"payload":{"phase":"start","source":"startup"}`), 7_000)
+	_, _, ok := bridge_ext_token_usage_effective_context(u)
+	testing.expect(t, !ok, "session start clears the estimate")
+}
