@@ -96,10 +96,12 @@ export interface AccordionItemProps extends RootClassNameProps {
   /** The header content. */
   title: React.ReactNode;
   children?: React.ReactNode;
+  /** `data-debug-id` of the header button. */
+  debugId?: string;
 }
 
 /** A single collapsible section. */
-export const AccordionItem: React.FC<AccordionItemProps> = ({ value, title, className, children }) => {
+export const AccordionItem: React.FC<AccordionItemProps> = ({ value, title, className, children, debugId }) => {
   const { openValues, toggle, baseId } = useAccordion();
   const open = openValues.includes(value);
   const headerId = `${baseId}-h-${value}`;
@@ -110,6 +112,7 @@ export const AccordionItem: React.FC<AccordionItemProps> = ({ value, title, clas
       <h3 className="m-0">
         <button
           type="button"
+          data-debug-id={debugId}
           id={headerId}
           aria-expanded={open}
           aria-controls={panelId}

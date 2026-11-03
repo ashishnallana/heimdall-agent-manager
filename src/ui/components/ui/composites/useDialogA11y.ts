@@ -18,12 +18,22 @@ const FOCUSABLE =
   'a[href],area[href],input:not([disabled]),select:not([disabled]),textarea:not([disabled]),' +
   'button:not([disabled]),[tabindex]:not([tabindex="-1"]),[contenteditable="true"]';
 
+export interface DialogA11yOptions {
+  /** Move focus into the panel on open. Default true. Pass false when the content focuses itself (a menu focusing its checked item). */
+  autoFocus?: boolean;
+  /** Element to restore focus to on close, instead of whatever was focused when it opened. */
+  returnFocusRef?: React.RefObject<HTMLElement | null>;
+}
+
 export function useDialogA11y(
   open: boolean,
   onClose: () => void,
   panelRef: React.RefObject<HTMLElement | null>,
+  options: DialogA11yOptions = {},
 ): void {
   const restoreRef = useRef<HTMLElement | null>(null);
+  const optionsRef = useRef(options);
+  optionsRef.current = options;
 
   // Read the latest onClose without re-running the setup effect. Keying the effect
   // on `onClose` (typically an inline `() => onOpenChange(false)`) would re-run it
@@ -37,10 +47,13 @@ export function useDialogA11y(
     if (!open) return;
 
     // Remember what to restore focus to, then move focus into the dialog.
-    restoreRef.current = (document.activeElement as HTMLElement) ?? null;
+    const { autoFocus = true, returnFocusRef } = optionsRef.current;
+    restoreRef.current = returnFocusRef?.current ?? (document.activeElement as HTMLElement) ?? null;
     const panel = panelRef.current;
-    const first = panel?.querySelector<HTMLElement>(FOCUSABLE);
-    (first ?? panel)?.focus();
+    if (autoFocus) {
+      const first = panel?.querySelector<HTMLElement>(FOCUSABLE);
+      (first ?? panel)?.focus();
+    }
 
     // Lock background scroll.
     const prevOverflow = document.body.style.overflow;

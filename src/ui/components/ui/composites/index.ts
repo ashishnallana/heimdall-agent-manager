@@ -22,7 +22,7 @@ export { Drawer } from './Drawer';
 export type { DrawerProps, DrawerSize, DrawerSide } from './Drawer';
 
 export { Menu, MenuItem, MenuLabel, MenuSeparator } from './Menu';
-export type { MenuProps, MenuItemProps } from './Menu';
+export type { MenuProps, MenuItemProps, MenuMode } from './Menu';
 
 export { Popover } from './Popover';
 export type { PopoverProps } from './Popover';

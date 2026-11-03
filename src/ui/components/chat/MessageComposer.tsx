@@ -4,7 +4,21 @@ import ProviderIcon from '../providers/ProviderIcon';
 import { useSelector } from 'react-redux';
 import { selectUseExternalKeyboard } from '../../store/inputPreferencesSlice';
 
-export const MessageComposerInput = forwardRef<HTMLTextAreaElement, TextareaHTMLAttributes<HTMLTextAreaElement> & { mobile: boolean; debugId: string }>(function MessageComposerInput({ mobile, debugId, ...props }, forwardedRef) {
+/**
+ * `appearance`: `pane` (default) is the conversation pane's compact field. `launch`
+ * is the new-conversation composer's field: flush (no padding), 72px tall on
+ * desktop, body 14/20; `mono` sets it in the code face (the shell command field).
+ */
+export type MessageComposerInputProps = TextareaHTMLAttributes<HTMLTextAreaElement> & { mobile: boolean; debugId: string; appearance?: 'pane' | 'launch'; mono?: boolean };
+const COMPOSER_INPUT_BASE = 'w-full resize-none bg-transparent text-primary outline-none placeholder:text-muted';
+function composerInputClassName(mobile: boolean, appearance: 'pane' | 'launch', mono: boolean): string {
+  const face = mono ? 'font-mono text-code leading-5' : '';
+  if (mobile) return `block min-h-6 max-h-[72px] ${COMPOSER_INPUT_BASE} p-0 ${mono ? face : 'text-base leading-6'}`;
+  if (appearance === 'launch') return `block min-h-[72px] ${COMPOSER_INPUT_BASE} p-0 ${mono ? face : 'text-sm leading-5'}`;
+  return `min-h-[44px] ${COMPOSER_INPUT_BASE} px-1 py-1 ${mono ? face : 'text-sm'}`;
+}
+
+export const MessageComposerInput = forwardRef<HTMLTextAreaElement, MessageComposerInputProps>(function MessageComposerInput({ mobile, debugId, appearance = 'pane', mono = false, ...props }, forwardedRef) {
   const useExternalKeyboard = useSelector(selectUseExternalKeyboard);
   const ref = useRef<HTMLTextAreaElement>(null);
   const requestedMode = useExternalKeyboard ? 'none' : 'text';
@@ -79,7 +93,7 @@ export const MessageComposerInput = forwardRef<HTMLTextAreaElement, TextareaHTML
         setInputMode(latestMode.current);
       }, 0);
     }}
-    data-debug-id={debugId} rows={mobile ? 1 : 2} className={mobile ? 'block min-h-6 max-h-[72px] w-full resize-none bg-transparent p-0 text-base leading-6 text-primary outline-none placeholder:text-muted' : 'min-h-[44px] w-full resize-none bg-transparent px-1 py-1 text-sm text-primary outline-none placeholder:text-muted'} />;
+    data-debug-id={debugId} rows={mobile ? 1 : 2} className={composerInputClassName(mobile, appearance, mono)} />;
 });
 
 export type ComposerActionsProps = {

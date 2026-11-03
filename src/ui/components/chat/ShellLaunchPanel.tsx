@@ -1,18 +1,13 @@
-import { useEntitlements } from '../../hooks/useEntitlements';
 import UpgradePrompt from '../billing/UpgradePrompt';
-import { isPlanLimitError, planLimitDetails } from '../../utils/planLimit';
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { useDispatch, useSelector } from 'react-redux';
+import { useEffect, useRef, useState } from 'react';
 import { Combobox, Icon, Modal } from '@ui';
-import { useCreateShellMutation, useKillShellMutation, useListShellsQuery, type ShellSession } from '../../api/endpoints/shells';
-import { selectIsVaultUnlocked } from '../../store/vaultSlice';
+import { useKillShellMutation, useListShellsQuery, type ShellSession } from '../../api/endpoints/shells';
 import { bridgeLabel } from '../../utils/bridgeLaunchOptions';
-import { composerBridgeIsArchived, composerBridgeIsOnline } from '../../utils/composerBridgeOptions';
+import { composerBridgeIsOnline } from '../../utils/composerBridgeOptions';
 import { describeApiError } from '../../utils/bridgeVaultStatus';
-import { buildInteractiveShellRequest, resolveProjectBridgeShellCwd } from '../shells/interactiveShellLaunch';
 import { attachableShells, shellPaneName, shellUptime } from '../shells/shellPaneModel';
+import { useShellLaunch } from '../shells/useShellLaunch';
 import BridgeDirectoryPicker from '../BridgeDirectoryPicker';
-import { useListBridgeDirQuery } from '../../api/endpoints/bridgeFs';
 
 export interface ShellLaunchPanelProps {
   projects: any[];
@@ -37,44 +32,17 @@ export interface ShellLaunchPanelProps {
  * a bridge directory browser) or attach to / kill a running one.
  */
 export function ShellLaunchPanel({ projects, bridges, projectId, onProjectChange, initialBridgeId, openIds = [], isMobile, disabled, autoFocusStart = false, onOpenShell }: ShellLaunchPanelProps) {
-  const entitlements = useEntitlements();
-  disabled = disabled || !entitlements.shells_enabled;
-  const dispatch = useDispatch();
-  const vaultUnlocked = useSelector(selectIsVaultUnlocked);
-  const usableBridges = useMemo(
-    () => bridges.filter((b) => !composerBridgeIsArchived(b)).sort((a, b) => Number(composerBridgeIsOnline(b)) - Number(composerBridgeIsOnline(a))),
-    [bridges],
-  );
-  const onlineBridges = usableBridges.filter(composerBridgeIsOnline);
-  const [bridgeId, setBridgeId] = useState('');
-  useEffect(() => {
-    if (bridgeId && usableBridges.some((b) => b.bridge_id === bridgeId)) return;
-    const preferred = onlineBridges.find((b) => b.bridge_id === initialBridgeId) || onlineBridges[0];
-    setBridgeId(preferred?.bridge_id || '');
-  }, [bridgeId, initialBridgeId, onlineBridges, usableBridges]);
-  const bridge = usableBridges.find((b) => b.bridge_id === bridgeId);
-  const project = projects.find((p) => p.project_id === projectId);
-
-  // The working directory defaults to the project's path on the chosen bridge and
-  // re-defaults whenever the project or bridge changes; the user can edit/browse.
-  // Without a project path, fall back to the bridge's own default directory (the
-  // path its filesystem API lists for an empty path, i.e. the user's home) so the
-  // field always shows the real directory the shell will start in.
-  const projectPath = (project && bridgeId && resolveProjectBridgeShellCwd(project, bridgeId)) || '';
-  const bridgeHomeQuery = useListBridgeDirQuery({ bridgeId, path: '' }, { skip: Boolean(projectPath) || !bridge || !composerBridgeIsOnline(bridge) });
-  const projectCwd = projectPath || (bridgeHomeQuery.data?.ok !== false ? String(bridgeHomeQuery.data?.path || '') : '');
-  const [cwd, setCwd] = useState(projectCwd);
-  useEffect(() => { setCwd(projectCwd); }, [projectCwd]);
+  const launch = useShellLaunch({ projects, bridges, projectId, initialBridgeId, onStarted: onOpenShell });
+  const { usableBridges, onlineBridges, bridgeId, setBridgeId, bridge, defaultCwd, cwd, setCwd, blocked, start } = launch;
+  disabled = disabled || !launch.shellsEnabled;
   const [browsing, setBrowsing] = useState(false);
 
-  const [createShell, createState] = useCreateShellMutation();
-  const blocked = !entitlements.shells_enabled ? 'plan' : !vaultUnlocked ? 'vault' : !bridge || !composerBridgeIsOnline(bridge) ? 'bridge' : '';
   const startRef = useRef<HTMLButtonElement>(null);
   useEffect(() => {
-    if (!autoFocusStart || disabled || blocked || createState.isLoading) return;
+    if (!autoFocusStart || disabled || blocked || launch.busy) return;
     const frame = requestAnimationFrame(() => startRef.current?.focus());
     return () => cancelAnimationFrame(frame);
-  }, [autoFocusStart, blocked, createState.isLoading, disabled]);
+  }, [autoFocusStart, blocked, launch.busy, disabled]);
 
   const [query, setQuery] = useState('');
   const [allProjects, setAllProjects] = useState(false);
@@ -85,17 +53,10 @@ export function ShellLaunchPanel({ projects, bridges, projectId, onProjectChange
   const bridgeNameOf = (id: string) => bridgeLabel(bridges.find((b) => b.bridge_id === id)) || id;
 
   const field = `w-full rounded-xl border border-subtle bg-surface px-3 text-primary outline-none focus:border-accent disabled:opacity-50 ${isMobile ? 'min-h-11 text-base' : 'min-h-10 text-sm'}`;
-  const start = async () => {
-    if (blocked || !bridgeId) return;
-    try {
-      const session = await createShell(buildInteractiveShellRequest({ bridgeId, cwd: cwd.trim() || undefined, projectId: projectId || undefined })).unwrap();
-      onOpenShell(session.session_id);
-    } catch { /* error rendered below */ }
-  };
 
   return (
     <div data-debug-id="new-convo-shell-panel" className="flex w-full flex-col gap-6">
-      {!entitlements.shells_enabled || isPlanLimitError(createState.error) ? <UpgradePrompt details={isPlanLimitError(createState.error) ? planLimitDetails(createState.error) : { limit: 'shells_enabled' }} debugId="shell-launch-upgrade" /> : null}
+      {launch.upgradeDetails ? <UpgradePrompt details={launch.upgradeDetails} debugId="shell-launch-upgrade" /> : null}
       <section className="rounded-2xl border border-subtle bg-surface p-4">
         <h2 className="mb-3 text-sm font-semibold text-primary">Start a new shell</h2>
         <div className={`grid gap-3 ${isMobile ? 'grid-cols-1' : 'grid-cols-2'}`}>
@@ -131,7 +92,7 @@ export function ShellLaunchPanel({ projects, bridges, projectId, onProjectChange
                 value={cwd}
                 disabled={disabled}
                 onChange={(e) => setCwd(e.target.value)}
-                placeholder={!bridge ? 'Choose a bridge' : bridgeHomeQuery.isFetching ? 'Loading…' : '/path/to/directory'}
+                placeholder={!bridge ? 'Choose a bridge' : launch.defaultCwdLoading ? 'Loading…' : '/path/to/directory'}
                 className={`${field} min-w-0 flex-1 font-mono`}
               />
               <button
@@ -155,17 +116,17 @@ export function ShellLaunchPanel({ projects, bridges, projectId, onProjectChange
             <Icon name="alert" size={14} />No bridge is online. Start a bridge to launch a shell.
           </p>
         ) : null}
-        {createState.error ? <p role="alert" className="mt-3 text-sm text-danger">{describeApiError(createState.error) || 'Could not start the shell.'}</p> : null}
+        {launch.errorMessage ? <p role="alert" className="mt-3 text-sm text-danger">{launch.errorMessage}</p> : null}
         <div className="mt-4 flex justify-end">
           <button
             ref={startRef}
             type="button"
             data-debug-id="new-convo-shell-start-btn"
-            disabled={disabled || Boolean(blocked) || createState.isLoading}
+            disabled={disabled || Boolean(blocked) || launch.busy}
             onClick={() => void start()}
             className={`inline-flex items-center justify-center gap-2 rounded-xl bg-accent px-4 font-semibold text-accent-fg disabled:opacity-40 ${isMobile ? 'min-h-11 w-full text-base' : 'min-h-10 text-sm'}`}
           >
-            <Icon name="play" size={15} />{createState.isLoading ? 'Starting…' : 'Start shell'}
+            <Icon name="play" size={15} />{launch.busy ? 'Starting…' : 'Start shell'}
           </button>
         </div>
       </section>
@@ -232,7 +193,7 @@ export function ShellLaunchPanel({ projects, bridges, projectId, onProjectChange
               debugId="new-convo-shell-dir-picker"
               bridgeId={bridge.bridge_id}
               bridgeLabel={bridgeLabel(bridge)}
-              initialPath={cwd || projectCwd}
+              initialPath={cwd || defaultCwd}
               onPick={(path) => { setCwd(path); setBrowsing(false); }}
               onClose={() => setBrowsing(false)}
             />

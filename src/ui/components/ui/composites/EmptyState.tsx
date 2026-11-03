@@ -19,6 +19,13 @@
  *
  * Tokens only: border/radius/type/color via tokens. No raw values.
  *
+ * Variant `page` (opt-in; default `card` is unchanged): a whole-page blocked
+ * state such as "No bridge is online" — no dashed card, centred column capped at
+ * 560px, 24px rhythm, `media` (e.g. a 56px `IconWell`) in place of the glyph,
+ * and `children` laid out as full-width blocks (panels, action rows, notes)
+ * rather than a muted text run. Pass a heading element as `title` (e.g.
+ * `<Text as="h1" role="headline">`).
+ *
  * Escape hatch: `className` merges onto the root.
  */
 import React from 'react';
@@ -38,6 +45,10 @@ export interface EmptyStateProps
   action?: React.ReactNode;
   /** Free body when title/description are not enough (the bare-text variant). */
   children?: React.ReactNode;
+  /** `card` (default): the dashed placeholder card. `page`: a full-page blocked state. */
+  variant?: 'card' | 'page';
+  /** Decorative lead element (e.g. an `IconWell`); replaces `icon`. */
+  media?: React.ReactNode;
 }
 
 export const EmptyState: React.FC<EmptyStateProps> = ({
@@ -47,8 +58,31 @@ export const EmptyState: React.FC<EmptyStateProps> = ({
   action,
   className,
   children,
+  variant = 'card',
+  media,
   ...rest
 }) => {
+  if (variant === 'page') {
+    const pageClassName = ['mx-auto flex w-full max-w-[560px] flex-col items-center gap-6 text-center', className ?? '']
+      .filter(Boolean)
+      .join(' ')
+      .trim();
+    return (
+      <div {...rest} data-empty-state="page" className={pageClassName}>
+        {media ?? (icon ? <Icon name={icon} size="xl" className="text-faint" /> : null)}
+        {title || description ? (
+          <div className="flex flex-col items-center gap-2">
+            {title ? <div className="text-primary">{title}</div> : null}
+            {description ? (
+              <div className="max-w-[460px] text-[length:var(--text-body-sm-size)] text-muted">{description}</div>
+            ) : null}
+          </div>
+        ) : null}
+        {children ? <div className="flex w-full flex-col items-center gap-6">{children}</div> : null}
+        {action ? <div className="flex w-full justify-center">{action}</div> : null}
+      </div>
+    );
+  }
   const rootClassName = [
     'flex flex-col items-center justify-center gap-2 rounded-[var(--radius-lg)] border border-dashed',
     'border-subtle bg-neutral-soft px-6 py-12 text-center',
@@ -61,7 +95,7 @@ export const EmptyState: React.FC<EmptyStateProps> = ({
 
   return (
     <div {...rest} className={rootClassName}>
-      {icon ? <Icon name={icon} size="lg" className="text-faint" /> : null}
+      {media ?? (icon ? <Icon name={icon} size="lg" className="text-faint" /> : null)}
       {title ? <div className="text-title text-primary">{title}</div> : null}
       {description ? (
         <div className="text-[length:var(--text-body-sm-size)] text-muted">{description}</div>

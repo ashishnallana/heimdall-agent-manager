@@ -65,14 +65,20 @@ test('hidden sidebar renders no rail; the fixed top-left cluster compacts on age
   // Hidden: the workspace's top-left header / other pages reserve the cluster's space.
   assert.match(source, /workspaceLeading=\{isEffectiveCollapsed \? <div aria-hidden="true" data-debug-id="shell-top-left-cluster-spacer"/);
   assert.match(source, /workspaceLeadingWidth=\{isEffectiveCollapsed \? topLeftClusterWidth : 0\}/);
-  // Other pages keep their top bar whether or not the sidebar is open.
-  assert.match(source, /\{!isWorkspaceRoute \? \(\s*<div\s+data-debug-id="shell-top-bar"/);
+  // Other pages draw no top bar. An invisible spacer reserves the floating
+  // cluster's row in both sidebar states, so the page's y offset never depends
+  // on whether the sidebar is open (and content is never covered by the toggle).
+  assert.doesNotMatch(source, /shell-top-bar/);
+  assert.match(source, /\{!isWorkspaceRoute \? \(\s*<div\s+aria-hidden="true"\s+data-debug-id="shell-top-spacer"\s+className="window-drag shrink-0"\s+style=\{\{ height: chromeHeight \}\}/);
+  const spacerAt = source.indexOf('data-debug-id="shell-top-spacer"');
+  const spacerBlock = source.slice(source.lastIndexOf('{!isWorkspaceRoute', spacerAt), source.indexOf('<RouteOutlet', spacerAt));
+  assert.doesNotMatch(spacerBlock, /isEffectiveCollapsed|sidebarCollapsed|windowChromeStyle/, 'spacer offset is independent of the sidebar state');
   assert.doesNotMatch(source, /shell-sidebar-reopen-bar/);
   // Chromium applies -webkit-app-region in DOM order: the top-left cluster (with the
   // no-drag toggle) must come after every drag strip it overlaps, or a macOS
   // hidden-inset window swallows the toggle's clicks.
   const clusterAt = source.indexOf('data-debug-id="shell-top-left-cluster"');
-  for (const strip of ['<aside', 'data-debug-id="shell-top-bar"', '<RouteOutlet']) {
+  for (const strip of ['<aside', 'data-debug-id="shell-top-spacer"', '<RouteOutlet']) {
     assert.ok(source.indexOf(strip) > 0 && clusterAt > source.indexOf(strip), `top-left cluster renders after ${strip}`);
   }
   // The toggle flips the persisted desktop preference / the mobile drawer.
@@ -138,4 +144,25 @@ test('REQ-BAR-3: vault status module lives in the bottom status bar; no lock/unl
   assert.match(source, /if \(bridgeReconciliationRef\.current\) return bridgeReconciliationRef\.current/);
   // The password-era lock surfaces are gone.
   assert.doesNotMatch(source, /setUnlockModalOpen|lockAllConnectedBridges|lockVault\(/);
+});
+
+test('T14: list/detail pages start right under the top spacer and run down to the status bar', () => {
+  // The desktop two-pane route frame keeps its inline padding but takes no vertical
+  // padding: the spacer already clears the cluster, and PageShell owns the rest.
+  const frameStart = source.indexOf('data-debug-id="shell-route-frame"');
+  assert.ok(frameStart > 0, 'route frame carries a debug id');
+  const frame = source.slice(frameStart, source.indexOf('>', source.indexOf('}', frameStart + 200)));
+  const [twoPane, other] = frame.split("\n            : '");
+  assert.match(twoPane, /h-full min-h-0/);
+  assert.doesNotMatch(twoPane, /(^|\s)(sm:|lg:)?py-\d/, 'two-pane frame has no vertical padding');
+  // Home, forms and mobile keep the original rhythm.
+  assert.match(other, /py-2 sm:px-4 sm:py-4 lg:px-5 lg:py-5/);
+
+  const css = fs.readFileSync(path.join(REPO_ROOT, 'src/ui/components/ui/composites/PageShell.css'), 'utf8');
+  assert.match(css, /\.ui-pageshell-header \{[^}]*padding: var\(--ps-pad-top\) var\(--ps-pad-x\) var\(--space-4\);/);
+  assert.match(css, /data-rhythm='banded'\] \.ui-pageshell-body \{[^}]*padding: 0 var\(--ps-pad-x\) var\(--ps-pad-bottom\);/);
+  assert.match(css, /--ps-pad-top: var\(--space-4\);[\s\S]*--ps-pad-bottom: var\(--space-4\);/);
+  assert.match(css, /@media \(min-width: 640px\)[^}]*--ps-pad-top: var\(--space-3\);/);
+  assert.doesNotMatch(css, /--ps-pad-y/, 'the old shared top/bottom pad is gone');
+  assert.doesNotMatch(css, /var\(--space-8\)/, 'no 32px tail under the banded body');
 });

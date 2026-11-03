@@ -3394,7 +3394,7 @@ export function AgentChatPane({
           onAnswerQuestions={(sourceMessageId, submission) => answerQuestions({ conversationId, sourceMessageId, submission }).unwrap()}
           formatTimestamp={formatMessageTimestamp}
           getDeliveryStatus={deliveryStatusFor}
-          agentIsWorking={isWorking}
+          agentActivity={<AgentActivityBubbles key={agentInstanceId} instanceId={agentInstanceId} isWorking={isWorking} />}
           bottomInset={composerDockHeight}
           renderMessageBody={({ message }) => renderConversationMessageBody(message)}
           wrapperClassName="relative min-h-0 min-w-0 max-w-full flex-1 overflow-hidden overflow-x-hidden"
@@ -3467,7 +3467,6 @@ export function AgentChatPane({
           className="ui-float-dock absolute inset-x-0 bottom-0 z-20 mx-auto w-full max-w-[calc(56rem+1.5rem)]"
         >
           <div aria-hidden="true" className="ui-frost-tail" />
-          <AgentActivityBubbles instanceId={agentInstanceId} />
           {trayNotice ? (
             <div className="pointer-events-none mb-2 flex justify-center px-3">
               <div

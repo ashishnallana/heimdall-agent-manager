@@ -29,6 +29,8 @@ export default {
       colors: {
         canvas: 'var(--color-canvas)',
         backdrop: 'var(--color-backdrop)',
+        // Heavier, unblurred dim behind mobile bottom-sheet menus.
+        scrim: 'var(--color-scrim)',
         surface: {
           DEFAULT: 'var(--color-surface)',
           raised: 'var(--color-surface-raised)',
@@ -62,6 +64,8 @@ export default {
       },
       fontSize: {
         display: ['var(--text-display-size)', { lineHeight: 'var(--text-display-leading)', letterSpacing: 'var(--text-display-tracking)', fontWeight: 'var(--text-display-weight)' }],
+        headline: ['var(--text-headline-size)', { lineHeight: 'var(--text-headline-leading)', letterSpacing: 'var(--text-headline-tracking)', fontWeight: 'var(--text-headline-weight)' }],
+        'headline-sm': ['var(--text-headline-sm-size)', { lineHeight: 'var(--text-headline-sm-leading)', letterSpacing: 'var(--text-headline-tracking)', fontWeight: 'var(--text-headline-weight)' }],
         heading: ['var(--text-heading-size)', { lineHeight: 'var(--text-heading-leading)', letterSpacing: 'var(--text-heading-tracking)', fontWeight: 'var(--text-heading-weight)' }],
         title: ['var(--text-title-size)', { lineHeight: 'var(--text-title-leading)', letterSpacing: 'var(--text-title-tracking)', fontWeight: 'var(--text-title-weight)' }],
         body: ['var(--text-body-size)', { lineHeight: 'var(--text-body-leading)', letterSpacing: 'var(--text-body-tracking)', fontWeight: 'var(--text-body-weight)' }],
@@ -70,6 +74,7 @@ export default {
         caption: ['var(--text-caption-size)', { lineHeight: 'var(--text-caption-leading)', letterSpacing: 'var(--text-caption-tracking)', fontWeight: 'var(--text-caption-weight)' }],
         overline: ['var(--text-overline-size)', { lineHeight: 'var(--text-overline-leading)', letterSpacing: 'var(--text-overline-tracking)', fontWeight: 'var(--text-overline-weight)' }],
         code: ['var(--text-code-size)', { lineHeight: 'var(--text-code-leading)', letterSpacing: 'var(--text-code-tracking)', fontWeight: 'var(--text-code-weight)' }],
+        'code-sm': ['var(--text-code-sm-size)', { lineHeight: 'var(--text-code-sm-leading)', letterSpacing: 'var(--text-code-sm-tracking)', fontWeight: 'var(--text-code-sm-weight)' }],
         // Body/label long-tail remap (EL / 02-tokens.md): the raw Tailwind
         // `text-sm` / `text-xs` scale is repointed at the `body` / `label` tokens
         // so the ~1000-node body/label tail picks up token leading/weight/tracking
@@ -111,6 +116,60 @@ export default {
       },
       transitionTimingFunction: {
         standard: 'var(--ease-standard)',
+        emphasized: 'var(--ease-emphasized)',
+      },
+      // Conversation launcher motion (values match the redesign reference). The
+      // reduced-motion guard for these utilities lives in src/ui/styles.css.
+      keyframes: {
+        tokSwap: {
+          from: { opacity: '0', transform: 'translateY(8px)', filter: 'blur(2px)' },
+          to: { opacity: '1', transform: 'none', filter: 'none' },
+        },
+        menuIn: {
+          from: { opacity: '0', transform: 'translateY(-4px) scale(.97)' },
+          to: { opacity: '1', transform: 'none' },
+        },
+        pop: {
+          from: { transform: 'scale(.6)', opacity: '0' },
+          to: { transform: 'none', opacity: '1' },
+        },
+        fadeSlide: {
+          from: { opacity: '0', transform: 'translateX(6px)' },
+          to: { opacity: '1', transform: 'none' },
+        },
+        composerSwap: {
+          from: { opacity: '0', transform: 'translateY(6px)' },
+          to: { opacity: '1', transform: 'none' },
+        },
+        breathe: {
+          '0%, 100%': { opacity: '.35', transform: 'scale(.85)' },
+          '50%': { opacity: '1', transform: 'none' },
+        },
+        sheetIn: {
+          from: { transform: 'translateY(100%)' },
+          to: { transform: 'none' },
+        },
+        // Scrim fade for bottom sheets (reference `fade`).
+        fade: {
+          from: { opacity: '0' },
+          to: { opacity: '1' },
+        },
+      },
+      animation: {
+        'tok-swap': 'tokSwap var(--duration-slow) var(--ease-emphasized)',
+        'menu-in': 'menuIn var(--duration-base) var(--ease-emphasized)',
+        pop: 'pop var(--duration-base) var(--ease-emphasized)',
+        'fade-slide': 'fadeSlide var(--duration-base) var(--ease-standard)',
+        'composer-swap': 'composerSwap var(--duration-slow) var(--ease-emphasized)',
+        // A looping "waiting" pulse; its 1.6s period is a loop rate, not a
+        // transition, so it does not map to a duration token.
+        breathe: 'breathe 1.6s ease-in-out infinite',
+        'sheet-in': 'sheetIn var(--duration-slow) var(--ease-emphasized)',
+        // Exits: the entrance played backwards at the close timing (motion spec #6, #17, #18).
+        'menu-out': 'menuIn var(--duration-fast) var(--ease-standard) reverse forwards',
+        'sheet-out': 'sheetIn var(--duration-base) var(--ease-standard) reverse forwards',
+        'fade-in': 'fade var(--duration-base) var(--ease-emphasized)',
+        'fade-out': 'fade var(--duration-base) var(--ease-standard) reverse forwards',
       },
     },
   },
