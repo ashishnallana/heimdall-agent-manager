@@ -81,6 +81,7 @@ test_wake_nudge_live_child_keeps_process_and_refreshes_task_md :: proc(t: ^testi
 	Server :: struct {
 		listener: posix.FD,
 		pings, queries, inputs, keys, unexpected: int,
+		stop: bool, // set by the test once the handler returned; the server never gives up on a slow client
 		typed: [dynamic]byte,
 	}
 	server := Server{listener = listener}
@@ -88,11 +89,11 @@ test_wake_nudge_live_child_keeps_process_and_refreshes_task_md :: proc(t: ^testi
 	worker := thread.create_and_start_with_data(&server, proc(data: rawptr) {
 		context.allocator = runtime.heap_allocator()
 		s := (^Server)(data)
-		for _ in 0..<8 {
+		for !sync.atomic_load(&s.stop) {
 			pfd := posix.pollfd{fd = s.listener, events = {.IN}}
-			if posix.poll(&pfd, 1, 2000) <= 0 do return
+			if posix.poll(&pfd, 1, 50) <= 0 do continue
 			fd := posix.accept(s.listener, nil, nil)
-			if fd < 0 do return
+			if fd < 0 do continue
 			request, ok := pty_host_read_frame(fd)
 			if !ok || len(request) == 0 { posix.close(fd); continue }
 			payload := make([dynamic]byte)
@@ -158,6 +159,7 @@ test_wake_nudge_live_child_keeps_process_and_refreshes_task_md :: proc(t: ^testi
 	})
 	defer delete(wake)
 	bridge_hub_handle_wake_agent(nil, wake)
+	sync.atomic_store(&server.stop, true)
 	thread.join(worker)
 
 	testing.expect_value(t, server.unexpected, 0) // no close / spawn: the child is kept

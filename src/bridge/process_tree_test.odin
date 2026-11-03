@@ -2,6 +2,7 @@ package main
 
 import "base:runtime"
 import "core:strings"
+import "core:sync"
 import "core:testing"
 import "core:time"
 
@@ -225,12 +226,22 @@ test_process_tree_cache_ttl :: proc(t: ^testing.T) {
 	process_tree_reset_cache()
 	defer process_tree_reset_cache()
 
+	// Seed a fresh cache entry instead of collecting live data: a live collection
+	// queries the process-global pty-host daemon socket (other tests point it at
+	// mocks) and can outlast the 2s TTL under load, making p1 != p2.
+	sync.mutex_lock(&process_tree_cache_mu)
+	process_tree_cached_prometheus = strings.clone("seeded_metric 1\n", runtime.heap_allocator())
+	process_tree_cache_tick = time.tick_now()
+	process_tree_has_cache = true
+	sync.mutex_unlock(&process_tree_cache_mu)
+
 	p1 := process_tree_get_cached_prometheus(context.allocator)
 	defer delete(p1)
 
 	p2 := process_tree_get_cached_prometheus(context.allocator)
 	defer delete(p2)
 
+	testing.expect_value(t, p1, "seeded_metric 1\n")
 	testing.expect_value(t, p1, p2)
 }
 
