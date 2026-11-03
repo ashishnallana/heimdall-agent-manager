@@ -47,7 +47,7 @@ type Ctx = {
 };
 
 async function withPage(
-  setup: { bridges?: any[]; prefs?: Record<string, unknown>; reducedMotion?: boolean; storage?: Record<string, string> },
+  setup: { bridges?: any[]; prefs?: Record<string, unknown>; reducedMotion?: boolean; storage?: Record<string, string>; failPreferenceWrites?: boolean },
   run: (ctx: Ctx) => Promise<void>,
 ) {
   const { JSDOM } = await import('jsdom');
@@ -90,6 +90,10 @@ async function withPage(
     try { body = raw ? JSON.parse(String(raw)) : {}; } catch { body = raw; }
     calls.push({ method, url, body });
     const path = new URL(url, 'http://localhost').pathname;
+    if (setup.failPreferenceWrites && method === 'PATCH' && path.endsWith('/me/conversation-launch')) {
+      const failure = JSON.stringify({ error: { code: 'unavailable', message: 'Preferences are unavailable.' } });
+      return { ok: false, status: 503, headers: { get: () => 'application/json' }, text: async () => failure, json: async () => JSON.parse(failure) } as any;
+    }
     let data: any = {};
     if (path.endsWith('/me/conversation-launch')) data = prefs;
     else if (path.endsWith('/agents') && method === 'GET') data = AGENTS;
@@ -257,6 +261,10 @@ test('mode switch swaps the composer body with composerSwap, persists heimdall:n
     assert.equal(command.placeholder, 'Run a command, or leave empty for an interactive shell');
     assert.ok(command.className.includes('font-mono'));
     assert.equal(squash(q(ctx.doc, 'new-shell-kind')?.textContent), 'zsh');
+    const prompt = q(ctx.doc, 'new-shell-prompt')!;
+    const promptClasses = prompt.className.split(/\s+/);
+    assert.ok(promptClasses.includes('text-accent'), 'the $ prompt is accent');
+    assert.ok(!promptClasses.includes('text-primary'), 'the $ prompt carries no competing primary tone');
     assert.equal(squash(q(ctx.doc, 'new-shell-hint')?.textContent), 'Opens in the project folder on riverwood');
     assert.equal(squash(q(ctx.doc, 'new-convo-mode-token')?.textContent), 'shell');
 
@@ -338,5 +346,23 @@ test('issues render as a quiet status line with rewritten copy, and send stays d
     assert.doesNotMatch(issuesText(ctx.doc), /Agent settings/);
     await type(ctx, q(ctx.doc, 'new-convo-composer-input'), 'hello');
     assert.ok(sendButton(ctx.doc)!.disabled);
+  });
+});
+
+test('a failed preference save shows its error and Retry in shell mode too', async () => {
+  await withPage({ failPreferenceWrites: true, storage: { 'heimdall:new-pane-mode': 'shell' } }, async (ctx) => {
+    await ctx.render();
+    await until(ctx, () => Boolean(q(ctx.doc, 'new-shell-command')) && Boolean(q(ctx.doc, 'new-convo-project-token')), 'shell mode');
+    await click(ctx, q(ctx.doc, 'new-convo-project-token'));
+    await click(ctx, q(ctx.doc, 'new-convo-project-option-none'));
+    await until(ctx, () => Boolean(q(ctx.doc, 'new-convo-launch-error')), 'preference error alert');
+    assert.ok(q(ctx.doc, 'new-shell-command'), 'still in shell mode');
+    assert.ok(q(ctx.doc, 'new-convo-retry-preferences-btn'), 'Retry saving selections is offered in shell mode');
+    const patches = () => ctx.calls.filter((c) => c.method === 'PATCH' && c.url.includes('/me/conversation-launch'));
+    const before = patches().length;
+    const retry = q(ctx.doc, 'new-convo-retry-preferences-btn') as HTMLButtonElement;
+    await until(ctx, () => !retry.disabled, 'Retry enabled');
+    await click(ctx, retry);
+    await until(ctx, () => patches().length > before, 'retry re-sends the preference write');
   });
 });

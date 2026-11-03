@@ -196,7 +196,7 @@ export function ShellComposerBody({
   return (
     <>
       <div className="flex min-w-0 items-start gap-2">
-        <Text as="span" role="code" className="text-accent" aria-hidden="true">$</Text>
+        <Text as="span" role="code" tone="accent" aria-hidden="true" data-debug-id="new-shell-prompt">$</Text>
         <MessageComposerInput
           ref={inputRef}
           mobile={mobile}

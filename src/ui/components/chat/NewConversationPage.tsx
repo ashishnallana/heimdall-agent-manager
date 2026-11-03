@@ -317,7 +317,7 @@ export default function NewConversationPage({ footer, onLaunched, launchIntent }
   const statusLines = paneMode === 'agent'
     ? (sending ? [`Creating conversation and starting on ${selectedBridge?.label || 'selected bridge'}…`] : issues)
     : shellIssues;
-  const alertText = paneMode === 'agent' ? error || preferenceError : shell.errorMessage;
+  const alertText = paneMode === 'agent' ? error || preferenceError : shell.errorMessage || preferenceError;
 
   const attachmentRows = attachments.length ? <ul data-debug-id="new-convo-attachments" className="m-0 flex list-none flex-col gap-2 p-0">{attachments.map(a => (
     <li key={a.localId} className="flex flex-wrap items-center gap-2 rounded-[var(--radius-md)] border border-strong px-3 py-1">
@@ -409,7 +409,7 @@ export default function NewConversationPage({ footer, onLaunched, launchIntent }
         </div>
         {alertText ? <div role="alert" data-debug-id="new-convo-launch-error" className="flex flex-wrap items-center gap-2">
           <Text as="span" role="body-sm" tone="danger" className="m-0">{alertText}</Text>
-          {paneMode === 'agent' && preferenceError ? <Button size="sm" tone="danger" data-debug-id="new-convo-retry-preferences-btn" disabled={pendingWrites > 0} onClick={() => { for (const field of Object.keys(preferenceFailures) as ('agent_id' | 'project_id' | 'bridge_id')[]) remember(field, latestSelections.current[field] || ''); }}>Retry saving selections</Button> : null}
+          {preferenceError ? <Button size="sm" tone="danger" data-debug-id="new-convo-retry-preferences-btn" disabled={pendingWrites > 0} onClick={() => { for (const field of Object.keys(preferenceFailures) as ('agent_id' | 'project_id' | 'bridge_id')[]) remember(field, latestSelections.current[field] || ''); }}>Retry saving selections</Button> : null}
         </div> : null}
       </div>
       <div data-debug-id="new-convo-footer" className={`flex items-center justify-center ${transitioning ? 'pointer-events-none opacity-0' : ''} transition-opacity duration-base`}>{footer}</div>
