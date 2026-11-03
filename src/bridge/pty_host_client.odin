@@ -750,6 +750,7 @@ bridge_pty_host_signal :: proc(client: ^Pty_Host_Client, shell_id: string, signa
 pty_host_request_deadline :: proc(socket_path: string, request: []byte, timeout_ms: int) -> (Pty_Host_Reply, bool) {
     if timeout_ms <= 0 do return {}, false
     start := time.tick_now()
+    if !pty_host_test_socket_allowed(socket_path) do return {}, false
     fd, dial_ok := local_socket.dial_nonblocking(strings.trim_prefix(socket_path, "unix:"))
     if !dial_ok do return {}, false
     defer local_socket.close(fd)
@@ -790,22 +791,37 @@ pty_host_request_deadline :: proc(socket_path: string, request: []byte, timeout_
 }
 
 // pty_host_test_socket_allowed is the test-only fence around the pty-host socket:
-// a unit test may only talk to a socket it created under the (test) scratch root,
-// never the bridge's private socket directory (<scratch>/heimdall-<uid>/, where
-// every real bridge's daemon lives) nor anything under the data dir. A test that
-// resolves such a path (a dangling or temp-reused string, a config loaded from the
-// real home) is refused instead of pinging, spawning or killing a live daemon.
-// Production builds compile this to "always allowed".
+// a unit test may only talk to a socket that really lives (after resolving symlinks,
+// dot segments and repeated separators) inside the test scratch root or /tmp, and
+// never inside the bridge's private socket directory (<scratch>/heimdall-<uid>/,
+// where every real bridge's daemon lives) nor under a .local/share/heimdall data
+// dir. A test that resolves such a path (a dangling or temp-reused string, a config
+// loaded from the real home) is refused instead of pinging, spawning or killing a
+// live daemon. Production builds compile this to "always allowed".
 pty_host_test_socket_allowed :: proc(socket_path: string) -> bool {
 	when !ODIN_TEST {
 		return true
 	} else {
 		path := strings.trim_prefix(socket_path, "unix:")
 		if !strings.has_prefix(path, "/") do return false
-		root := bridge_scratch_root(context.temp_allocator)
-		private_dir := fmt.tprintf("/%s/", bridge_os_private_dir_name())
-		if strings.contains(path, private_dir) do return false
-		if strings.contains(path, "/.local/share/heimdall/") do return false
-		return strings.has_prefix(path, root) || strings.has_prefix(path, "/tmp/")
+		resolved, ok := pty_host_test_resolve_path(path)
+		if !ok do return false
+		private_name := bridge_os_private_dir_name()
+		parts := strings.split(resolved, "/", context.temp_allocator)
+		for i in 0..<len(parts) {
+			if parts[i] == private_name do return false
+			if i + 2 < len(parts) && parts[i] == ".local" && parts[i+1] == "share" && parts[i+2] == "heimdall" do return false
+		}
+		scratch := bridge_scratch_root(context.temp_allocator)
+		roots := [2]string{scratch, "/tmp"}
+		for root in roots {
+			real_root, root_ok := bridge_os_real_path(root)
+			if !root_ok do continue
+			// The real private dir may be reached through a symlink alias.
+			private_real, private_ok := bridge_os_real_path(strings.concatenate({real_root, "/", private_name}, context.temp_allocator))
+			if private_ok && pty_host_test_path_within(resolved, private_real) do return false
+			if pty_host_test_path_within(resolved, real_root) do return true
+		}
+		return false
 	}
 }

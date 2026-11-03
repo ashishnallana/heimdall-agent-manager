@@ -1,6 +1,7 @@
 package main
 
 import "core:fmt"
+import "core:os"
 import "core:strings"
 import "core:sync"
 import "core:testing"
@@ -68,4 +69,88 @@ pty_host_test_fence_blocks_dial_and_ensure_daemon :: proc(t: ^testing.T) {
 	defer pty_host_test_restore_socket(swap)
 	sock, ok := bridge_pty_host_ensure_daemon()
 	testing.expect(t, !ok && sock == "", "ensure_daemon must not ping/spawn at a live path under test")
+}
+
+// Helpers for pty_host_test_socket_allowed (kept in a _test file so non-test and
+// Windows builds never reference bridge_os_real_path).
+// pty_host_test_path_within is a component-boundary containment check: "/tmpx" is
+// not within "/tmp".
+pty_host_test_path_within :: proc(path, root: string) -> bool {
+	if path == root do return true
+	prefix := root if strings.has_suffix(root, "/") else strings.concatenate({root, "/"}, context.temp_allocator)
+	return strings.has_prefix(path, prefix)
+}
+
+// pty_host_test_resolve_path canonicalises an absolute path: realpath(3) on the
+// longest existing prefix (symlinks, "." and ".." resolved by the kernel view), then
+// the not-yet-existing tail appended. A tail containing "." or ".." is refused.
+// Temp-allocated.
+pty_host_test_resolve_path :: proc(path: string) -> (string, bool) {
+	trimmed := strings.trim_right(path, "/")
+	if trimmed == "" do return "/", true
+	prefix := trimmed
+	tail := ""
+	for {
+		if real, ok := bridge_os_real_path(prefix); ok {
+			if tail == "" do return real, true
+			for part in strings.split(tail, "/", context.temp_allocator) {
+				if part == "." || part == ".." do return "", false
+			}
+			base := strings.trim_right(real, "/")
+			parts := make([dynamic]string, context.temp_allocator)
+			for part in strings.split(tail, "/", context.temp_allocator) {
+				if part != "" do append(&parts, part)
+			}
+			return strings.concatenate({base, "/", strings.join(parts[:], "/", context.temp_allocator)}, context.temp_allocator), true
+		}
+		slash := strings.last_index_byte(prefix, '/')
+		if slash <= 0 do return "", false
+		tail = strings.concatenate({prefix[slash+1:], "/", tail} if tail != "" else {prefix[slash+1:]}, context.temp_allocator)
+		prefix = strings.trim_right(prefix[:slash], "/")
+		if prefix == "" do prefix = "/"
+	}
+}
+
+@(test)
+pty_host_test_fence_uses_containment_not_prefixes :: proc(t: ^testing.T) {
+	private_dir := bridge_os_private_dir_name()
+	scratch := bridge_scratch_root(context.temp_allocator)
+	bad := []string{
+		"/tmp/../run/non-test.sock",
+		"/tmp/./../etc/x.sock",
+		fmt.tprintf("/tmp/%s/../%s/229a.sock", private_dir, private_dir),
+		fmt.tprintf("/tmp//%s//229a.sock", private_dir),
+		fmt.tprintf("/tmp/./%s/229a.sock", private_dir),
+		fmt.tprintf("%s/../%s/229a.sock", scratch, private_dir),
+		"/tmpx/sibling.sock",
+		"/home/u/.local/share/heimdall/bridges/b/run/pty-host.sock",
+	}
+	for p in bad {
+		testing.expect(t, !pty_host_test_socket_allowed(p), fmt.tprintf("must be refused: %s", p))
+	}
+	testing.expect(t, pty_host_test_socket_allowed("/tmp//ham-fence-ok.sock"), "repeated separators inside /tmp stay allowed")
+	testing.expect(t, pty_host_test_socket_allowed("/tmp/ham-nonexistent-dir/ham.sock"), "nonexistent tail under /tmp allowed")
+}
+
+@(test)
+pty_host_test_fence_resolves_symlink_aliases :: proc(t: ^testing.T) {
+	dir := fmt.tprintf("/tmp/ham-fence-link-%d", os.get_pid())
+	defer os.remove(dir)
+	// Symlink inside /tmp pointing at the real home: must be refused.
+	home, _ := os.lookup_env("HOME", context.temp_allocator)
+	if home != "" && os.is_dir(home) {
+		testing.expect(t, os.symlink(home, dir) == nil, "symlink setup")
+		testing.expect(t, !pty_host_test_socket_allowed(fmt.tprintf("%s/.local/share/heimdall/x.sock", dir)), "symlink into data dir must be refused")
+		testing.expect(t, !pty_host_test_socket_allowed(fmt.tprintf("%s/anything.sock", dir)), "symlink escaping /tmp must be refused")
+	}
+}
+
+@(test)
+pty_host_test_fence_blocks_deadline_request :: proc(t: ^testing.T) {
+	live := fmt.tprintf("/tmp/%s/229a79e7825cb2b6.sock", bridge_os_private_dir_name())
+	request := []byte{0}
+	_, ok := pty_host_request_deadline(live, request, 50)
+	testing.expect(t, !ok, "deadline request to a live private-dir socket must be refused under test")
+	_, ok = pty_host_request_deadline("unix:/tmp/../run/x.sock", request, 50)
+	testing.expect(t, !ok, "deadline request via dot segments must be refused")
 }
