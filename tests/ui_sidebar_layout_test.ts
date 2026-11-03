@@ -66,10 +66,13 @@ test('hidden sidebar renders no rail; the fixed top-left cluster compacts on age
   assert.match(source, /workspaceLeading=\{isEffectiveCollapsed \? <div aria-hidden="true" data-debug-id="shell-top-left-cluster-spacer"/);
   assert.match(source, /workspaceLeadingWidth=\{isEffectiveCollapsed \? topLeftClusterWidth : 0\}/);
   // Other pages draw no top bar. An invisible spacer reserves the floating
-  // cluster's row only while the sidebar is hidden (or in an integrated desktop
-  // window, for dragging), so content is never covered by the toggle.
+  // cluster's row in both sidebar states, so the page's y offset never depends
+  // on whether the sidebar is open (and content is never covered by the toggle).
   assert.doesNotMatch(source, /shell-top-bar/);
-  assert.match(source, /\{!isWorkspaceRoute && \(isEffectiveCollapsed \|\| windowChromeStyle !== 'native'\) \? \(\s*<div\s+aria-hidden="true"\s+data-debug-id="shell-top-spacer"\s+className="window-drag shrink-0"\s+style=\{\{ height: chromeHeight \}\}/);
+  assert.match(source, /\{!isWorkspaceRoute \? \(\s*<div\s+aria-hidden="true"\s+data-debug-id="shell-top-spacer"\s+className="window-drag shrink-0"\s+style=\{\{ height: chromeHeight \}\}/);
+  const spacerAt = source.indexOf('data-debug-id="shell-top-spacer"');
+  const spacerBlock = source.slice(source.lastIndexOf('{!isWorkspaceRoute', spacerAt), source.indexOf('<RouteOutlet', spacerAt));
+  assert.doesNotMatch(spacerBlock, /isEffectiveCollapsed|sidebarCollapsed|windowChromeStyle/, 'spacer offset is independent of the sidebar state');
   assert.doesNotMatch(source, /shell-sidebar-reopen-bar/);
   // Chromium applies -webkit-app-region in DOM order: the top-left cluster (with the
   // no-drag toggle) must come after every drag strip it overlaps, or a macOS

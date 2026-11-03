@@ -301,10 +301,10 @@ test('Windows hook tracks geometry, viewport resize, fullscreen replay and unsub
 
 test('right safe area reaches the top spacer, workspace cluster and pane/dock reservations', () => {
   const workspace = read('src/ui/components/mainWorkspace/Workspace.tsx');
-  // Integrated desktop windows (mac-hidden / win-overlay) always keep the
-  // chrome-height spacer, so pages stay clear of the overlay window controls.
-  assert.match(appShellSource, /const \{ style: windowChromeStyle, insetLeft: rawControlsInset \} = useWindowChrome\(\)/);
-  assert.match(appShellSource, /\{!isWorkspaceRoute && \(isEffectiveCollapsed \|\| windowChromeStyle !== 'native'\) \? \(/);
+  // Every non-workspace page keeps the chrome-height spacer (in every window
+  // style and sidebar state), so pages stay clear of the overlay window controls.
+  assert.match(appShellSource, /const \{ insetLeft: rawControlsInset \} = useWindowChrome\(\)/);
+  assert.match(appShellSource, /\{!isWorkspaceRoute \? \(\s*<div\s+aria-hidden="true"\s+data-debug-id="shell-top-spacer"/);
   assert.match(workspace, /const reservedTopRightWidth = topRightWidth \+ windowControlsInset/);
   assert.match(workspace, /reserveRight=\{reservedTopRightWidth\}/);
   assert.match(workspace, /right: windowControlsInset \|\| undefined/);

@@ -1917,7 +1917,7 @@ function AuthenticatedShell({ user }: { user: AuthUser }) {
   const hideTopLeftCluster = isMobile && isWorkspaceRoute && isCurrentAuxPaneOpen;
   const showBrand = !isWorkspaceRoute || !isEffectiveCollapsed;
   // REQ-MAC-CHROME-1: 0 everywhere except the windowed macOS hidden title bar.
-  const { style: windowChromeStyle, insetLeft: rawControlsInset } = useWindowChrome();
+  const { insetLeft: rawControlsInset } = useWindowChrome();
   const controlsInset = isMobile ? 0 : rawControlsInset;
   const topLeftClusterWidth = computeTopLeftClusterWidth(isMobile, showBrand, controlsInset);
   const chromeHeight = topChromeHeight(isMobile);
@@ -2139,11 +2139,12 @@ function AuthenticatedShell({ user }: { user: AuthUser }) {
       <div className="flex min-w-0 flex-1 flex-col h-full min-h-0 overflow-hidden">
         {/* The fixed top-left cluster floats over the content. On the conversation
             workspace the top-left chat header reserves its space. Other pages draw no
-            top bar: an invisible spacer reserves the cluster's row only while the
-            sidebar is hidden (the cluster would otherwise cover the page), and always
-            in a desktop window without a native title bar, where it is the content
-            column's drag region and keeps pages clear of the window controls. */}
-        {!isWorkspaceRoute && (isEffectiveCollapsed || windowChromeStyle !== 'native') ? (
+            top bar: an invisible spacer reserves the cluster's row in BOTH sidebar
+            states, so page content sits at the same y whether the sidebar is open or
+            closed (and is never covered by the cluster). In a desktop window without
+            a native title bar it is also the content column's drag region and keeps
+            pages clear of the window controls. */}
+        {!isWorkspaceRoute ? (
           <div
             aria-hidden="true"
             data-debug-id="shell-top-spacer"
