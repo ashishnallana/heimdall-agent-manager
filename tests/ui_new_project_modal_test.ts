@@ -22,7 +22,7 @@ const NEW = '2026-11-02T10:00:00Z';
 
 type Entry = { name: string; is_dir: boolean; hidden?: boolean; modified_at?: string };
 type FileSpec = { content?: string; modified_at?: string; error?: { code: string; cause: string; message: string } };
-type Fs = { dirs: Record<string, Entry[]>; files?: Record<string, FileSpec>; failList?: boolean; truncated?: Record<string, boolean> };
+type Fs = { dirs: Record<string, Entry[]>; files?: Record<string, FileSpec>; failList?: boolean; truncated?: Record<string, boolean>; listDelayMs?: Record<string, number> };
 type Call = { method: string; url: string; path: string; query: URLSearchParams; body: any };
 type Ctx = {
   doc: Document; win: any; calls: Call[]; created: string[];
@@ -71,6 +71,8 @@ async function withModal(fs: Fs, props: Record<string, unknown>, run: (ctx: Ctx)
     if (/\/bridges\/[^/]+\/fs$/.test(u.pathname)) {
       if (fs.failList) return json({ error: { code: 'unavailable', message: 'Bridge b_river is not connected' } }, 503);
       const path = u.searchParams.get('path') || ROOT;
+      const delay = fs.listDelayMs?.[path];
+      if (delay) await new Promise((r) => setTimeout(r, delay));
       const entries = fs.dirs[path];
       if (!entries) return json({ ok: false, path, root: ROOT, parent: '', entries: [], truncated: false, error: { code: 'not_found', cause: 'path_not_found', message: 'Path does not exist' } });
       const parent = path === ROOT ? '' : path.slice(0, path.lastIndexOf('/')) || '/';
@@ -261,8 +263,17 @@ test('a long file is cut at a line break and the hint says so; a truncated listi
 
 test('typed name and description are never overwritten; auto values follow a new folder', async () => {
   const fs: Fs = {
-    dirs: { [`${ROOT}/one`]: [{ name: 'CLAUDE.md', is_dir: false, modified_at: NEW }], [`${ROOT}/two`]: [{ name: 'AGENTS.md', is_dir: false, modified_at: NEW }] },
-    files: { [`${ROOT}/one/CLAUDE.md`]: { content: 'one notes', modified_at: NEW }, [`${ROOT}/two/AGENTS.md`]: { content: 'two notes', modified_at: NEW } },
+    dirs: {
+      [`${ROOT}/one`]: [{ name: '.git', is_dir: true }, { name: 'CLAUDE.md', is_dir: false, modified_at: NEW }],
+      [`${ROOT}/two`]: [{ name: '.git', is_dir: true }, { name: 'AGENTS.md', is_dir: false, modified_at: NEW }],
+      [`${ROOT}/three`]: [{ name: 'notes.txt', is_dir: false }],
+      [`${ROOT}/four`]: [{ name: 'CLAUDE.md', is_dir: false, modified_at: NEW }],
+    },
+    files: {
+      [`${ROOT}/one/CLAUDE.md`]: { content: 'one notes', modified_at: NEW },
+      [`${ROOT}/two/AGENTS.md`]: { content: 'two notes', modified_at: NEW },
+      [`${ROOT}/four/CLAUDE.md`]: { error: { code: 'unprocessable_entity', cause: 'vault_locked', message: 'Bridge vault is locked.' } },
+    },
   };
   // Auto values track the folder while untouched.
   await withModal(fs, {}, async (ctx) => {
@@ -272,6 +283,34 @@ test('typed name and description are never overwritten; auto values follow a new
     await enterFolder(ctx, `${ROOT}/two`);
     assert.equal(field(ctx.doc, 'new-convo-project-name-input').value, 'two', 'auto name follows the new folder');
     assert.equal(field(ctx.doc, 'new-convo-project-description-input').value, 'two notes', 'auto description follows too');
+    assert.match(vcsValue(ctx.doc), /^Git/);
+    // A folder with no instruction file clears the previous folder's auto
+    // description (and its source hint) instead of carrying it over.
+    await enterFolder(ctx, `${ROOT}/three`);
+    assert.equal(field(ctx.doc, 'new-convo-project-name-input').value, 'three');
+    assert.equal(field(ctx.doc, 'new-convo-project-description-input').value, '', 'stale auto description cleared');
+    assert.match(vcsValue(ctx.doc), /No version control/, 'stale auto VCS reset');
+    assert.doesNotMatch(squash(q(ctx.doc, 'new-convo-project-form')?.textContent), /Prefilled from/);
+    await click(ctx, createButton(ctx.doc));
+    await until(ctx, () => ctx.created.length === 1, 'onCreated');
+    const body = lastCreate(ctx)!.body;
+    assert.equal(body.default_path, `${ROOT}/three`);
+    assert.equal(body.vcs_kind, 'none');
+    assert.ok(!body.description || (await ctx.decrypt(body.description)) === '', 'another folder\'s notes are not sent');
+  });
+  // The same when the new folder's instruction file cannot be read, or the
+  // folder itself cannot be listed.
+  await withModal(fs, {}, async (ctx) => {
+    await enterFolder(ctx, `${ROOT}/one`);
+    assert.equal(field(ctx.doc, 'new-convo-project-description-input').value, 'one notes');
+    await enterFolder(ctx, `${ROOT}/four`);
+    assert.match(squash(q(ctx.doc, 'new-convo-project-inspect-note')?.textContent), /Couldn't read CLAUDE\.md/);
+    assert.equal(field(ctx.doc, 'new-convo-project-description-input').value, '', 'cleared after a read failure');
+    await enterFolder(ctx, `${ROOT}/one`);
+    assert.equal(field(ctx.doc, 'new-convo-project-description-input').value, 'one notes');
+    await enterFolder(ctx, `${ROOT}/missing`);
+    assert.equal(field(ctx.doc, 'new-convo-project-description-input').value, '', 'cleared after a listing failure');
+    assert.match(vcsValue(ctx.doc), /No version control/);
   });
   // Typed before choosing a folder: kept.
   await withModal(fs, {}, async (ctx) => {
@@ -290,6 +329,38 @@ test('typed name and description are never overwritten; auto values follow a new
     await enterFolder(ctx, `${ROOT}/two`);
     assert.equal(field(ctx.doc, 'new-convo-project-name-input').value, 'renamed');
     assert.equal(field(ctx.doc, 'new-convo-project-description-input').value, 'one notes, edited');
+    // ...and on a folder without instruction files: typed text is never cleared.
+    await enterFolder(ctx, `${ROOT}/three`);
+    assert.equal(field(ctx.doc, 'new-convo-project-name-input').value, 'renamed');
+    assert.equal(field(ctx.doc, 'new-convo-project-description-input').value, 'one notes, edited');
+  });
+});
+
+test('a slow inspection of an earlier folder never writes into a later folder\'s form', async () => {
+  const slow = `${ROOT}/slow`;
+  const fast = `${ROOT}/fast`;
+  const fs: Fs = {
+    dirs: {
+      [slow]: [{ name: '.jj', is_dir: true }, { name: 'CLAUDE.md', is_dir: false, modified_at: NEW }],
+      [fast]: [{ name: '.git', is_dir: true }],
+    },
+    files: { [`${slow}/CLAUDE.md`]: { content: 'slow notes', modified_at: NEW } },
+    listDelayMs: { [slow]: 250 },
+  };
+  await withModal(fs, {}, async (ctx) => {
+    // Choose the slow folder but do not wait for it, then choose the fast one.
+    const input = q(ctx.doc, 'new-convo-project-folder-input');
+    await type(ctx, input, slow);
+    await ctx.act(() => { input!.dispatchEvent(new ctx.win.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })); });
+    await enterFolder(ctx, fast);
+    assert.match(vcsValue(ctx.doc), /^Git/);
+    // Let the slow listing and its CLAUDE.md read finish.
+    await until(ctx, () => fileReads(ctx).includes(`${slow}/CLAUDE.md`), 'slow inspection finished');
+    await ctx.settle(60);
+    assert.equal(field(ctx.doc, 'new-convo-project-folder-input').value, fast);
+    assert.equal(field(ctx.doc, 'new-convo-project-name-input').value, 'fast');
+    assert.equal(field(ctx.doc, 'new-convo-project-description-input').value, '', 'slow folder\'s notes not applied');
+    assert.match(vcsValue(ctx.doc), /^Git/, 'slow folder\'s jj not applied');
   });
 });
 

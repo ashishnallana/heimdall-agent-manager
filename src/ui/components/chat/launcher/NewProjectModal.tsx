@@ -61,11 +61,15 @@ export function NewProjectModal({ open, onOpenChange, bridgeId, bridgeLabel, bri
   // The last value each field was auto-filled with; a field is only rewritten
   // while it still equals this (or is empty), so typed text always wins.
   const auto = useRef({ name: '', description: '', vcs: 'none' as ProjectVcsKind });
+  // The folder most recently chosen. An inspection that resolves after the user
+  // has moved on to another folder must not write into the new folder's form.
+  const latestFolder = useRef('');
 
   useEffect(() => {
     if (!open) return;
     setBrowsing(false); setFolder(''); setName(''); setDescription(''); setVcsKind('none'); setError('');
     auto.current = { name: '', description: '', vcs: 'none' };
+    latestFolder.current = '';
     reset();
   }, [open, reset]);
 
@@ -73,6 +77,7 @@ export function NewProjectModal({ open, onOpenChange, bridgeId, bridgeLabel, bri
     const next = path.trim();
     setBrowsing(false);
     setFolder(next);
+    latestFolder.current = next;
     if (!next) return;
     // Updaters run later, during render: compare against the auto value captured
     // here, before auto.current moves on to the new one.
@@ -81,19 +86,20 @@ export function NewProjectModal({ open, onOpenChange, bridgeId, bridgeLabel, bri
     auto.current.name = base;
     setName((current) => (!current.trim() || current === prevName ? base : current));
     const found = await inspect(next);
-    if (found.path !== next || found.status !== 'done') return;
-    if (found.vcsKind) {
-      const detected = found.vcsKind;
-      const prevVcs = auto.current.vcs;
-      auto.current.vcs = detected;
-      setVcsKind((current) => (current === prevVcs ? detected : current));
-    }
-    if (found.prefill) {
-      const text = found.prefill.text;
-      const prevDescription = auto.current.description;
-      auto.current.description = text;
-      setDescription((current) => (!current.trim() || current === prevDescription ? text : current));
-    }
+    if (found.path !== next || latestFolder.current !== next) return;
+    if (found.status !== 'done' && found.status !== 'error') return;
+    // The previous folder's auto values do not describe this one. Replace them
+    // with what this folder yields; when it yields nothing (no instruction file,
+    // or the folder could not be read) fall back to empty / 'none'. Typed values
+    // are left alone.
+    const detected: ProjectVcsKind = found.vcsKind ?? 'none';
+    const prevVcs = auto.current.vcs;
+    auto.current.vcs = detected;
+    setVcsKind((current) => (current === prevVcs ? detected : current));
+    const text = found.prefill?.text ?? '';
+    const prevDescription = auto.current.description;
+    auto.current.description = text;
+    setDescription((current) => (!current.trim() || current === prevDescription ? text : current));
   }
 
   const inspecting = inspection.status === 'loading' && inspection.path === folder;
