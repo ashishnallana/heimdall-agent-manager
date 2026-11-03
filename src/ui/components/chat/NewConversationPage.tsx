@@ -26,7 +26,7 @@ import type { RuntimeSelection } from './RuntimeConfigurationOptions';
 import { AgentMenu, type NewFavoriteAgent } from './launcher/AgentMenu';
 import { bridgeDisplayName } from './launcher/BridgeMenu';
 import { ConversationComposerBody, LaunchComposer, ShellComposerBody } from './launcher/LaunchComposer';
-import { LaunchHeadline, shouldShowBridgeClause } from './launcher/LaunchHeadline';
+import { LaunchHeadline, shouldShowBridgeClause, type LaunchHeadlineMenu } from './launcher/LaunchHeadline';
 import { NoBridgeBanner, NoBridgeOnline, noBridgeOnline, noBridgeRows } from './launcher/NoBridgeOnline';
 import type { LauncherMode } from './launcher/ModeMenu';
 import { isDefaultConversationProject } from './launcher/ProjectMenu';
@@ -132,7 +132,7 @@ export default function NewConversationPage({ embedded = false, footer, onLaunch
   const [pendingWrites, setPendingWrites] = useState(0);
   const [projectOpen, setProjectOpen] = useState(false);
   const [runtimeMenuOpen, setRuntimeMenuOpen] = useState(false);
-  const [headlineMenu, setHeadlineMenu] = useState<string | null>(null);
+  const [headlineMenu, setHeadlineMenu] = useState<LaunchHeadlineMenu | null>(null);
   const [agentMenuOpen, setAgentMenuOpen] = useState(false);
   // Spec §3.7: while any launcher menu is open (a bottom sheet on mobile) the
   // composer drops out of its sticky dock, so it never sits above the scrim.

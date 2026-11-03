@@ -97,6 +97,7 @@ async function withPage(
     let data: any = {};
     if (path.endsWith('/me/conversation-launch')) data = prefs;
     else if (path.endsWith('/agents') && method === 'GET') data = AGENTS;
+    else if (path.endsWith('/agents') && method === 'POST') data = { agent_id: 'agt_new', name: body.name, state: 'active' };
     else if (path.endsWith('/projects')) data = { projects: PROJECTS };
     else if (path.endsWith('/bridges')) data = { bridges };
     else if (path.endsWith('/provider-status')) data = PROVIDERS;
@@ -418,6 +419,30 @@ test('mobile (390px): all five menus open as bottom sheets and the composer undo
       assert.ok(!ctx.doc.querySelector('[role="dialog"]'), `${token} sheet closed`);
       assert.ok(docked(), `${token}: composer docks again after close`);
     }
+  });
+});
+
+test('mobile (390px): creating a favorite agent from the agent sheet closes it and re-docks the composer', async () => {
+  await withPage({ width: 390 }, async (ctx) => {
+    await ctx.render();
+    await until(ctx, () => !/Loading/.test(issuesText(ctx.doc)) && Boolean(q(ctx.doc, 'new-convo-agent-picker')), 'hydration');
+    const dock = q(ctx.doc, 'new-convo-launch-dock')!;
+    const docked = () => dock.hasAttribute('data-docked') && dock.className.includes('max-md:sticky');
+    await click(ctx, q(ctx.doc, 'new-convo-agent-picker'));
+    await click(ctx, q(ctx.doc, 'new-convo-edit-favorites'));
+    await click(ctx, q(ctx.doc, 'new-convo-create-agent-toggle'));
+    assert.ok(!docked(), 'composer is static while the agent sheet is open');
+    const input = q(ctx.doc, 'new-convo-agent-name-input') as HTMLInputElement;
+    const setter = Object.getOwnPropertyDescriptor(ctx.win.HTMLInputElement.prototype, 'value')!.set!;
+    await ctx.act(() => { setter.call(input, 'Helper'); input.dispatchEvent(new ctx.win.Event('input', { bubbles: true })); });
+    await click(ctx, q(ctx.doc, 'new-convo-create-favorite-agent-btn'));
+    await until(ctx, () => ctx.calls.some((c) => c.method === 'POST' && new URL(c.url, 'http://localhost').pathname.endsWith('/agents')), 'agent created');
+    await ctx.settle();
+    const closing = ctx.doc.querySelector('[role="dialog"]');
+    if (closing) await ctx.act(() => { closing.dispatchEvent(new ctx.win.Event('animationend', { bubbles: true })); });
+    await ctx.settle();
+    assert.ok(!ctx.doc.querySelector('[role="dialog"]'), 'agent sheet closed after creating');
+    assert.ok(docked(), 'composer docks again after creating an agent');
   });
 });
 

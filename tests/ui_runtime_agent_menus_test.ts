@@ -265,7 +265,7 @@ const AGENTS = [
   { agent_id: 'agt_old', name: 'Archived', state: 'archived' },
 ];
 
-type AgentLog = { selected: string[]; toggles: Array<[string, boolean]>; created: any[] };
+type AgentLog = { selected: string[]; toggles: Array<[string, boolean]>; created: any[]; openChanges?: boolean[] };
 
 function AgentHarness(props: { AgentMenu: any; log: AgentLog; favorites?: string[]; selected?: string; failToggle?: boolean }) {
   const [favorites, setFavorites] = React.useState(props.favorites ?? ['agt_solo', 'agt_coord']);
@@ -284,6 +284,7 @@ function AgentHarness(props: { AgentMenu: any; log: AgentLog; favorites?: string
     },
     templates: [{ template_id: 'tmpl_worker', name: 'Worker' }],
     onCreateAgent: async (agent: any) => { props.log.created.push(agent); return 'agt_new'; },
+    onOpenChange: (open: boolean) => { props.log.openChanges?.push(open); },
   });
 }
 
@@ -291,7 +292,7 @@ async function loadAgent() {
   return import('../src/ui/components/chat/launcher/AgentMenu.tsx');
 }
 
-const newLog = (): AgentLog => ({ selected: [], toggles: [], created: [] });
+const newLog = (): AgentLog => ({ selected: [], toggles: [], created: [], openChanges: [] });
 
 test('AgentMenu list view: header with n / 6, favorites with workflow labels, separator, Edit favorites; pick selects and closes', async () => {
   await withDom({}, async (doc) => {
@@ -443,6 +444,7 @@ test('AgentMenu: the create-favorite-agent form lives in a collapsible section o
     await ui.act(async () => submit.click());
     assert.deepEqual(log.created, [{ name: 'Helper', templateId: 'tmpl_worker', instructions: 'Be brief' }]);
     assert.equal(chip.getAttribute('aria-expanded'), 'false', 'closes after creating');
+    assert.deepEqual(log.openChanges, [true, false], 'onOpenChange hears the close after creating');
     await ui.unmount();
   });
 });

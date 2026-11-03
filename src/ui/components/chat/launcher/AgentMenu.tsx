@@ -168,7 +168,9 @@ export function AgentMenu({
     setName('');
     setInstructions('');
     setCreateOpen([]);
-    setOpen(false);
+    // Close through changeOpen so onOpenChange hears about it (the page re-docks
+    // the mobile composer on close).
+    changeOpen(false);
   }
 
   // #10: the popover height transitions from the old view's height to the new one.
