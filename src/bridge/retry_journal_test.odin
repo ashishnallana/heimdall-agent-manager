@@ -1,4 +1,5 @@
 package main
+import "core:sync"
 import "core:testing"
 import "core:strings"
 import "core:os"
@@ -8,6 +9,7 @@ import contracts "odin_test:contracts"
 
 @(test)
 retry_atomic_write_windows_native_credential_path :: proc(t: ^testing.T) {
+    sync.mutex_lock(&bridge_test_config_mutex); defer sync.mutex_unlock(&bridge_test_config_mutex)
     when ODIN_OS == .Windows {
         dir := fmt.tprintf("%s/ham-credential-%d", os.temp_dir(context.temp_allocator), time.to_unix_nanoseconds(time.now()))
         defer os.remove(dir)
@@ -23,6 +25,7 @@ retry_atomic_write_windows_native_credential_path :: proc(t: ^testing.T) {
 
 @(test)
 retry_journal_disk_reservations_and_unsafe_crash_fence :: proc(t: ^testing.T) {
+    sync.mutex_lock(&bridge_test_config_mutex); defer sync.mutex_unlock(&bridge_test_config_mutex)
     path := fmt.tprintf("%s/retry-journal-%d/receipts.json", os.temp_dir(context.temp_allocator), time.to_unix_nanoseconds(time.now()))
     j := Bridge_Retry_Journal{version = 1, loaded = true}
     append(&j.receipts, Bridge_Retry_Receipt{key = "ready:launch", budget = {}})
@@ -48,6 +51,7 @@ retry_journal_disk_reservations_and_unsafe_crash_fence :: proc(t: ^testing.T) {
 
 @(test)
 retry_journal_invalid_schema_and_write_failure_park :: proc(t: ^testing.T) {
+    sync.mutex_lock(&bridge_test_config_mutex); defer sync.mutex_unlock(&bridge_test_config_mutex)
     path := fmt.tprintf("%s/retry-journal-bad-%d/receipts.json", os.temp_dir(context.temp_allocator), time.to_unix_nanoseconds(time.now()))
     j := Bridge_Retry_Journal{version = 1, loaded = true}
     append(&j.receipts, Bridge_Retry_Receipt{key = "ready:bad", budget = {attempts = 2}})
@@ -62,6 +66,7 @@ retry_journal_invalid_schema_and_write_failure_park :: proc(t: ^testing.T) {
 journal_test_failed_flush :: proc() -> bool { return false }
 @(test)
 retry_reservation_persistence_failure_forbids_io_and_missing_journal_is_fenced :: proc(t: ^testing.T) {
+    sync.mutex_lock(&bridge_test_config_mutex); defer sync.mutex_unlock(&bridge_test_config_mutex)
     bridge_retry_journal = {}
     requests := 0
     for _ in 0..<100 {
