@@ -83,7 +83,10 @@ test('wiring: Workspace renders ShellMainPane for shell ids; picker has Agent|Sh
   assert.match(picker, /paneMode === 'shell' \? \(\s*<ShellLaunchPanel/);
   const panel = read('src/ui/components/chat/ShellLaunchPanel.tsx');
   assert.match(panel, /<BridgeDirectoryPicker/);
-  assert.match(panel, /resolveProjectBridgeShellCwd\(project, bridgeId\)/);
+  // Launch logic (bridge, cwd default, start) lives in the shared hook.
+  assert.match(panel, /useShellLaunch\(\{/);
+  const launch = read('src/ui/components/shells/useShellLaunch.ts');
+  assert.match(launch, /resolveProjectBridgeShellCwd\(project, bridgeId\)/);
   assert.match(panel, /data-debug-id=\{`new-convo-shell-kill-\$\{s\.session_id\}`\}/);
 });
 
