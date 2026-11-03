@@ -1,5 +1,6 @@
 package main
 
+import "base:runtime"
 import "core:encoding/json"
 import "core:fmt"
 import "core:os"
@@ -30,6 +31,17 @@ ctxwin_scratch_end :: proc(saved, scratch: string) {
 	bridge_config.data_dir = saved
 	bridge_context_window_reload_for_test()
 	delete(scratch)
+}
+
+// ctxwin_forget_launch hides a test instance from bridge_ext_context_window_instances
+// so its reported window cannot leak into other tests' settings lists.
+ctxwin_forget_launch :: proc(instance_id: string) {
+	sync.mutex_lock(&bridge_ext_mutex); defer sync.mutex_unlock(&bridge_ext_mutex)
+	for &s in bridge_ext_states {
+		if s.agent_instance_id != instance_id do continue
+		delete(s.launch_provider, runtime.heap_allocator())
+		s.launch_provider = ""
+	}
 }
 
 @(test)
@@ -254,6 +266,7 @@ test_ctxwin_instance_snapshot_carries_window_and_pct :: proc(t: ^testing.T) {
 	defer ctxwin_scratch_end(saved, scratch)
 
 	id := "inst_test_ctxwin_snapshot"
+	defer ctxwin_forget_launch(id)
 	bridge_runtime_mark_start_success(id)
 	bridge_ext_note_launch(id, "codex", "gpt-6.1-sol", "")
 	window, source, pct := bridge_ext_context_window_for(id)
@@ -298,6 +311,7 @@ test_ctxwin_state_json_carries_reported_window_and_mismatch :: proc(t: ^testing.
 	defer ctxwin_scratch_end(saved, scratch)
 
 	id := "inst_test_ctxwin_listreported"
+	defer ctxwin_forget_launch(id)
 	bridge_runtime_mark_start_success(id)
 	bridge_ext_note_launch(id, "codex", "gpt-6.1-sol", "") // config: 475000
 	now := bridge_runtime_now_ms()
