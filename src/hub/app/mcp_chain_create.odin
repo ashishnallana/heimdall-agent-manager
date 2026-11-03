@@ -37,13 +37,14 @@ mcp_create_chain :: proc(ctx:rawptr,raw:string,view:mcp.Access_View,args:mcp.Con
 	}
 	chain,created,cerr:=tc.create_chain(&g.taskchains,principal,{title=title,description=description})
 	if !created || cerr.code!=.None do return "","",mcp_task_error(cerr)
-	// Reuse the sealed chain title for the conversation. The native default agent
-	// name/counter may be armored; appending plaintext would corrupt that token.
+	// Native coordinator naming: prepare_instance mints "<agent name> #<n>" for the
+	// instance and conversation, like POST /task-chains. The chain keeps the caller
+	// title. A sealed agent name yields "<token> #<n>"; MCP readers open embedded tokens.
 	inst,generation,prepared,perr:=agent.prepare_instance(&g.agents,principal,{
 		agent_id=args.coordinator_agent_id,bridge_id=args.bridge_id,project_id=domain.Project_ID(args.project_id),chain_id=string(chain.chain_id),
 		provider=provider,provider_profile=args.provider_profile,model=model,
-		member_role="coordinator",display_name=title,
-	},title)
+		member_role="coordinator",
+	})
 	if !prepared || perr.code!=.None do return "","",mcp_task_error(perr)
 	committed:=false
 	defer if !committed do project.bridge_runtime_instance_cancel_reservation(g.agents.bridge_runtime_registry,inst.bridge_id,generation,inst.agent_instance_id)
