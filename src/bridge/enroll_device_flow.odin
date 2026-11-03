@@ -981,7 +981,7 @@ bridge_enroll_try_open_approval_url :: proc(url: string) -> bool {
 		return bridge_enroll_run_browser_opener("xdg-open", url)
 	} else when ODIN_OS == .Windows {
 		// rundll32 hands the URL to the default browser and exits at once.
-		process, start_err := os.process_start(os.Process_Desc{command = []string{"rundll32", "url.dll,FileProtocolHandler", url}})
+		process, start_err := bridge_os_start_hidden(os.Process_Desc{command = []string{"rundll32", "url.dll,FileProtocolHandler", url}})
 		if start_err != nil do return false
 		_, _ = os.process_wait(process, 1 * time.Second)
 		return true
