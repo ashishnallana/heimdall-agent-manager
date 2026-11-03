@@ -29,6 +29,8 @@ export default {
       colors: {
         canvas: 'var(--color-canvas)',
         backdrop: 'var(--color-backdrop)',
+        // Heavier, unblurred dim behind mobile bottom-sheet menus.
+        scrim: 'var(--color-scrim)',
         surface: {
           DEFAULT: 'var(--color-surface)',
           raised: 'var(--color-surface-raised)',
@@ -144,6 +146,11 @@ export default {
           from: { transform: 'translateY(100%)' },
           to: { transform: 'none' },
         },
+        // Scrim fade for bottom sheets (reference `fade`).
+        fade: {
+          from: { opacity: '0' },
+          to: { opacity: '1' },
+        },
       },
       animation: {
         'tok-swap': 'tokSwap var(--duration-slow) var(--ease-emphasized)',
@@ -155,6 +162,11 @@ export default {
         // transition, so it does not map to a duration token.
         breathe: 'breathe 1.6s ease-in-out infinite',
         'sheet-in': 'sheetIn var(--duration-slow) var(--ease-emphasized)',
+        // Exits: the entrance played backwards at the close timing (motion spec #6, #17, #18).
+        'menu-out': 'menuIn var(--duration-fast) var(--ease-standard) reverse forwards',
+        'sheet-out': 'sheetIn var(--duration-base) var(--ease-standard) reverse forwards',
+        'fade-in': 'fade var(--duration-base) var(--ease-emphasized)',
+        'fade-out': 'fade var(--duration-base) var(--ease-standard) reverse forwards',
       },
     },
   },

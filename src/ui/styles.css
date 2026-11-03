@@ -1034,7 +1034,11 @@ body {
   .animate-pop,
   .animate-fade-slide,
   .animate-composer-swap,
-  .animate-sheet-in {
+  .animate-sheet-in,
+  .animate-menu-out,
+  .animate-sheet-out,
+  .animate-fade-in,
+  .animate-fade-out {
     animation-duration: 1ms !important;
   }
   .animate-breathe {

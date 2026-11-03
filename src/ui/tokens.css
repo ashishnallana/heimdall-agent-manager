@@ -23,6 +23,7 @@
    * 1. Color — single dark theme. Public names state role, not hue.  *
    * ---------------------------------------------------------------- */
   --color-backdrop: rgb(0 0 0 / 0.55);
+  --color-scrim: rgb(0 0 0 / 0.6);
   --color-canvas: #0f0f0f;
   --color-surface: #191919;
   --color-surface-raised: #1f1f1f;

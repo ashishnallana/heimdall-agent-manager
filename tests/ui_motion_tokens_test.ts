@@ -8,7 +8,7 @@ import tailwindcss from 'tailwindcss';
 import tailwindConfig from '../tailwind.config.js';
 
 // Motion foundation for the conversation launcher redesign: the emphasized
-// easing token, the seven keyframes and their `animate-*` utilities, and the
+// easing token, the seven reference keyframes (plus the scrim `fade`), their `animate-*` utilities, and the
 // reduced-motion guard that collapses them.
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -22,6 +22,12 @@ const UTILITIES: Record<string, string> = {
   'composer-swap': 'composerSwap var(--duration-slow) var(--ease-emphasized)',
   breathe: 'breathe 1.6s ease-in-out infinite',
   'sheet-in': 'sheetIn var(--duration-slow) var(--ease-emphasized)',
+  // Added by the SentenceToken task: exits (the entrance reversed at the close
+  // timing, motion spec #6/#18) and the bottom-sheet scrim fade (#17/#18).
+  'menu-out': 'menuIn var(--duration-fast) var(--ease-standard) reverse forwards',
+  'sheet-out': 'sheetIn var(--duration-base) var(--ease-standard) reverse forwards',
+  'fade-in': 'fade var(--duration-base) var(--ease-emphasized)',
+  'fade-out': 'fade var(--duration-base) var(--ease-standard) reverse forwards',
 };
 
 async function compileUtilities(classes: string[]): Promise<string> {
@@ -37,7 +43,7 @@ test('tokens.css defines --ease-emphasized and Tailwind exposes it', async () =>
   assert.match(css, /\.ease-emphasized \{ transition-timing-function: var\(--ease-emphasized\) \}/);
 });
 
-test('the seven keyframes match the redesign reference values', () => {
+test('the launcher keyframes match the redesign reference values', () => {
   const keyframes = (tailwindConfig as { theme: { extend: { keyframes: Record<string, unknown> } } }).theme.extend
     .keyframes;
   assert.deepEqual(keyframes, {
@@ -57,6 +63,7 @@ test('the seven keyframes match the redesign reference values', () => {
       '50%': { opacity: '1', transform: 'none' },
     },
     sheetIn: { from: { transform: 'translateY(100%)' }, to: { transform: 'none' } },
+    fade: { from: { opacity: '0' }, to: { opacity: '1' } },
   });
 });
 
