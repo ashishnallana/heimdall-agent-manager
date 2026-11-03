@@ -551,7 +551,7 @@ test('rendered Projects step retries failed and malformed inventory before offer
     assert.match(find('setup-projects-row-%2Fwork%2Fapp')!.textContent!, /3 sessions/);
     await React.act(async () => { find('setup-projects-import-btn')!.click(); });
     await settle(() => completed === 1);
-    assert.deepEqual(creations, [{ name: 'app (2)', default_path: '/work/app', description: 'App is a calendar service.' }]);
+    assert.deepEqual(creations, [{ name: 'app (2)', default_path: '/work/app', description: 'App is a calendar service.', slug: 'app-2' }]);
     assert.deepEqual(attachments, ['/work/app']);
   } finally {
     await React.act(async () => { root.unmount(); store.dispatch(heimdallApi.util.resetApiState()); });
