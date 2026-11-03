@@ -745,6 +745,10 @@ bridge_command_dispatch_worker :: proc(data: rawptr) {
 			bridge_hub_handle_command(&worker.sink_conn, job.text)
 		}
 		bridge_command_dispatch_finish(worker, &job)
+		// Handlers allocate freely from the per-thread temp arena. Workers live for
+		// the whole process, so without a per-job reset every command's temp
+		// allocations (and every block grown for a large payload) are retained forever.
+		free_all(context.temp_allocator)
 	}
 }
 
