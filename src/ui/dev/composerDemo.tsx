@@ -475,6 +475,7 @@ function ComposerDemo() {
             agentIsWorking={agentIsWorking}
             onReply={send}
             bottomInset={composerDockHeight}
+            pinOnSend
             wrapperClassName="relative min-h-0 min-w-0 max-w-full flex-1 overflow-hidden overflow-x-hidden"
             scrollClassName="chat-scrollbar h-full min-h-0 max-w-full space-y-3 overflow-y-auto overflow-x-hidden rounded-none bg-canvas px-1 py-3 pt-16"
           />

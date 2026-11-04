@@ -313,6 +313,12 @@ function localMessageId(): string {
   return `local_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
+// REQ-PIN-1: only a row this pane just appended optimistically pins to the top; a poll
+// that delivers the server copy of a message must not replay the send animation.
+function isOptimisticSend(message: { messageId: string }): boolean {
+  return message.messageId.startsWith('local_');
+}
+
 function optimisticUserMessage(conversationId: string, body: string): Message {
   return {
     message_id: localMessageId(),
@@ -1808,6 +1814,11 @@ export function AgentChatPane({
     setError('');
     if (submittedQuotes.length) (local as any).hasQuoteContext = true;
     setLocalMessages((current) => [...current, local]);
+    // REQ-PIN-1: release the message at t=0. The input clears now (a failed send puts
+    // the draft back) and, on phones, blurring dismisses the keyboard; the composer then
+    // collapses with its morph while the bubble travels.
+    updateDraft('');
+    if (isMobile) textareaRef.current?.blur();
     try {
       const result = await sendMessage({
         conversationId,
@@ -1821,8 +1832,9 @@ export function AgentChatPane({
         if (readComposerDraft(submittedRoute) === submittedDraft) writeComposerDraft(submittedRoute, '');
         return;
       }
+      // The input was cleared at send; adopt a newer draft another pane stored meanwhile.
       const latestDraft = readComposerDraft(submittedRoute);
-      updateDraft(latestDraft === submittedDraft ? '' : latestDraft);
+      if (latestDraft !== submittedDraft && latestDraft !== updateDraftRef.current) updateDraft(latestDraft);
       setAttachments([]);
       const sent = sentMessageFromResult(result);
       setLocalMessages((current) =>
@@ -1842,6 +1854,7 @@ export function AgentChatPane({
     } catch (err: any) {
       if (!mountedRef.current || routeGeneration.current !== submittedGeneration || currentTargetRef.current !== submittedTarget || (submittedQuotes.length && ((reduxStore.getState() as any).composerContext?.epoch !== submittedEpoch || selectActiveVaultKey() !== submittedKey))) return;
       setError(errMsg(err, 'Send failed. Your draft is retained.'));
+      if (!updateDraftRef.current) updateDraft(submittedDraft);
       setLocalMessages(current => current.filter(item => msgId(item, 0) !== localId));
     } finally {
       sendingRef.current = false;
@@ -3416,6 +3429,7 @@ export function AgentChatPane({
           getDeliveryStatus={deliveryStatusFor}
           agentActivity={<AgentActivityBubbles key={agentInstanceId} instanceId={agentInstanceId} isWorking={isWorking} />}
           bottomInset={composerDockHeight}
+          pinOnSend={isOptimisticSend}
           renderMessageBody={({ message }) => renderConversationMessageBody(message)}
           wrapperClassName="relative min-h-0 min-w-0 max-w-full flex-1 overflow-hidden overflow-x-hidden"
           scrollClassName="chat-scrollbar h-full min-h-0 max-w-full space-y-3 overflow-y-auto overflow-x-hidden rounded-none bg-canvas px-1 py-3 sm:space-y-4 sm:rounded-[18px] sm:px-4 sm:py-4"

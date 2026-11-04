@@ -30,7 +30,8 @@ const EMPTY_DELIVERY: ChatDeliveryStatus = { glyph: '', label: '', tone: '' };
 
 // CHAT-SCROLL: an INBOUND message scrolls the list to the bottom only when the reader
 // is already at the bottom (stickyRef), so reading history is never yanked away.
-// The user's OWN send always scrolls to the bottom.
+// The user's OWN send always scrolls to the bottom, or with pinOnSend pins the new bubble
+// under the top of the list instead (REQ-PIN-1).
 const SCROLL_TO_BOTTOM_ON_INBOUND = false;
 
 // Infinite scroll: start fetching the previous page once the top sentinel is within
@@ -52,6 +53,55 @@ function prefersReducedMotion(): boolean {
     window.matchMedia('(prefers-reduced-motion: reduce)').matches
   );
 }
+
+// Reactive form of prefersReducedMotion (mirrors LiveToolActivity): re-renders when the
+// OS setting flips mid-session, so a send after the flip honours it.
+function subscribeReducedMotion(onChange: () => void): () => void {
+  if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return () => undefined;
+  const query = window.matchMedia('(prefers-reduced-motion: reduce)');
+  if (typeof query.addEventListener === 'function') {
+    query.addEventListener('change', onChange);
+    return () => query.removeEventListener('change', onChange);
+  }
+  query.addListener?.(onChange);
+  return () => query.removeListener?.(onChange);
+}
+
+function useReducedMotion(): boolean {
+  return useSyncExternalStore(subscribeReducedMotion, prefersReducedMotion, () => false);
+}
+
+// REQ-PIN-1..6: send pin-to-top. On the user's own send the new bubble travels up to
+// PIN_OFFSET_PX below the top of the list viewport and stays there while the reply
+// renders below it; the strip above it shows the faded tail of the previous message.
+// Timing mirrors the motion tokens: --duration-slow (300ms) on --ease-standard
+// (cubic-bezier(0.2, 0.8, 0.2, 1)). The history follows the bubble PIN_HISTORY_LAG_MS
+// later so the two read as one motion. Only transforms animate.
+export const PIN_OFFSET_PX = 52;
+export const PIN_TRAVEL_MS = 300;
+export const PIN_HISTORY_LAG_MS = 100;
+export const PIN_ACTIVITY_DELAY_MS = 200;
+const PIN_EASE: [number, number, number, number] = [0.2, 0.8, 0.2, 1];
+
+// Solves a CSS cubic-bezier timing function for progress x in [0, 1].
+export function cubicBezierAt([x1, y1, x2, y2]: [number, number, number, number], x: number): number {
+  if (x <= 0) return 0;
+  if (x >= 1) return 1;
+  const bx = (t: number) => ((1 - 3 * x2 + 3 * x1) * t + (3 * x2 - 6 * x1)) * t * t + 3 * x1 * t;
+  const by = (t: number) => ((1 - 3 * y2 + 3 * y1) * t + (3 * y2 - 6 * y1)) * t * t + 3 * y1 * t;
+  let lo = 0;
+  let hi = 1;
+  let t = x;
+  for (let i = 0; i < 24; i += 1) {
+    const value = bx(t);
+    if (Math.abs(value - x) < 1e-5) break;
+    if (value < x) lo = t; else hi = t;
+    t = (lo + hi) / 2;
+  }
+  return by(t);
+}
+
+type PinPhase = 'idle' | 'travel' | 'pinned';
 
 function DefaultMessageBody({ body }: { body: string }) {
   const isArmored = isVaultArmored(body);
@@ -144,6 +194,7 @@ export default function ChatMessageList({
   wrapperClassName = 'relative min-h-0 min-w-0 max-w-full flex-1 overflow-hidden overflow-x-hidden',
   scrollClassName = 'chat-scrollbar h-full min-h-0 max-w-full space-y-[22px] overflow-y-auto overflow-x-hidden rounded-none bg-canvas px-1 py-4 sm:space-y-4 sm:rounded-[18px] sm:px-4 sm:py-4',
   bottomInset = 0,
+  pinOnSend = false,
 }: {
   conversationKey: string;
   messages: ChatMessage[];
@@ -184,6 +235,12 @@ export default function ChatMessageList({
    * does not reintroduce the REQ-VIEWPORT-SWEEP-1 bug described on `children`.
    */
   bottomInset?: number;
+  /**
+   * REQ-PIN-1..6: on the user's own send, pin the new bubble under the top of the list
+   * (with the previous message's faded tail above it) instead of scrolling to the bottom.
+   * A predicate narrows which appended user rows count as a send (e.g. optimistic rows only).
+   */
+  pinOnSend?: boolean | ((message: ChatMessage) => boolean);
 }) {
   const isMobile = useIsMobile();
   const isUnlocked = useSelector(selectIsVaultUnlocked);
@@ -213,17 +270,161 @@ export default function ChatMessageList({
   const focusPageLoadsRef = useRef(0);
   const gaveUpRef = useRef<string | null>(null);
   const [focusAnnouncement, setFocusAnnouncement] = useState('');
-  const reduceMotion = prefersReducedMotion();
+  const reduceMotion = useReducedMotion();
+  const pinEnabled = Boolean(pinOnSend);
+  const pinOnSendRef = useRef(pinOnSend);
+  pinOnSendRef.current = pinOnSend;
+  const reduceMotionRef = useRef(reduceMotion);
+  reduceMotionRef.current = reduceMotion;
   const reply = useMemo(() => onReply || (() => undefined), [onReply]);
+  // Pin-to-top state. The pinned row is tracked by INDEX, not key, so the optimistic
+  // local_ -> server-id key swap (same index, re-mounted row) neither re-animates nor
+  // jumps; an older-page prepend shifts the index by the rows added above it.
+  const [pinPhase, setPinPhase] = useState<PinPhase>('idle');
+  const pinPhaseRef = useRef<PinPhase>('idle');
+  const [pinIndex, setPinIndex] = useState(-1);
+  const pinIndexRef = useRef(-1);
+  const [activityHeld, setActivityHeld] = useState(false);
+  const pinFrameRef = useRef(0);
+  const activityTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const turnSpacerRef = useRef<HTMLDivElement | null>(null);
+  const setPin = useCallback((phase: PinPhase, index = pinIndexRef.current) => {
+    pinPhaseRef.current = phase;
+    pinIndexRef.current = phase === 'idle' ? -1 : index;
+    setPinPhase(phase);
+    setPinIndex(pinIndexRef.current);
+    const node = scrollRef.current;
+    if (node) {
+      if (phase === 'idle') delete node.dataset.chatPinned;
+      else node.dataset.chatPinned = 'true';
+    }
+  }, []);
+
+  const clearPinMotion = useCallback(() => {
+    cancelAnimationFrame(pinFrameRef.current);
+    pinFrameRef.current = 0;
+    clearTimeout(activityTimerRef.current);
+    setActivityHeld(false);
+    const content = contentRef.current;
+    if (!content) return;
+    content.style.transform = '';
+    content.querySelector<HTMLElement>('[data-chat-pin-row="true"]')?.style.removeProperty('transform');
+  }, []);
+
+  // Leaving the pinned state (manual scroll-up, jump-latest, conversation switch) gives
+  // back the normal history. The turn spacer only shrinks by the empty space below the
+  // viewport, so the reader's position never jumps; onScroll keeps shrinking it.
+  const unpin = useCallback(() => {
+    if (pinPhaseRef.current === 'idle') return;
+    clearPinMotion();
+    setPin('idle');
+    const node = scrollRef.current;
+    const spacer = turnSpacerRef.current;
+    if (node && spacer) {
+      const below = node.scrollHeight - node.scrollTop - node.clientHeight;
+      spacer.style.height = `${Math.max(0, spacer.offsetHeight - Math.max(0, below))}px`;
+    }
+  }, [clearPinMotion, setPin]);
+
+  // Sizes the latest turn so the pinned bubble can sit PIN_OFFSET_PX under the top:
+  // turn (pinned row .. end of tail) + spacer >= viewport - PIN_OFFSET_PX (REQ-PIN-2).
+  // The bottom inset is not subtracted, so a collapsing composer cannot clamp scrollTop.
+  const sizeTurnSpacer = useCallback(() => {
+    const node = scrollRef.current;
+    const spacer = turnSpacerRef.current;
+    const row = contentRef.current?.querySelector<HTMLElement>('[data-chat-pin-row="true"]');
+    if (!node || !spacer || !row || pinPhaseRef.current === 'idle') return;
+    const turn = spacer.offsetTop - row.offsetTop;
+    const height = `${Math.max(0, Math.round(node.clientHeight - PIN_OFFSET_PX - turn))}px`;
+    if (spacer.style.height !== height) spacer.style.height = height;
+  }, []);
+
+  const pinTargetTop = useCallback((row: HTMLElement) => {
+    const node = scrollRef.current;
+    if (!node) return 0;
+    const offset = row.getBoundingClientRect().top - node.getBoundingClientRect().top;
+    return Math.max(0, node.scrollTop + offset - PIN_OFFSET_PX);
+  }, []);
+
+  // REQ-PIN-1/1b/6: pin the just-sent row at `index`. Runs in a layout effect, before
+  // the first paint of the new row: the scroll position jumps to the pinned target at
+  // once and transforms put the bubble back at the composer and the history back where
+  // it was, then both ease to zero (bubble first, history PIN_HISTORY_LAG_MS later).
+  const pinRow = useCallback((index: number) => {
+    const node = scrollRef.current;
+    const content = contentRef.current;
+    clearPinMotion();
+    setPin('travel', index);
+    stickyRef.current = false;
+    if (bottomAnchorRef.current) bottomAnchorRef.current.style.overflowAnchor = 'none';
+    setShowJump(false);
+    if (!node || !content) return;
+    const row = content.querySelector<HTMLElement>(`[data-chat-pin-index="${index}"]`);
+    if (!row) return;
+    content.querySelectorAll<HTMLElement>('[data-chat-pin-row="true"]').forEach((el) => { delete el.dataset.chatPinRow; });
+    row.dataset.chatPinRow = 'true';
+    sizeTurnSpacer();
+    const fromScroll = node.scrollTop;
+    const inset = node.querySelector<HTMLElement>('[data-chat-bottom-inset]')?.offsetHeight ?? 0;
+    // Where the composer text was: the bubble's bottom just above the dock.
+    const startVisual = Math.max(PIN_OFFSET_PX, node.clientHeight - inset - row.offsetHeight);
+    const target = pinTargetTop(row);
+    node.scrollTop = target;
+    const settle = () => {
+      pinFrameRef.current = 0;
+      content.style.transform = '';
+      content.querySelector<HTMLElement>('[data-chat-pin-row="true"]')?.style.removeProperty('transform');
+      setPin('pinned', index);
+      setActivityHeld(true);
+      clearTimeout(activityTimerRef.current);
+      activityTimerRef.current = setTimeout(() => setActivityHeld(false), PIN_ACTIVITY_DELAY_MS);
+    };
+    if (reduceMotionRef.current) {
+      settle();
+      setActivityHeld(false);
+      return;
+    }
+    const historyFrom = node.scrollTop - fromScroll;
+    const bubbleFrom = startVisual - PIN_OFFSET_PX;
+    if (Math.abs(historyFrom) < 1 && Math.abs(bubbleFrom) < 1) { settle(); return; }
+    const total = PIN_TRAVEL_MS + PIN_HISTORY_LAG_MS;
+    const apply = (elapsed: number) => {
+      const bubble = bubbleFrom * (1 - cubicBezierAt(PIN_EASE, elapsed / PIN_TRAVEL_MS));
+      const lag = Math.max(0, elapsed - PIN_HISTORY_LAG_MS) / PIN_TRAVEL_MS;
+      const history = historyFrom * (1 - cubicBezierAt(PIN_EASE, lag));
+      content.style.transform = history ? `translate3d(0, ${history}px, 0)` : '';
+      // The row lives inside the content, so subtract the history shift from it.
+      const pinned = content.querySelector<HTMLElement>('[data-chat-pin-row="true"]');
+      if (pinned) pinned.style.transform = `translate3d(0, ${bubble - history}px, 0)`;
+    };
+    apply(0);
+    setActivityHeld(true);
+    let start = -1;
+    const step = (now: number) => {
+      if (start < 0) start = now;
+      const elapsed = now - start;
+      if (elapsed >= total) { settle(); return; }
+      apply(elapsed);
+      pinFrameRef.current = requestAnimationFrame(step);
+    };
+    pinFrameRef.current = requestAnimationFrame(step);
+  }, [clearPinMotion, pinTargetTop, setPin, sizeTurnSpacer]);
+
+  useEffect(() => () => {
+    cancelAnimationFrame(pinFrameRef.current);
+    clearTimeout(activityTimerRef.current);
+  }, []);
 
   const scrollToBottom = useCallback((behavior: ScrollBehavior = 'auto') => {
     const node = scrollRef.current;
     if (!node) return;
+    unpin();
+    if (turnSpacerRef.current) turnSpacerRef.current.style.height = '0px';
     node.scrollTo({ top: node.scrollHeight, behavior: prefersReducedMotion() ? 'auto' : behavior });
     stickyRef.current = true;
     if (bottomAnchorRef.current) bottomAnchorRef.current.style.overflowAnchor = 'auto';
     setShowJump(false);
-  }, []);
+  }, [unpin]);
 
   useLayoutEffect(() => {
     const node = scrollRef.current;
@@ -239,6 +440,8 @@ export default function ChatMessageList({
     if (lastConversationRef.current !== conversationKey) {
       lastConversationRef.current = conversationKey;
       lastCountRef.current = 0;
+      unpin();
+      if (turnSpacerRef.current) turnSpacerRef.current.style.height = '0px';
       stickyRef.current = true;
       if (bottomAnchorRef.current) bottomAnchorRef.current.style.overflowAnchor = 'auto';
       didInitialScrollRef.current = false;
@@ -259,12 +462,14 @@ export default function ChatMessageList({
     }
 
     if (count !== lastCountRef.current) {
-      const grew = count > lastCountRef.current;
+      const prevCount = lastCountRef.current;
+      const grew = count > prevCount;
       lastCountRef.current = count;
       // An older page was prepended (same newest message, new oldest one): hold the
       // reader where they were by shifting scrollTop by the height that was added
       // above them. Never scroll to the bottom for this.
       if (grew && node && lastKey === prevLastKey && firstKey !== prevFirstKey) {
+        if (pinIndexRef.current >= 0) setPin(pinPhaseRef.current, pinIndexRef.current + count - prevCount);
         node.scrollTop += node.scrollHeight - prevScrollHeight;
         return;
       }
@@ -272,14 +477,27 @@ export default function ChatMessageList({
         // Always scroll on the user's OWN send (even if scrolled up); for inbound
         // messages scroll per SCROLL_TO_BOTTOM_ON_INBOUND, else only when the user
         // is already near the bottom (stickyRef).
-        const ownSend = messages[count - 1]?.isUser === true;
+        const last = messages[count - 1];
+        const ownSend = last?.isUser === true;
+        const pinRule = pinOnSendRef.current;
+        if (ownSend && last && (typeof pinRule === 'function' ? pinRule(last) : pinRule)) {
+          // REQ-PIN-1: pin the new bubble under the header instead of following the
+          // bottom. Inbound rows that land while pinned render below it unscrolled.
+          cancelAnimationFrame(pendingBottomFrameRef.current);
+          pinRow(count - 1);
+          return;
+        }
+        if (pinPhaseRef.current !== 'idle') {
+          if (count < prevCount && pinIndexRef.current >= count) unpin();
+          return;
+        }
         if (ownSend || SCROLL_TO_BOTTOM_ON_INBOUND || stickyRef.current) {
           cancelAnimationFrame(pendingBottomFrameRef.current);
           pendingBottomFrameRef.current = requestAnimationFrame(() => scrollToBottom('smooth'));
         }
       }
     }
-  }, [conversationKey, messages, scrollToBottom]);
+  }, [conversationKey, messages, pinRow, scrollToBottom, setPin, unpin]);
 
   useLayoutEffect(() => () => cancelAnimationFrame(pendingBottomFrameRef.current), [conversationKey]);
 
@@ -359,6 +577,7 @@ export default function ChatMessageList({
   // REQ-FROST-1: when the overlay grows (multi-line draft, attachment tray), keep a
   // reader who was at the bottom pinned there instead of letting the overlay cover it.
   useLayoutEffect(() => {
+    if (pinPhaseRef.current !== 'idle') return; // REQ-PIN-4: never pull a pinned view down
     if (stickyRef.current && didInitialScrollRef.current) scrollToBottom('auto');
   }, [bottomInset, scrollToBottom]);
 
@@ -372,6 +591,9 @@ export default function ChatMessageList({
       // Keep prepend compensation based on the latest tail height, including
       // changes while the reader is stationary in history.
       prevScrollHeightRef.current = scrollRef.current?.scrollHeight ?? 0;
+      // REQ-PIN-2/4: while pinned, the turn spacer absorbs tail growth and the view
+      // never follows it to the bottom.
+      if (pinPhaseRef.current !== 'idle') { sizeTurnSpacer(); return; }
       // Native anchoring follows the tail during CSS height interpolation. Avoid
       // forcing scrollTop on every ResizeObserver delivery / animation frame.
       if (!stickyRef.current) return;
@@ -387,14 +609,31 @@ export default function ChatMessageList({
     });
     observer.observe(content);
     return () => observer.disconnect();
-  }, [conversationKey, scrollToBottom]);
+  }, [conversationKey, scrollToBottom, sizeTurnSpacer]);
+
+  // The viewport itself resizes too (keyboard, rotation, dock): keep the pinned turn
+  // tall enough that the bubble stays put.
+  useEffect(() => {
+    const node = scrollRef.current;
+    if (!pinEnabled || !node || typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(() => sizeTurnSpacer());
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [conversationKey, pinEnabled, sizeTurnSpacer]);
 
   const onScroll = useCallback((event: UIEvent<HTMLDivElement>) => {
     onScrollProp?.(event);
     const node = scrollRef.current;
     if (!node) return;
     prevScrollHeightRef.current = node.scrollHeight;
+    // Pinned: only the explicit scroll-up gestures (cancelTailFollow) leave the pin.
+    if (pinPhaseRef.current !== 'idle') return;
     const distance = node.scrollHeight - node.scrollTop - node.clientHeight;
+    const spacer = turnSpacerRef.current;
+    if (spacer && spacer.offsetHeight > 0 && distance > 0) {
+      // Give back the leftover turn space as it scrolls out of view below.
+      spacer.style.height = `${Math.max(0, spacer.offsetHeight - distance)}px`;
+    }
     const moving = Boolean(contentRef.current?.querySelector('[data-tool-motion="true"]'));
     // Native anchor scrolls must not disable follow as the tail is interpolating.
     if (moving && stickyRef.current) return;
@@ -406,12 +645,28 @@ export default function ChatMessageList({
 
   const cancelTailFollow = () => {
     cancelAnimationFrame(pendingBottomFrameRef.current);
+    unpin();
     stickyRef.current = false;
     if (bottomAnchorRef.current) bottomAnchorRef.current.style.overflowAnchor = 'none';
   };
 
+  const activity = agentActivity ?? (agentIsWorking && (
+    <div data-debug-id={`${debugPrefix}-working-indicator`} className="msg flex min-w-0 max-w-full justify-start">
+      <div className="flex w-full flex-col items-start py-1">
+        <WorkingRings size={18} label="The agent is working" />
+      </div>
+    </div>
+  ));
+
   return (
     <div className={wrapperClassName}>
+      {pinEnabled ? (
+        // REQ-PIN-3: blur only the tail strip above the pinned bubble; the scroller's mask
+        // (ui-chat-pin-tail-mask) fades it. Shown in the pinned resting state only.
+        <div data-debug-id={`${debugPrefix}-pin-tail-blur`} aria-hidden="true"
+          className={`ui-chat-pin-tail-blur ${pinPhase === 'pinned' ? '' : 'hidden'}`}
+          style={{ height: PIN_OFFSET_PX }} />
+      ) : null}
       {/* Polite live region for scroll-to-match: announces the jump / paging / not-found
           to screen readers without stealing focus or blocking. */}
       <div data-debug-id={`${debugPrefix}-focus-status`} role="status" aria-live="polite" className="sr-only">{focusAnnouncement}</div>
@@ -422,7 +677,8 @@ export default function ChatMessageList({
           if (event.defaultPrevented || (event.target as HTMLElement).closest('input, textarea, select, [contenteditable="true"]')) return;
           if (['ArrowUp', 'PageUp', 'Home'].includes(event.key) || (event.key === ' ' && event.shiftKey)) cancelTailFollow();
         }}
-        className={scrollClassName} style={{ overflowAnchor: 'auto' }}>
+        className={`${scrollClassName}${pinPhase === 'pinned' ? ' ui-chat-pin-tail-mask' : ''}`}
+        style={{ overflowAnchor: 'auto', ...(pinEnabled ? { ['--chat-pin-offset' as string]: `${PIN_OFFSET_PX}px` } : {}) }}>
         <div ref={contentRef} data-debug-id={`${debugPrefix}-messages-container`}
           className="mx-auto w-full max-w-4xl space-y-3 sm:space-y-4 [--live-tools-tail-gap:12px] sm:[--live-tools-tail-gap:16px]"
           style={{ overflowAnchor: 'none' }}>
@@ -455,7 +711,10 @@ export default function ChatMessageList({
             const options = eligible ? visibleMessageOptions(message, Boolean(activeKey)) : [];
             const questionGroup = message.messageType === 'multi_question' ? parseQuestionGroup(message.metadata) : null;
             return (
-              <div key={message.key} data-debug-id={`${debugPrefix}-message-${message.messageId}`} className={`msg group flex min-w-0 max-w-full rounded-xl outline-none focus-visible:shadow-focus ${reduceMotion ? '' : 'transition-colors duration-500'} ${message.messageId === highlightId ? 'bg-warning-soft ring-1 ring-warning' : ''} ${message.isUser ? 'justify-end' : 'justify-start'}`}>
+              <div key={message.key} data-debug-id={`${debugPrefix}-message-${message.messageId}`}
+                data-chat-pin-index={pinEnabled ? index : undefined}
+                data-chat-pin-row={pinEnabled && index === pinIndex ? 'true' : undefined}
+                className={`msg group flex min-w-0 max-w-full rounded-xl outline-none focus-visible:shadow-focus ${reduceMotion ? '' : 'transition-colors duration-500'} ${message.messageId === highlightId ? 'bg-warning-soft ring-1 ring-warning' : ''} ${message.isUser ? 'justify-end' : 'justify-start'}`}>
                 <div className={`flex min-w-0 max-w-full ${message.isUser ? 'max-w-[86%] items-end sm:max-w-[78%]' : 'w-full items-start'} flex-col text-sm`}>
                   {renderMessageTop ? renderMessageTop({ message, index, messages }) : null}
                   <div className={`min-w-0 max-w-full overflow-hidden break-words [overflow-wrap:anywhere] ${message.isUser ? 'rounded-[15px] border border-subtle bg-surface-raised px-[14px] py-[10px] text-primary' : 'w-full text-primary'}`}>
@@ -503,17 +762,23 @@ export default function ChatMessageList({
               </div>
             );
           })}
-          {agentActivity ?? (agentIsWorking && (
-            <div data-debug-id={`${debugPrefix}-working-indicator`} className="msg flex min-w-0 max-w-full justify-start">
-              <div className="flex w-full flex-col items-start py-1">
-                <WorkingRings size={18} label="The agent is working" />
-              </div>
+          {pinEnabled ? (
+            // REQ-PIN-4: the activity line appears PIN_ACTIVITY_DELAY_MS after the bubble
+            // settles. It keeps its layout box while held, so revealing it moves nothing.
+            <div data-debug-id={`${debugPrefix}-pin-activity-slot`} className="empty:hidden"
+              aria-hidden={activityHeld || undefined}
+              style={activityHeld ? { opacity: 0, pointerEvents: 'none' } : undefined}>
+              {activity}
             </div>
-          ))}
+          ) : activity}
           {children}
+          {pinEnabled ? (
+            <div ref={turnSpacerRef} data-debug-id={`${debugPrefix}-pin-turn-spacer`} aria-hidden="true"
+              className="!mt-0" style={{ height: 0, overflowAnchor: 'none' }} />
+          ) : null}
         </div>
         {bottomInset > 0 ? (
-          <div data-debug-id={`${debugPrefix}-bottom-inset`} aria-hidden="true" className="!mt-0 shrink-0" style={{ height: bottomInset, overflowAnchor: 'none' }} />
+          <div data-debug-id={`${debugPrefix}-bottom-inset`} data-chat-bottom-inset="" aria-hidden="true" className="!mt-0 shrink-0" style={{ height: bottomInset, overflowAnchor: 'none' }} />
         ) : null}
         <div ref={bottomAnchorRef} data-debug-id={`${debugPrefix}-bottom-anchor`} aria-hidden="true"
           className="!mt-0" style={{ height: 1, overflowAnchor: 'auto' }} />
