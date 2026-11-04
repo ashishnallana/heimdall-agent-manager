@@ -280,14 +280,15 @@ export function useComposerExpanded(inputs: ComposerExpansionInputs): ComposerEx
       // Only a primary press on an enabled control can end in a click; anything else
       // (right-click, a disabled send button) must not leave a hold armed.
       pressInside.current = inside(target) && (press.isPrimary ?? true) && (press.button ?? 0) === 0
+        // An aria-disabled control that still handles clicks must not rely on this hold.
         && !target?.closest?.(':disabled, [aria-disabled="true"]');
       if (!inside(target)) release();
     };
     const onPressEnd = () => { pressInside.current = false; };
-    // Mouse and pen: WebKit blurs at mousedown, before pointerup, so the press ends there
-    // (a drag-off release may never click). Touch: iOS blurs after pointerup, just before
-    // click, so a touch press ends at its click or cancel.
-    const onPointerUp = (event: Event) => { if ((event as PointerEvent).pointerType !== 'touch') onPressEnd(); };
+    // Mouse: WebKit blurs at mousedown, before pointerup, so the press ends there (a
+    // drag-off release may never click). Touch and pen (iPadOS Pencil): the compatibility
+    // mousedown and blur come after pointerup, just before click, so they end at click or cancel.
+    const onPointerUp = (event: Event) => { if ((event as PointerEvent).pointerType === 'mouse') onPressEnd(); };
     const onFocusIn = (event: Event) => {
       if (inside(event.target)) held.current = false;
       else release();

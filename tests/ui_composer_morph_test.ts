@@ -113,7 +113,7 @@ test('focus opens; moving focus between the field and composer controls keeps it
 });
 
 /** jsdom has no PointerEvent: a MouseEvent carrying the pointer fields the hook reads. */
-function pointerish(type: string, pointerType: 'mouse' | 'touch', button = 0) {
+function pointerish(type: string, pointerType: 'mouse' | 'touch' | 'pen', button = 0) {
   const event = new dom.window.MouseEvent(type, { bubbles: true, cancelable: true, button });
   if (type.startsWith('pointer')) Object.defineProperties(event, { pointerType: { value: pointerType }, isPrimary: { value: true } });
   return event;
@@ -125,8 +125,8 @@ function pointerish(type: string, pointerType: 'mouse' | 'touch', button = 0) {
  *  mousedown (with the blur) just before click. The click is only delivered when the target
  *  is still hit-testable: a browser never dispatches it into an inert subtree, and jsdom does
  *  not model inert, so that check is made here, at the moment the click would be dispatched. */
-async function webkitPress(target: HTMLElement, order: 'desktop' | 'ios' = 'desktop') {
-  const fire = (type: string) => act(async () => { target.dispatchEvent(pointerish(type, order === 'ios' ? 'touch' : 'mouse')); });
+async function webkitPress(target: HTMLElement, order: 'desktop' | 'ios' | 'pencil' = 'desktop') {
+  const fire = (type: string) => act(async () => { target.dispatchEvent(pointerish(type, order === 'ios' ? 'touch' : order === 'pencil' ? 'pen' : 'mouse')); });
   const blurField = () => act(async () => { (document.activeElement as HTMLElement | null)?.blur(); });
   await fire('pointerdown');
   if (order === 'desktop') { await fire('mousedown'); await blurField(); await fire('pointerup'); await fire('mouseup'); }
@@ -136,7 +136,8 @@ async function webkitPress(target: HTMLElement, order: 'desktop' | 'ios' = 'desk
   return true;
 }
 
-for (const order of ['desktop', 'ios'] as const) {
+// pencil: iPadOS Apple Pencil, same order as iOS touch (compatibility mousedown after pointerup).
+for (const order of ['desktop', 'ios', 'pencil'] as const) {
   test(`WebKit ${order} press on + and terminal (blur relatedTarget null, button never focused) runs the handler and keeps the composer open`, async () => {
     const calls: string[] = [];
     const { container } = await mount(h(Morph, { onUpload: () => calls.push('upload'), onPaneToggle: () => calls.push('terminal') }));
