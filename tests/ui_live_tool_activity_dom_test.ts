@@ -645,10 +645,13 @@ test('hidden-only pages advance raw pagination even before first visible message
 });
 
 
-test('tail resize follows readers at bottom but preserves a scrolled-up reader', async () => {
+// User QA round 3: live tail rows (tools, activity) never auto-scroll the list, whether the
+// reader is at the bottom, mid-animation or scrolled up, and nothing natively anchors to
+// the bottom either (the scroller and its bottom anchor opt out of overflow anchoring).
+test('tail resize never moves the reader, at the bottom or scrolled up', async () => {
   await withDom(async ({ render, q, dom }) => {
     const previous = (globalThis as any).ResizeObserver;
-    let resized!: () => void, disconnected = 0, scrolls = 0;
+    let resized!: () => void, disconnected = 0, scrolls = 0, height = 100;
     (globalThis as any).ResizeObserver = class {
       constructor(callback: () => void) { resized = callback; }
       observe() {}
@@ -659,56 +662,26 @@ test('tail resize follows readers at bottom but preserves a scrolled-up reader',
       await render(React.createElement(ChatMessageList, { conversationKey: 'chat_resize', debugPrefix: 'resize',
         messages: [], children: React.createElement('div', null, 'Tools tail') }));
       const scroll = q('resize-scroll')!;
-      Object.defineProperties(scroll, { scrollHeight: { value: 1000, configurable: true },
+      Object.defineProperties(scroll, { scrollHeight: { get: () => height, configurable: true },
         clientHeight: { value: 100, configurable: true } });
       resized();
-      assert.equal(scrolls, 1, 'tail growth follows bottom reader even without messages');
-      scroll.scrollTop = 900; // the mocked scrollTo above has no native geometry
+      height = 1000; resized();
+      assert.equal(scrolls, 0, 'first overflow is not followed');
+      assert.equal(scroll.scrollTop, 0);
       const tail = q('resize-messages-container')!.lastElementChild as HTMLElement;
       tail.setAttribute('data-tool-motion', 'true');
-      resized(); resized();
-      assert.equal(scrolls, 1, 'motion does not force a JS scroll write each frame');
-      assert.equal(q('resize-bottom-anchor')!.style.overflowAnchor, 'auto');
-      await act(async () => scroll.dispatchEvent(new dom.window.WheelEvent('wheel', { deltaY: -30, bubbles: true })));
-      assert.equal(q('resize-bottom-anchor')!.style.overflowAnchor, 'none', 'manual upward scroll disables anchor before geometry changes');
-      tail.removeAttribute('data-tool-motion');
-      resized();
-      assert.equal(scrolls, 1, 'manual interruption cancels pending follow');
-      scroll.scrollTop = 0;
+      height = 1200; resized(); resized();
+      assert.equal(scrolls, 0, 'tool motion is not followed');
+      assert.equal(scroll.style.overflowAnchor, 'none', 'no native anchoring on the scroller');
+      assert.equal(q('resize-bottom-anchor')!.style.overflowAnchor, 'none', 'the bottom anchor never follows growth');
+      scroll.scrollTop = 300;
       await act(async () => { scroll.dispatchEvent(new dom.window.Event('scroll')); });
-      resized();
-      assert.equal(scrolls, 1, 'tail growth does not move scrolled-up reader');
+      tail.removeAttribute('data-tool-motion');
+      height = 1400; resized();
+      assert.equal(scrolls, 0, 'tail growth does not move a scrolled-up reader');
+      assert.equal(scroll.scrollTop, 300);
       await render(null);
       assert.equal(disconnected, 1);
-    } finally { (globalThis as any).ResizeObserver = previous; }
-  });
-});
-
-test('short-thread first overflow bootstraps native anchoring once and respects user cancellation', async () => {
-  await withDom(async ({ render, q, dom }) => {
-    const previous = (globalThis as any).ResizeObserver;
-    let resized!: () => void, scrolls = 0, height = 100;
-    (globalThis as any).ResizeObserver = class {
-      constructor(callback: () => void) { resized = callback; }
-      observe() {}
-      disconnect() {}
-    };
-    dom.window.HTMLElement.prototype.scrollTo = function () { scrolls++; this.scrollTop = height - 100; };
-    try {
-      await render(React.createElement(ChatMessageList, { conversationKey: 'short', debugPrefix: 'short', messages: [],
-        children: React.createElement('div', { 'data-tool-motion': 'true' }, 'Moving tools') }));
-      const scroll = q('short-scroll')!;
-      Object.defineProperties(scroll, { scrollHeight: { get: () => height }, clientHeight: { value: 100 } });
-      resized();
-      assert.equal(scrolls, 0, 'fitting content needs no bootstrap');
-      height = 150; resized();
-      assert.equal(scrolls, 1, 'first actual overflow seeds the bottom anchor');
-      height = 180; scroll.scrollTop = 80; resized(); resized();
-      assert.equal(scrolls, 1, 'remaining animation frames do not write scroll position');
-      await act(async () => scroll.dispatchEvent(new dom.window.WheelEvent('wheel', { deltaY: -30, bubbles: true })));
-      height = 220; resized();
-      assert.equal(scrolls, 1, 'user interruption cancels any following');
-      assert.equal(q('short-bottom-anchor')!.style.overflowAnchor, 'none');
     } finally { (globalThis as any).ResizeObserver = previous; }
   });
 });

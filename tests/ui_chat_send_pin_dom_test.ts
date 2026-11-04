@@ -6,15 +6,19 @@ import { createRoot } from 'react-dom/client';
 import { Provider } from 'react-redux';
 import { configureStore } from '@reduxjs/toolkit';
 import { JSDOM } from 'jsdom';
-import ChatMessageList, { PIN_TAIL_PX, PIN_TAIL_MAX_PX, pinOffsetFor, pinTailFor, PIN_TRAVEL_MS, PIN_SETTLE_MS, PIN_ACTIVITY_DELAY_MS, PIN_EASE, cubicBezierAt } from '../src/ui/components/chat/ChatMessageList.tsx';
+import ChatMessageList, { PIN_TAIL_PX, PIN_TAIL_MAX_PX, pinOffsetFor, pinTailFor, pinSpacerFor, pinFadeFor, PIN_FADE_RANGE_PX, PIN_TRAVEL_MS, PIN_SNAPPY_TRAVEL_MS, PIN_SETTLE_MS, PIN_ACTIVITY_DELAY_MS, PIN_EASE, PIN_EASE_X, cubicBezierAt } from '../src/ui/components/chat/ChatMessageList.tsx';
 import { useComposerDockInset } from '../src/ui/components/chat/MessageComposer.tsx';
 
-// REQ-PIN-1..6: send pin-to-top. JSDOM has no layout, so the fixture gives the scroller a
-// fixed viewport (600px tall, 2000px of content) and puts the newest row at y=1900 in
-// content coordinates; getBoundingClientRect follows the scroller's scrollTop.
+// REQ-PIN-1..6: send pin-to-top. JSDOM has no layout, so the fixture models one: a 600px
+// viewport, the first sent row (index 3) at y=1900 in content coordinates and each later
+// row 200px further down, every row 40px tall. The exchange (sent row to the end of the
+// last row, plus `env.tail.extra`), the turn spacer, the composer inset spacer and a 1px
+// anchor make up scrollHeight, and scrollTop clamps to the real range like a browser.
 
 const VIEWPORT = 600;
 const ROW_Y = 1900;
+const ROW_H = 40;
+const rowTop = (index: number) => (index < 3 ? -1000 : ROW_Y + 200 * (index - 3));
 
 const msg = (key: string, isUser: boolean, body = key) => ({ key, messageId: key, body, isUser,
   createdUnixMs: 1, deliveredUnixMs: 0, readUnixMs: 0, deliveryFailedUnixMs: 0 }) as any;
@@ -40,11 +44,31 @@ async function withList(run: (env: any) => Promise<void>) {
   dom.window.matchMedia = (() => media) as any;
   dom.window.HTMLElement.prototype.scrollTo = function (this: HTMLElement) { scrollToCalls++; };
   const scrollerOf = (el: Element | null) => el?.closest('[data-debug-id$="-scroll"]') as HTMLElement | null;
+  const tail = { extra: 0 };
+  const px = (el: HTMLElement | null) => parseFloat(el?.style.height ?? '') || 0;
+  const indexOf = (el: Element | null) => Number(el?.closest('[data-chat-pin-index]')?.getAttribute('data-chat-pin-index') ?? -1);
   dom.window.HTMLElement.prototype.getBoundingClientRect = function (this: HTMLElement) {
     const scroller = scrollerOf(this);
-    const top = this.closest('[data-chat-pin-row]') && scroller ? ROW_Y - scroller.scrollTop : 0;
-    return { top, bottom: top + 40, height: 40, width: 600, x: 0, y: top, left: 0, right: 600, toJSON() {} } as DOMRect;
+    const index = indexOf(this);
+    const top = index >= 0 && scroller ? rowTop(index) - scroller.scrollTop : 0;
+    return { top, bottom: top + ROW_H, height: ROW_H, width: 600, x: 0, y: top, left: 0, right: 600, toJSON() {} } as DOMRect;
   };
+  const lastRowBottom = () => {
+    const rows = dom.window.document.querySelectorAll('[data-chat-pin-index]');
+    return rowTop(rows.length - 1) + ROW_H + tail.extra;
+  };
+  Object.defineProperties(dom.window.HTMLElement.prototype, {
+    offsetTop: { configurable: true, get(this: HTMLElement) {
+      if (this.dataset.debugId === 'pin-pin-turn-spacer') return lastRowBottom();
+      const index = this.hasAttribute('data-chat-pin-index') ? indexOf(this) : -1;
+      return index >= 0 ? rowTop(index) : 0;
+    } },
+    offsetHeight: { configurable: true, get(this: HTMLElement) {
+      if (this.dataset.debugId === 'pin-bottom-anchor') return 1;
+      if (this.dataset.debugId === 'pin-bottom-inset' || this.dataset.debugId === 'pin-pin-turn-spacer') return px(this);
+      return 0;
+    } },
+  });
   const store = configureStore({ reducer: { vault: (s = {}) => s, chat: (s = { session: { userId: 'user1' } }) => s } });
   const root = createRoot(dom.window.document.getElementById('root')!);
   const q = (id: string) => dom.window.document.querySelector('[data-debug-id="' + id + '"]') as HTMLElement | null;
@@ -56,10 +80,12 @@ async function withList(run: (env: any) => Promise<void>) {
     agentActivity: React.createElement('div', { 'data-debug-id': 'pin-activity' }, 'Working…'), ...extra });
   const geometry = () => {
     const scroll = q('pin-scroll')!;
+    const height = () => lastRowBottom() + px(q('pin-pin-turn-spacer')) + px(q('pin-bottom-inset')) + 1;
     let top = VIEWPORT * 2;
-    Object.defineProperties(scroll, { scrollHeight: { configurable: true, value: 2000 },
+    Object.defineProperties(scroll, { scrollHeight: { configurable: true, get: height },
       clientHeight: { configurable: true, value: VIEWPORT },
-      scrollTop: { configurable: true, get: () => top, set: (value: number) => { top = value; } } });
+      scrollTop: { configurable: true, get: () => top,
+        set: (value: number) => { top = Math.max(0, Math.min(value, height() - VIEWPORT)); } } });
     return scroll;
   };
   const frame = async (ms: number) => { now += ms; await act(async () => {
@@ -67,12 +93,14 @@ async function withList(run: (env: any) => Promise<void>) {
   }); };
   const settle = async () => { for (let t = 0; t <= PIN_SETTLE_MS + 32; t += 16) await frame(16); };
   try {
-    await run({ dom, q, render, list, geometry, frame, settle, observers,
+    await run({ dom, q, render, list, geometry, frame, settle, observers, tail,
       scrollToCalls: () => scrollToCalls,
       reduceMotion: async (value: boolean) => { await act(async () => { media.matches = value; mediaListeners.forEach((fn) => fn()); }); } });
   } finally {
     await act(async () => root.unmount());
     assert.equal(frames.size, 0, 'no animation frame survives unmount');
+    delete (dom.window.HTMLElement.prototype as any).offsetTop;
+    delete (dom.window.HTMLElement.prototype as any).offsetHeight;
     assert.equal(mediaListeners.size, 0, 'reduced-motion listener removed on unmount');
     Object.assign(globalThis, previous);
     dom.window.close();
@@ -83,19 +111,32 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 // The fixture's previous message ends far above the new row, so the tail is the maximum.
 const OFFSET = PIN_TAIL_MAX_PX;
 const target = ROW_Y - OFFSET; // row top lands OFFSET under the top
+const INSET = 80;
+// Exchange spacer for a short reply: viewport - slot - (row + inset + anchor).
+const SPACER = VIEWPORT - OFFSET - (ROW_H + INSET + 1);
+const fade = (scroll: HTMLElement) => scroll.style.getPropertyValue('--chat-pin-fade');
+const scrollTo = async (scroll: HTMLElement, top: number) => {
+  scroll.scrollTop = top;
+  await act(async () => { scroll.dispatchEvent(new (scroll.ownerDocument.defaultView as any).Event('scroll')); });
+};
 
-test('pin timing (REQ-PIN-1 rev3): one ~320ms cubic-bezier(0.2, 0.8, 0.2, 1) curve without overshoot', () => {
-  assert.ok(PIN_TRAVEL_MS >= 300 && PIN_TRAVEL_MS <= 350, 'travel ~320ms');
+test('pin timing (REQ-PIN-1 rev4): curved ~550ms by default, snappy ~320ms, no overshoot', () => {
+  assert.ok(PIN_TRAVEL_MS >= 500 && PIN_TRAVEL_MS <= 600, 'curved travel ~550ms');
+  assert.ok(PIN_SNAPPY_TRAVEL_MS >= 300 && PIN_SNAPPY_TRAVEL_MS <= 350, 'snappy travel ~320ms');
   assert.equal(PIN_SETTLE_MS, PIN_TRAVEL_MS, 'bubble and list settle together');
   assert.ok(PIN_ACTIVITY_DELAY_MS >= 150 && PIN_ACTIVITY_DELAY_MS <= 250);
   assert.deepEqual(PIN_EASE, [0.2, 0.8, 0.2, 1]);
-  let last = 0;
-  for (let x = 0; x <= 1.0001; x += 0.05) {
-    const y = cubicBezierAt(PIN_EASE, x);
-    assert.ok(y >= last - 1e-6 && y <= 1 + 1e-6, 'monotonic, never past 1');
-    last = y;
+  assert.deepEqual(PIN_EASE_X, [0.45, 0, 0.25, 1]);
+  for (const ease of [PIN_EASE, PIN_EASE_X]) {
+    let last = 0;
+    for (let x = 0; x <= 1.0001; x += 0.05) {
+      const y = cubicBezierAt(ease, x);
+      assert.ok(y >= last - 1e-6 && y <= 1 + 1e-6, 'monotonic, never past 1');
+      last = y;
+    }
   }
   assert.ok(cubicBezierAt(PIN_EASE, 0.25) > 0.6, 'fast start');
+  assert.ok(cubicBezierAt(PIN_EASE_X, 0.25) < cubicBezierAt(PIN_EASE, 0.25) - 0.3, 'X lags Y, so the path curves');
 });
 
 test('the tail keeps the previous last line and action row, below any floating header', () => {
@@ -107,7 +148,18 @@ test('the tail keeps the previous last line and action row, below any floating h
   assert.equal(pinOffsetFor(64, 56), 120, 'pt-16 under a floating header: the slot starts below it');
 });
 
-test('own send pins the bubble under the header: transform-only travel, bubble and history together, then fade + delayed activity', async () => {
+test('REQ-PIN-2 rev2: the exchange spacer fills the view below the slot, counting the composer inset', () => {
+  assert.equal(pinSpacerFor(600, 96, 40 + 80 + 1), 383, 'short reply: the rest of the view');
+  assert.equal(pinSpacerFor(600, 96, 900), 0, 'a reply taller than the view needs no spacer');
+  assert.equal(pinFadeFor(0), 1, 'fully on at the end of the range');
+  assert.equal(pinFadeFor(1), 1, 'sub-pixel rubber band still counts as the end');
+  assert.equal(pinFadeFor(PIN_FADE_RANGE_PX / 2), 0.5, 'interpolated as the reader scrolls up');
+  assert.equal(pinFadeFor(PIN_FADE_RANGE_PX), 0);
+  assert.equal(pinFadeFor(500), 0);
+  assert.ok(PIN_FADE_RANGE_PX >= 40 && PIN_FADE_RANGE_PX <= 80);
+});
+
+test('own send pins the bubble at max scroll: transform-only travel with the tail on throughout, then delayed activity', async () => {
   await withList(async ({ q, render, list, geometry, frame, settle, ...env }) => {
     await render(list(history));
     const scroll = geometry();
@@ -116,24 +168,26 @@ test('own send pins the bubble under the header: transform-only travel, bubble a
     const row = q('pin-message-local_a')!;
     assert.equal(row.getAttribute('data-chat-pin-row'), 'true');
     assert.equal(scroll.dataset.chatPinned, 'true');
-    assert.equal(scroll.scrollTop, target, 'scroll jumps to the pinned target before paint');
+    assert.equal(q('pin-pin-turn-spacer')!.style.height, SPACER + 'px', 'exchange sized to the view');
+    assert.equal(scroll.scrollTop, target, 'scroll jumps to the pin position before paint');
+    assert.equal(scroll.scrollHeight - scroll.clientHeight, target, 'which is the end of the scroll range');
     assert.equal(env.scrollToCalls(), before, 'no scroll-to-bottom on a pinned send');
     const content = q('pin-messages-container')!;
     const historyStart = content.style.transform;
     assert.match(historyStart, /^translate3d\(0, -?\d+(\.\d+)?px, 0\)$/, 'history starts where it was, via transform only');
     assert.match(row.style.transform, /^translate3d\(-?0(px)?, -?\d+(\.\d+)?px, 0(px)?\)$/, 'bubble starts under the dock (no origin given: list left), via transform only');
     assert.equal(row.style.opacity, '', 'no fade-in');
-    assert.ok(!scroll.className.includes('ui-chat-pin-tail-mask'), 'no tail fade while travelling');
+    assert.equal(scroll.dataset.chatPinTail, 'on', 'tail fade on during the travel (REQ-PIN-3 rev2)');
+    assert.equal(fade(scroll), '1');
+    assert.equal(q('pin-pin-tail-blur')!.style.opacity, '1', 'tail blur on during the travel');
     await frame(16);
     await frame(60);
     assert.notEqual(content.style.transform, historyStart, 'history moves from the first frame, with the bubble');
-    assert.notEqual(row.style.transform, 'translate3d(0, 0px, 0)');
     await settle();
     assert.equal(row.style.transform, '', 'bubble at rest');
     assert.equal(content.style.transform, '', 'history at rest');
     assert.equal(scroll.scrollTop, target);
-    assert.ok(scroll.className.includes('ui-chat-pin-tail-mask'), 'tail fade in the pinned resting state');
-    assert.ok(!q('pin-pin-tail-blur')!.className.includes('hidden'), 'tail blur strip shown');
+    assert.equal(fade(scroll), '1', 'tail fade at rest');
     assert.equal(q('pin-pin-tail-blur')!.style.height, OFFSET + 'px', 'blur covers the tail strip only');
     assert.equal(q('pin-pin-tail-blur')!.style.top, '0px', 'unpadded: the strip starts at the top');
     assert.equal(q('pin-pin-activity-slot')!.style.opacity, '0', 'activity line waits after settle');
@@ -142,48 +196,52 @@ test('own send pins the bubble under the header: transform-only travel, bubble a
   });
 });
 
-test('REQ-PIN-1 rev3: the bubble starts where the composer text was (read before the insert) and moves with the list on one curve', async () => {
-  await withList(async ({ dom, q, render, list, geometry, frame, settle }) => {
-    const input = dom.window.document.createElement('textarea');
-    input.style.padding = '0';
-    input.style.border = '0';
-    let inputTop = 560;
-    input.getBoundingClientRect = () => ({ left: -240, top: inputTop, right: 0, bottom: inputTop + 24, width: 240, height: 24, x: -240, y: inputTop, toJSON() {} }) as DOMRect;
-    const origin = { current: input };
-    // The composer moves in the commit that inserts the row (draft cleared, collapse):
-    // the start must be the position read before that commit.
-    function Host({ messages, moveInput }: { messages: any[]; moveInput: boolean }) {
-      React.useLayoutEffect(() => { if (moveInput) inputTop = 700; });
-      return list(messages, { pinOriginRef: origin });
-    }
-    await render(React.createElement(Host, { messages: history, moveInput: false }));
-    const scroll = geometry();
-    await render(React.createElement(Host, { messages: [...history, msg('local_a', true, 'New question')], moveInput: true }));
-    const row = q('pin-message-local_a')!;
-    const content = q('pin-messages-container')!;
-    const nums = (value: string) => (value.match(/-?\d+(\.\d+)?(?=px)/g) ?? []).map(Number);
-    const at = () => {
-      const [x, y] = nums(row.style.transform);
-      const history = nums(content.style.transform)[0] ?? 0;
-      return { x, y: y + history, history }; // the bubble's offset from its slot, on screen
-    };
-    const start = at();
-    assert.equal(start.x, -240, 'starts at the composer text\'s left edge');
-    assert.equal(start.y, 560 - OFFSET, 'starts at the composer text\'s top, as read before the insert');
-    for (let t = 0; t < PIN_TRAVEL_MS * 0.3; t += 16) await frame(16);
-    const mid = at();
-    const xLeft = mid.x / start.x;
-    assert.ok(xLeft > 0.05 && xLeft < 0.95, 'mid-travel');
-    assert.ok(Math.abs(mid.y / start.y - xLeft) < 1e-6, 'X and Y on the same curve');
-    assert.ok(Math.abs(mid.history / start.history - xLeft) < 1e-6, 'the list moves on the same curve as the bubble');
-    await settle();
-    assert.equal(row.style.transform, '', 'bubble at rest in its slot');
-    assert.equal(content.style.transform, '', 'list at rest');
-    assert.equal(scroll.scrollTop, target);
+for (const travel of ['curved', 'snappy'] as const) {
+  test(`REQ-PIN-1 rev4 (${travel}): the bubble starts at the composer text (read before the insert); Y and the list share one curve`, async () => {
+    await withList(async ({ dom, q, render, list, geometry, frame, settle }) => {
+      const input = dom.window.document.createElement('textarea');
+      input.style.padding = '0';
+      input.style.border = '0';
+      let inputTop = 560;
+      input.getBoundingClientRect = () => ({ left: -240, top: inputTop, right: 0, bottom: inputTop + 24, width: 240, height: 24, x: -240, y: inputTop, toJSON() {} }) as DOMRect;
+      const origin = { current: input };
+      // The composer moves in the commit that inserts the row (draft cleared, collapse):
+      // the start must be the position read before that commit.
+      function Host({ messages, moveInput }: { messages: any[]; moveInput: boolean }) {
+        React.useLayoutEffect(() => { if (moveInput) inputTop = 700; });
+        return list(messages, { pinOriginRef: origin, pinTravel: travel });
+      }
+      await render(React.createElement(Host, { messages: history, moveInput: false }));
+      const scroll = geometry();
+      await render(React.createElement(Host, { messages: [...history, msg('local_a', true, 'New question')], moveInput: true }));
+      const row = q('pin-message-local_a')!;
+      const content = q('pin-messages-container')!;
+      const nums = (value: string) => (value.match(/-?\d+(\.\d+)?(?=px)/g) ?? []).map(Number);
+      const at = () => {
+        const [x, y] = nums(row.style.transform);
+        const history = nums(content.style.transform)[0] ?? 0;
+        return { x, y: y + history, history, rowY: y }; // the bubble's offset from its slot, on screen
+      };
+      const start = at();
+      assert.equal(start.x, -240, 'starts at the composer text\'s left edge');
+      assert.equal(start.y, 560 - OFFSET, 'starts at the composer text\'s top, as read before the insert');
+      for (let t = 0; t < 160; t += 16) await frame(16);
+      const mid = at();
+      const yLeft = mid.history / start.history;
+      assert.ok(yLeft > 0.05 && yLeft < 0.95, 'mid-travel');
+      assert.ok(Math.abs(mid.rowY / (start.rowY || 1) - yLeft) < 1e-6 || start.rowY === 0, 'bubble Y on the list\'s curve');
+      const xLeft = mid.x / start.x;
+      if (travel === 'snappy') assert.ok(Math.abs(xLeft - yLeft) < 1e-6, 'snappy: straight path');
+      else assert.ok(xLeft - yLeft > 0.2, 'curved: X lags Y, so the path bends');
+      await settle();
+      assert.equal(row.style.transform, '', 'bubble at rest in its slot');
+      assert.equal(content.style.transform, '', 'list at rest');
+      assert.equal(scroll.scrollTop, target);
+    });
   });
-});
+}
 
-test('with WAAPI the bubble and the list run as one compositor animation and settle on finish', async () => {
+test('with WAAPI the list and the bubble (Y and X on their own curves) run on the compositor and settle on finish', async () => {
   await withList(async ({ dom, q, render, list, geometry }) => {
     const calls: Array<{ el: HTMLElement; frames: Keyframe[]; timing: KeyframeAnimationOptions; anim: any }> = [];
     (dom.window.HTMLElement.prototype as any).animate = function (this: HTMLElement, frames: Keyframe[], timing: KeyframeAnimationOptions) {
@@ -195,45 +253,61 @@ test('with WAAPI the bubble and the list run as one compositor animation and set
     const scroll = geometry();
     await render(list([...history, msg('local_a', true, 'New question')]));
     const row = q('pin-message-local_a')!;
-    assert.equal(calls.length, 2, 'one animation for the list, one for the bubble');
-    assert.deepEqual(calls.map((c) => c.el), [q('pin-messages-container'), row]);
-    for (const call of calls) {
-      assert.equal(call.timing.duration, PIN_TRAVEL_MS);
-      assert.equal(call.timing.easing, 'cubic-bezier(0.2, 0.8, 0.2, 1)');
-      assert.equal(call.frames[1].transform, 'translate3d(0, 0, 0)');
-    }
+    assert.equal(calls.length, 3, 'the list, the bubble\'s Y and the bubble\'s X');
+    assert.deepEqual(calls.map((c) => c.el), [q('pin-messages-container'), row, row]);
+    assert.deepEqual(calls.map((c) => c.timing.duration), [PIN_TRAVEL_MS, PIN_TRAVEL_MS, PIN_TRAVEL_MS]);
+    assert.deepEqual(calls.map((c) => c.timing.easing), ['cubic-bezier(0.2, 0.8, 0.2, 1)', 'cubic-bezier(0.2, 0.8, 0.2, 1)', 'cubic-bezier(0.45, 0, 0.25, 1)']);
+    assert.equal(calls[1].frames[1].transform, 'translate3d(0, 0, 0)');
+    assert.equal(calls[2].frames[1].translate, '0 0');
     assert.equal(row.style.zIndex, '1', 'the bubble draws above the list while it moves');
-    assert.equal(scroll.dataset.chatPinned, 'true');
-    assert.ok(!scroll.className.includes('ui-chat-pin-tail-mask'), 'no tail fade while travelling');
-    // Mid-travel key swap: the re-mounted row picks up the animation in step.
+    assert.equal(fade(scroll), '1', 'tail on while travelling');
+    // Mid-travel key swap: the re-mounted row picks up both animations in step.
     calls[0].anim.currentTime = 120;
     await render(list([...history, msg('srv_a', true, 'New question')]));
-    assert.equal(calls.length, 3);
-    assert.equal(calls[2].el, q('pin-message-srv_a'));
-    assert.equal(calls[2].anim.currentTime, 120, 'in step with the list');
-    assert.ok(calls[1].anim.cancelled, 'the old row\'s animation is dropped');
+    assert.equal(calls.length, 5);
+    assert.deepEqual([calls[3].el, calls[4].el], [q('pin-message-srv_a'), q('pin-message-srv_a')]);
+    assert.deepEqual([calls[3].anim.currentTime, calls[4].anim.currentTime], [120, 120], 'in step with the list');
+    assert.ok(calls[1].anim.cancelled && calls[2].anim.cancelled, 'the old row\'s animations are dropped');
     await act(async () => { calls[0].anim.onfinish(); });
-    assert.ok(scroll.className.includes('ui-chat-pin-tail-mask'), 'pinned resting state after finish');
+    assert.equal(fade(scroll), '1', 'resting at the pin position');
     assert.equal(q('pin-message-srv_a')!.style.zIndex, '', 'stacking reset at rest');
     delete (dom.window.HTMLElement.prototype as any).animate;
   });
 });
 
-test('while pinned nothing pulls the view to the bottom: inbound rows, tail growth, inset changes', async () => {
-  await withList(async ({ q, render, list, geometry, settle, observers, ...env }) => {
+test('nothing pulls the view to the bottom: inbound rows and tail growth leave scrollTop alone', async () => {
+  await withList(async ({ q, render, list, geometry, settle, observers, tail, ...env }) => {
     await render(list(history));
     const scroll = geometry();
     await render(list([...history, msg('local_a', true)]));
     await settle();
     const calls = env.scrollToCalls();
-    await render(list([...history, msg('local_a', true), msg('reply', false, 'Answer')]));
+    tail.extra = 60; // activity / tool rows grow under the bubble
     await act(async () => { observers.forEach((cb: (entries: any[]) => void) => cb([])); });
-    await render(list([...history, msg('local_a', true), msg('reply', false, 'Answer')], { bottomInset: 40 }));
+    assert.equal(q('pin-pin-turn-spacer')!.style.height, SPACER - 60 + 'px', 'the spacer absorbs exchange growth');
+    tail.extra = 0;
+    await render(list([...history, msg('local_a', true), msg('reply', false, 'Answer')]));
     await act(async () => { scroll.dispatchEvent(new (scroll.ownerDocument.defaultView as any).Event('scroll')); });
-    assert.equal(env.scrollToCalls(), calls, 'no scroll-to-bottom while pinned');
-    assert.equal(scroll.scrollTop, target, 'bubble stays pinned');
+    assert.equal(env.scrollToCalls(), calls, 'no scroll-to-bottom');
+    assert.equal(scroll.scrollTop, target, 'bubble stays at the pin position');
+    assert.equal(scroll.scrollHeight - scroll.clientHeight, target, 'and that is still the end of the range');
     assert.equal(q('pin-jump-latest-btn'), null);
-    assert.equal(scroll.dataset.chatPinned, 'true');
+  });
+});
+
+test('composer collapse (inset change) keeps max scroll = the pin position', async () => {
+  await withList(async ({ q, render, list, geometry, settle }) => {
+    await render(list(history));
+    const scroll = geometry();
+    await render(list([...history, msg('local_a', true)]));
+    await settle();
+    await render(list([...history, msg('local_a', true)], { bottomInset: 40 }));
+    assert.equal(q('pin-pin-turn-spacer')!.style.height, SPACER + 40 + 'px', 'the spacer takes the inset back');
+    assert.equal(scroll.scrollHeight - scroll.clientHeight, target, 'no extra room behind the composer');
+    assert.equal(scroll.scrollTop, target);
+    await render(list([...history, msg('local_a', true)], { bottomInset: 140 }));
+    assert.equal(scroll.scrollHeight - scroll.clientHeight, target, 'a taller dock does not push the bubble up either');
+    assert.equal(scroll.scrollTop, target);
   });
 });
 
@@ -268,55 +342,107 @@ test('the composer dock inset never re-pins a send-pinned list to the bottom', a
   } finally { Object.assign(globalThis, previous); dom.window.close(); }
 });
 
-test('manual scroll-up or jump-latest leaves the pin and removes fade and blur', async () => {
-  await withList(async ({ dom, q, render, list, geometry, settle, ...env }) => {
+test('round 3: scroll up, then back down to the end, lands the bubble at the pin position with the spacer unchanged', async () => {
+  await withList(async ({ q, render, list, geometry, settle }) => {
     await render(list(history));
     const scroll = geometry();
     await render(list([...history, msg('local_a', true)]));
     await settle();
-    await act(async () => scroll.dispatchEvent(new dom.window.WheelEvent('wheel', { deltaY: -40, bubbles: true })));
-    assert.equal(scroll.dataset.chatPinned, undefined);
-    assert.ok(!scroll.className.includes('ui-chat-pin-tail-mask'), 'fade removed');
-    assert.ok(q('pin-pin-tail-blur')!.className.includes('hidden'), 'blur removed');
-    assert.equal(q('pin-message-local_a')!.getAttribute('data-chat-pin-row'), null);
-    // Pin again, then jump to latest.
-    await render(list([...history, msg('local_a', true), msg('local_b', true)]));
-    await settle();
-    assert.equal(scroll.dataset.chatPinned, 'true');
-    scroll.scrollTop = 100;
-    await act(async () => scroll.dispatchEvent(new dom.window.WheelEvent('wheel', { deltaY: -40, bubbles: true })));
-    await act(async () => { scroll.dispatchEvent(new dom.window.Event('scroll')); });
-    const jump = q('pin-jump-latest-btn');
-    assert.ok(jump, 'jump-latest offered once back in history');
-    const calls = env.scrollToCalls();
-    await act(async () => jump!.click());
-    assert.equal(env.scrollToCalls(), calls + 1, 'jump-latest scrolls to the bottom');
-    assert.equal(q('pin-pin-turn-spacer')!.style.height, '0px', 'turn spacer released');
+    const spacer = q('pin-pin-turn-spacer')!;
+    assert.equal(spacer.style.height, SPACER + 'px');
+    await scrollTo(scroll, target - 300);
+    assert.equal(spacer.style.height, SPACER + 'px', 'scrolling never changes the layout');
+    assert.equal(scroll.dataset.chatPinned, 'true', 'there is no unpinned mode to fall into');
+    assert.equal(q('pin-message-local_a')!.getAttribute('data-chat-pin-row'), 'true');
+    await scrollTo(scroll, target + 3);
+    assert.equal(scroll.scrollTop, target, 'a small downward drift is clamped by the layout, not by a mode');
+    await scrollTo(scroll, 1e6);
+    assert.equal(scroll.scrollTop, target, 'scrolling down stops with the bubble at the pin position');
+    assert.equal(q('pin-message-local_a')!.getBoundingClientRect().top, OFFSET);
+    assert.equal(spacer.style.height, SPACER + 'px');
   });
 });
 
-test('scrolling down from the pin (wheel, PageDown, trackpad) also leaves it and removes fade and blur', async () => {
-  await withList(async ({ dom, q, render, list, geometry, settle }) => {
+test('the tail mask and blur follow the scroll distance from the end', async () => {
+  await withList(async ({ q, render, list, geometry, settle }) => {
     await render(list(history));
     const scroll = geometry();
-    await render(list([...history, msg('local_b', true)]));
+    await render(list([...history, msg('local_a', true)]));
     await settle();
-    assert.equal(scroll.dataset.chatPinned, 'true');
-    // A scroll that keeps the bubble in its slot (anchoring, prepend offset) stays pinned.
-    scroll.scrollTop = target + 3;
-    await act(async () => { scroll.dispatchEvent(new dom.window.Event('scroll')); });
-    assert.equal(scroll.dataset.chatPinned, 'true', 'sub-threshold drift keeps the pin');
-    // The reader scrolls down into the reply.
-    scroll.scrollTop = target + 120;
-    await act(async () => { scroll.dispatchEvent(new dom.window.Event('scroll')); });
-    assert.equal(scroll.dataset.chatPinned, undefined);
-    assert.ok(!scroll.className.includes('ui-chat-pin-tail-mask'), 'fade removed');
-    assert.ok(q('pin-pin-tail-blur')!.className.includes('hidden'), 'blur removed');
-    assert.equal(q('pin-message-local_b')!.getAttribute('data-chat-pin-row'), null);
+    const blur = q('pin-pin-tail-blur')!;
+    assert.equal(fade(scroll), '1');
+    await scrollTo(scroll, target - PIN_FADE_RANGE_PX / 2);
+    assert.equal(fade(scroll), '0.5', 'half way through the fade range');
+    assert.equal(blur.style.opacity, '0.5');
+    assert.equal(scroll.dataset.chatPinTail, 'on');
+    await scrollTo(scroll, target - 400);
+    assert.equal(fade(scroll), '0', 'history looks normal once scrolled up');
+    assert.equal(blur.style.opacity, '0');
+    assert.equal(scroll.dataset.chatPinTail, undefined, 'mask removed entirely');
+    await scrollTo(scroll, target);
+    assert.equal(fade(scroll), '1', 'back on at the pin position');
   });
 });
 
-test('reduced motion jumps straight to the pinned state and keeps the static fade', async () => {
+test('a reply taller than the view needs no spacer and is not followed; jump-latest goes to its end', async () => {
+  await withList(async ({ q, render, list, geometry, settle, observers, tail, ...env }) => {
+    await render(list(history));
+    const scroll = geometry();
+    await render(list([...history, msg('local_a', true)]));
+    await settle();
+    tail.extra = 900;
+    await render(list([...history, msg('local_a', true), msg('reply', false, 'A very long answer')]));
+    await act(async () => { observers.forEach((cb: (entries: any[]) => void) => cb([])); });
+    const spacer = q('pin-pin-turn-spacer')!;
+    assert.equal(spacer.style.height, '0px', 'the exchange fills the view on its own');
+    assert.equal(scroll.scrollTop, target, 'not auto-followed while the reply renders');
+    await scrollTo(scroll, target);
+    const jump = q('pin-jump-latest-btn');
+    assert.ok(jump, 'jump-latest offered while the reply continues below');
+    const calls = env.scrollToCalls();
+    await act(async () => jump!.click());
+    assert.equal(env.scrollToCalls(), calls + 1, 'jump-latest scrolls to the end of the range');
+    await scrollTo(scroll, 1e6);
+    assert.equal(scroll.scrollTop, scroll.scrollHeight - VIEWPORT, 'the reply\'s end is reachable');
+    assert.ok(scroll.scrollTop > target);
+    assert.equal(fade(scroll), '0', 'the end of a long reply is not masked');
+    await scrollTo(scroll, target);
+    assert.equal(fade(scroll), '1', 'the tail is back at the pin position');
+    assert.equal(spacer.style.height, '0px');
+  });
+});
+
+test('a new send moves the space to the new exchange in the same pass', async () => {
+  await withList(async ({ q, render, list, geometry, settle }) => {
+    await render(list(history));
+    const scroll = geometry();
+    await render(list([...history, msg('local_a', true)]));
+    await settle();
+    await render(list([...history, msg('local_a', true), msg('reply', false, 'Answer')]));
+    await render(list([...history, msg('local_a', true), msg('reply', false, 'Answer'), msg('local_b', true)]));
+    assert.equal(q('pin-message-local_a')!.getAttribute('data-chat-pin-row'), null, 'the previous exchange gives up its space');
+    assert.equal(q('pin-message-local_b')!.getAttribute('data-chat-pin-row'), 'true');
+    assert.equal(q('pin-pin-turn-spacer')!.style.height, SPACER + 'px', 'the new exchange is sized');
+    assert.equal(scroll.scrollTop, rowTop(5) - OFFSET, 'travels to the new pin position');
+    assert.equal(scroll.scrollHeight - scroll.clientHeight, rowTop(5) - OFFSET);
+    await settle();
+  });
+});
+
+test('a scroll-up gesture during the travel lands it at once', async () => {
+  await withList(async ({ dom, q, render, list, geometry, frame }) => {
+    await render(list(history));
+    const scroll = geometry();
+    await render(list([...history, msg('local_a', true)]));
+    await frame(16);
+    await act(async () => scroll.dispatchEvent(new dom.window.WheelEvent('wheel', { deltaY: -40, bubbles: true })));
+    assert.equal(q('pin-message-local_a')!.style.transform, '', 'bubble at rest');
+    assert.equal(q('pin-messages-container')!.style.transform, '', 'history at rest');
+    assert.equal(scroll.dataset.chatPinned, 'true', 'the exchange keeps its space');
+  });
+});
+
+test('reduced motion jumps straight to the pin position and keeps the static fade', async () => {
   await withList(async ({ q, render, list, geometry, reduceMotion }) => {
     await render(list(history));
     const scroll = geometry();
@@ -325,8 +451,8 @@ test('reduced motion jumps straight to the pinned state and keeps the static fad
     assert.equal(scroll.scrollTop, target);
     assert.equal(q('pin-message-local_a')!.style.transform, '', 'no travel');
     assert.equal(q('pin-messages-container')!.style.transform, '');
-    assert.ok(scroll.className.includes('ui-chat-pin-tail-mask'), 'static fade kept');
-    assert.ok(!q('pin-pin-tail-blur')!.className.includes('hidden'));
+    assert.equal(fade(scroll), '1', 'static fade kept');
+    assert.equal(q('pin-pin-tail-blur')!.style.opacity, '1');
   });
 });
 
@@ -356,7 +482,7 @@ test('pin survives the optimistic local_ to server-id key swap and a server copy
   });
 });
 
-test('older-page prepend keeps the pinned row and the reader position', async () => {
+test('older-page prepend keeps the pinned row', async () => {
   await withList(async ({ q, render, list, geometry, settle }) => {
     await render(list(history));
     const scroll = geometry();
@@ -366,5 +492,25 @@ test('older-page prepend keeps the pinned row and the reader position', async ()
     assert.equal(q('pin-message-local_a')!.getAttribute('data-chat-pin-row'), 'true');
     assert.equal(q('pin-message-m3')!.getAttribute('data-chat-pin-row'), null);
     assert.equal(scroll.dataset.chatPinned, 'true');
+  });
+});
+
+// A pin-enabled list whose rule never matches, so the fixture keeps its row indices.
+const never = () => false;
+
+test('user QA round 3: an incoming message never moves the list, at rest at the bottom or scrolled up', async () => {
+  await withList(async ({ render, list, geometry, frame, ...env }) => {
+    await render(list(history, { pinOnSend: never }));
+    const scroll = geometry();
+    const calls = env.scrollToCalls();
+    const atRest = scroll.scrollTop;
+    await render(list([...history, msg('in_a', false, 'Inbound')], { pinOnSend: never }));
+    await frame(16);
+    assert.equal(scroll.scrollTop, atRest, 'at the bottom: not followed');
+    await scrollTo(scroll, 300);
+    await render(list([...history, msg('in_a', false, 'Inbound'), msg('in_b', false, 'More')], { pinOnSend: never }));
+    await frame(16);
+    assert.equal(scroll.scrollTop, 300, 'scrolled up: not yanked');
+    assert.equal(env.scrollToCalls(), calls, 'no scroll-to-bottom for inbound rows');
   });
 });

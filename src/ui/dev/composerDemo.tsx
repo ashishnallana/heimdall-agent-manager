@@ -33,6 +33,8 @@
  *                       collapsed pill, focused field, a draft, the owned runtime status
  *                       menu open, or two queued attachments (default empty)
  *   ?layout=phone|desktop  phone column (default) or a desktop-width conversation
+ *   ?sendAnim=curved|snappy  send travel: curved ~550ms (default) or snappy ~320ms
+ * A sent message containing "long" gets a reply taller than the viewport.
  * The header "…" menu applies the same presets in place (`composer-demo-preset-*`).
  *
  * Not shipped: vite.config.js has no `rollupOptions.input`, so `vite build` emits only
@@ -43,7 +45,7 @@ import ReactDOM from 'react-dom/client';
 import { Provider } from 'react-redux';
 import { combineReducers, configureStore } from '@reduxjs/toolkit';
 import { Icon, Menu, runtimeStatusToTone } from '@ui';
-import ChatMessageList from '../components/chat/ChatMessageList';
+import ChatMessageList, { type PinTravel } from '../components/chat/ChatMessageList';
 import {
   MessageComposerActions,
   MessageComposerInput,
@@ -149,7 +151,10 @@ const SAMPLE_MESSAGES: ChatMessage[] = SAMPLE_BODIES.map(([isUser, body], index)
 
 const AGENT_REPLY = `Got it (demo reply, nothing was sent). Your message stays pinned at the top while this reply grows below it; scroll up to see the full history again.`;
 
+const LONG_AGENT_REPLY = Array.from({ length: 14 }, (_, i) => `${i + 1}. A long demo reply line, so the exchange outgrows the viewport and you scroll through it normally.`).join('\n\n');
+
 const PRESETS = new URLSearchParams(window.location.search);
+const SEND_ANIM: PinTravel = PRESETS.get('sendAnim') === 'snappy' ? 'snappy' : 'curved';
 
 const timeFormatter = new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' });
 
@@ -405,7 +410,7 @@ function ComposerDemo() {
     window.clearTimeout(replyTimerRef.current);
     replyTimerRef.current = window.setTimeout(() => {
       setAgentIsWorking(false);
-      setMessages((prev) => [...prev, message(prev.length, false, AGENT_REPLY)]);
+      setMessages((prev) => [...prev, message(prev.length, false, /\blong\b/i.test(text) ? LONG_AGENT_REPLY : AGENT_REPLY)]);
     }, 900);
   }, []);
 
@@ -477,6 +482,7 @@ function ComposerDemo() {
             bottomInset={composerDockHeight}
             pinOnSend
             pinOriginRef={textareaRef}
+            pinTravel={SEND_ANIM}
             wrapperClassName="relative min-h-0 min-w-0 max-w-full flex-1 overflow-hidden overflow-x-hidden"
             scrollClassName="chat-scrollbar h-full min-h-0 max-w-full space-y-3 overflow-y-auto overflow-x-hidden rounded-none bg-canvas px-1 py-3 pt-16"
           />

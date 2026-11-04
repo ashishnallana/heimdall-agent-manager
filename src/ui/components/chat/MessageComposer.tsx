@@ -434,7 +434,8 @@ export function useComposerDockInset(dockRef: RefObject<HTMLElement | null>, { i
         return;
       }
       // Read before writing: layout is clean when observers are delivered.
-      // REQ-PIN-4: a send-pinned list (ChatMessageList pinOnSend) is never pulled down.
+      // REQ-PIN-2 rev2: a list with a send exchange spacer (ChatMessageList pinOnSend)
+      // re-sizes that spacer to the new inset instead, so it is never pulled down.
       const pinned = scroller.dataset.chatPinned !== 'true' && scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight <= 2;
       spacer.style.height = `${height}px`;
       const jump = jumpDebugId ? scope.querySelector<HTMLElement>(`[data-debug-id="${jumpDebugId}"]`) : null;
