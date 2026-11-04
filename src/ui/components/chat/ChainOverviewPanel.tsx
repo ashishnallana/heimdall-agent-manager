@@ -683,7 +683,7 @@ export default function ChainOverviewPanel({
                     </span>
 
                     <div
-                      className="hidden shrink-0 items-center gap-0.5 group-hover:flex group-focus-within:flex"
+                      className="flex shrink-0 items-center gap-0.5"
                       onClick={(e) => e.stopPropagation()}
                     >
                       <IconButton

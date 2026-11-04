@@ -198,3 +198,21 @@ test('overview mounts token usage only while the pane is visible (hidden pane = 
   const section = fs.readFileSync(fileURLToPath(new URL('../src/ui/components/taskchain/ChainTokenUsage.tsx', import.meta.url)), 'utf8');
   assert.match(section, /retainChainTokenUsageView\(chainId\)[\s\S]{0,200}if \(view\.stale && !fetchingRef\.current\) refetch\(\)[\s\S]{0,60}return view\.release/);
 });
+
+test('chain overview agent controls render without hover or focus gating', () => {
+  const panel = fs.readFileSync(fileURLToPath(new URL('../src/ui/components/chat/ChainOverviewPanel.tsx', import.meta.url)), 'utf8');
+  const rowStart = panel.indexOf('data-debug-id={`chain-overview-agent-row-${instId}`}');
+  const rowEnd = panel.indexOf('chain-overview-restart-agent-${instId}', rowStart);
+  assert.ok(rowStart > 0 && rowEnd > rowStart, 'agent row block found');
+  const row = panel.slice(rowStart, rowEnd);
+  const wrapper = row.match(/<div\s+className="([^"]*)"\s+onClick=\{\(e\) => e\.stopPropagation\(\)\}/);
+  assert.ok(wrapper, 'controls wrapper with stopPropagation found');
+  const classes = wrapper![1].split(/\s+/);
+  assert.ok(classes.includes('flex') && classes.includes('shrink-0'), 'controls are always flex and never shrink');
+  assert.ok(!classes.includes('hidden'), 'controls are not hidden');
+  assert.ok(!classes.some((c) => c.startsWith('group-hover:') || c.startsWith('group-focus-within:')), 'no hover/focus gating');
+  for (const id of ['open-pty', 'start-agent', 'stop-agent']) {
+    assert.ok(row.includes(`chain-overview-${id}-\${instId}`), `${id} debug id kept`);
+  }
+  assert.ok(row.includes('min-w-0 flex-1 truncate'), 'ticket title still truncates');
+});
