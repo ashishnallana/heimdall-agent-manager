@@ -182,7 +182,9 @@ async function startHub(label) {
   children.push({ kill: mock.stop });
   const base = `http://127.0.0.1:${port}`;
   const child = spawn(bin, ['--listen', `127.0.0.1:${port}`, '--db', path.join(dir, 'hub.db'), '--migrations-dir', migrations, '--ui-origin', base],
-    { cwd: dir, env: { ...ENV, ...mock.hubEnv(base) }, stdio: ['ignore', log, log] });
+    // Offline, manifest-only update catalog (step 5b writes the manifest): the hub
+    // offers the build under test rather than the release GitHub has promoted.
+    { cwd: dir, env: { ...ENV, ...mock.hubEnv(base), HEIMDALL_UPDATE_CATALOG_OFFLINE: '1', HEIMDALL_UPDATE_MANIFEST_PATH: path.join(dir, 'update-manifest.json') }, stdio: ['ignore', log, log] });
   children.push(child);
   for (const deadline = Date.now() + 30_000; ;) {
     try { if ((await fetch(`${base}/api/v1/health`)).ok) break; } catch { /* starting */ }
@@ -467,6 +469,40 @@ async function main() {
       const active = (await bridgesOf(B)).filter(isActive);
       expect(active.length === 1 && active[0].bridge_id === S.b.bridgeId, 'both updates kept the same enrolled Bridge identity');
     } finally { await live.close(); }
+  }, { skip: WITH_SERVICE ? '' : 'needs a service manager; set HEIMDALL_E2E_SERVICE=1 (CI runners)' });
+  // The update the hub dispatches (Settings -> Bridges -> Update, and auto-update)
+  // runs through bridge_update_via_ham_bridge inside the RUNNING service, which
+  // step 5's direct `ham-bridge update` never reaches. That check once refused
+  // every valid profile install whose home is reached through a link
+  // (Fedora Atomic /home -> /var/home) with "not a ham-bridge profile install".
+  await step('5b hub-initiated update is accepted by the installed service and it reconnects', async () => {
+    const bridge = (await bridgesOf(B)).find((b) => b.bridge_id === S.b.bridgeId);
+    expect(bridge && bridge.version && bridge.target, `the hub knows the bridge version/target (${JSON.stringify(bridge)})`);
+    const work = path.join(ROOT, 'hub-update');
+    fs.rmSync(work, { recursive: true, force: true });
+    fs.cpSync(path.dirname(BRIDGE_BIN), path.join(work, 'pkg', 'bin'), { recursive: true });
+    const tarball = path.join(work, 'ham-bridge-e2e-update.tar.gz');
+    const tar = spawnSync('tar', ['-czf', path.relative(path.join(work, 'pkg'), tarball), 'bin'], { cwd: path.join(work, 'pkg'), encoding: 'utf8' });
+    expect(tar.status === 0, `packed the update bundle (exit ${tar.status}) ${tar.stderr}`);
+    const sha256 = crypto.createHash('sha256').update(fs.readFileSync(tarball)).digest('hex');
+    fs.writeFileSync(path.join(ROOT, 'hub', 'update-manifest.json'), JSON.stringify({ version: bridge.version, commit_sha: '', targets: { [bridge.target]: { tarball_url: tarball, sha256 } } }));
+    const offered = (await bridgesOf(B)).find((b) => b.bridge_id === S.b.bridgeId);
+    expect(offered?.update_artifact_available === true && offered?.latest_source === 'manifest', `the hub offers the manifest bundle (${JSON.stringify(offered)})`);
+    const before = JSON.parse(fs.readFileSync(path.join(PROFILE.dir, 'runtime-status.json'), 'utf8'));
+    const res = await http(B, 'POST', `/api/v1/bridges/${S.b.bridgeId}/update`, { body: { target_version: 'latest', force: true, drain_timeout_seconds: 30 } });
+    expect(res.status === 202, `hub dispatched the update (HTTP ${res.status}) ${res.raw}`);
+    for (const deadline = Date.now() + 180_000; ; await sleep(1000)) {
+      const b = (await bridgesOf(B)).find((x) => x.bridge_id === S.b.bridgeId) || {};
+      if (b.update_status === 'failed' || /not a ham-bridge profile install/.test(`${b.update_error} ${b.update_message}`)) {
+        throw new CheckFailed(`the service refused/failed the hub update: ${b.update_error || b.update_message}`);
+      }
+      let after = {};
+      try { after = JSON.parse(fs.readFileSync(path.join(PROFILE.dir, 'runtime-status.json'), 'utf8')); } catch { /* being rewritten */ }
+      if (after.pid && after.pid !== before.pid && after.connected && await online(B, S.b.bridgeId)()) break;
+      if (Date.now() > deadline) throw new CheckFailed(`the hub update never produced a reconnected Bridge process (status ${b.update_status}: ${b.update_message} ${b.update_error})`);
+    }
+    const active = (await bridgesOf(B)).filter(isActive);
+    expect(active.length === 1 && active[0].bridge_id === S.b.bridgeId, 'the hub update kept the same enrolled Bridge identity');
   }, { skip: WITH_SERVICE ? '' : 'needs a service manager; set HEIMDALL_E2E_SERVICE=1 (CI runners)' });
   await step('6 uninstall --purge leaves no files, secrets or service; the hub row is kept', async () => {
     const un = spawnSync(BRIDGE_BIN, ['uninstall', '--service', SERVICE, '--purge', '--yes', '--headless', '--json-progress'], { env: ENV, encoding: 'utf8', timeout: 120_000 });

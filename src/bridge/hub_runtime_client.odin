@@ -1588,6 +1588,16 @@ bridge_update_download :: proc(download_url, dest_path: string, download: Bridge
 	return false, fmt.tprintf("tarball download failed: HTTP %d", status)
 }
 
+// bridge_exe_in_bin_dir reports whether the running executable lives in bin_dir.
+// The executable path comes back already resolved through links (/proc/self/exe,
+// realpath), while bin_dir is built from $HOME / %LOCALAPPDATA%, which may reach the
+// same directory through a link (Fedora Atomic /home -> /var/home, macOS
+// /var -> /private/var, a Windows junction), so both sides go through path_key.
+bridge_exe_in_bin_dir :: proc(exe, bin_dir: string) -> bool {
+	if exe == "" || bin_dir == "" do return false
+	return bridgesvc.path_key(bridgesvc.pdir(exe)) == bridgesvc.path_key(bin_dir)
+}
+
 // bridge_update_via_ham_bridge decides whether this bridge can apply a hub update:
 // every update runs the staged binary's `ham-bridge update` (setup's transaction:
 // bin.bak, service re-render, extensions, health incl. the hub connection,
@@ -1599,11 +1609,7 @@ bridge_update_via_ham_bridge :: proc(target_version: string) -> (service: string
 	host := bridge_service_host()
 	name, registered := bridge_enroll_service_for(host, os.args)
 	exe, _ := os.get_executable_path(context.temp_allocator)
-	norm :: proc(p: string) -> string {
-		out, _ := strings.replace_all(strings.trim_right(p, "/\\"), "\\", "/", context.temp_allocator)
-		return out
-	}
-	if !registered || !strings.has_prefix(name, bridgesvc.SERVICE_PREFIX) || exe == "" || norm(bridgesvc.pdir(exe)) != norm(bridgesvc.layout_for(host, name).bin_dir) {
+	if !registered || !strings.has_prefix(name, bridgesvc.SERVICE_PREFIX) || !bridge_exe_in_bin_dir(exe, bridgesvc.layout_for(host, name).bin_dir) {
 		return "", fmt.tprintf("this bridge is not a ham-bridge profile install, so it cannot apply updates; reinstall it once with %s", BRIDGE_REINSTALL_HINT)
 	}
 	if bridge_provider_extension_version_compare(target_version, contracts.APP_VERSION) < 0 {
