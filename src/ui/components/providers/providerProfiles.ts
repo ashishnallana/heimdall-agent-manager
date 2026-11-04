@@ -30,7 +30,7 @@ export type ProviderProfile = {
   environment: ProfileEnv[];
   config: ProfileConfig;
 };
-export type ProfileMetadata = Omit<ProviderProfile, 'environment' | 'config'> & { state?: string };
+export type ProfileMetadata = Omit<ProviderProfile, 'environment' | 'config'> & { state?: string; has_binary?: boolean };
 export type ProfileOperation = 'get' | 'upsert' | 'remove' | 'reset';
 
 export function generateProfileId(

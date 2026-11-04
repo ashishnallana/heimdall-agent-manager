@@ -718,7 +718,7 @@ export default function ProviderProfilesSurface({ bridge, onHeadingChange }: {
                         {p.state && p.state !== 'ok' ? p.state : s?.state || 'Not checked'}
                         {s?.version_text ? ' · ' + s.version_text : ''}
                         </span>
-                        <ProviderBinaryPath provider={p.profile_id} status={s} overridePath={(p as { config?: { binary_path?: string } }).config?.binary_path || ''} />
+                        <ProviderBinaryPath provider={p.profile_id} status={s} hasOverride={!!p.has_binary} />
                         </span>
                       </span>
                       {p.profile_id === p.provider ? <Badge>Default</Badge> : <Text role="code" tone="muted" className="break-all">{p.profile_id}</Text>}

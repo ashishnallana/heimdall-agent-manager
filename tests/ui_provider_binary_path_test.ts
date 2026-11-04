@@ -28,6 +28,15 @@ test('a profile binary_path is labelled as an override and wins over PATH', () =
   assert.equal(providerBinaryPathView({ state: 'absent' }, '/opt/claude').kind, 'override');
 });
 
+test('list rows only know has_binary: labelled override without a path, path kept when reported', () => {
+  assert.deepEqual(providerBinaryPathView({ state: 'present', binary_path: '' }, '', true), { kind: 'override', path: '', label: 'Override' });
+  assert.equal(providerBinaryPathView({ state: 'present', binary_path: '/usr/bin/claude' }, '', true).path, '/usr/bin/claude');
+  assert.equal(providerBinaryPathView({ state: 'absent' }, '', false).kind, 'missing');
+  const s = read('../src/ui/components/providers/ProviderProfilesSurface.tsx');
+  assert.match(s, /hasOverride=\{!!p\.has_binary\}/);
+  assert.doesNotMatch(s, /\(p as \{ config/);
+});
+
 test('the row component is monospace, truncated, full path in the tooltip, and wired into both views', () => {
   const c = read('../src/ui/components/providers/ProviderBinaryPath.tsx');
   assert.match(c, /role="code"[^>]*truncate[^>]*title=\{view\.path\}/);

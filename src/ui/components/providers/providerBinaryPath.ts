@@ -14,9 +14,13 @@ export interface ProviderBinaryPathView {
 export function providerBinaryPathView(
   status: { state?: string; binary_path?: string } | undefined,
   overridePath = '',
+  hasOverride = false,
 ): ProviderBinaryPathView {
   const override = overridePath.trim();
   if (override) return { kind: 'override', path: override, label: 'Override' };
+  // The profile list only carries `has_binary` (the path itself stays on the bridge):
+  // label the override and show whatever path discovery reported, if any.
+  if (hasOverride) return { kind: 'override', path: (status?.binary_path || '').trim(), label: 'Override' };
   const resolved = (status?.binary_path || '').trim();
   if (status?.state === 'present' && resolved) return { kind: 'path', path: resolved, label: '' };
   return { kind: 'missing', path: '', label: 'Not found on PATH' };
