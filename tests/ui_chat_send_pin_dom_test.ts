@@ -6,7 +6,7 @@ import { createRoot } from 'react-dom/client';
 import { Provider } from 'react-redux';
 import { configureStore } from '@reduxjs/toolkit';
 import { JSDOM } from 'jsdom';
-import ChatMessageList, { PIN_OFFSET_PX, PIN_TRAVEL_MS, PIN_HISTORY_LAG_MS, PIN_ACTIVITY_DELAY_MS, cubicBezierAt } from '../src/ui/components/chat/ChatMessageList.tsx';
+import ChatMessageList, { PIN_OFFSET_PX, PIN_TRAVEL_MS, PIN_HISTORY_LAG_MS, PIN_SETTLE_MS, PIN_ACTIVITY_DELAY_MS, cubicBezierAt } from '../src/ui/components/chat/ChatMessageList.tsx';
 import { useComposerDockInset } from '../src/ui/components/chat/MessageComposer.tsx';
 
 // REQ-PIN-1..6: send pin-to-top. JSDOM has no layout, so the fixture gives the scroller a
@@ -65,7 +65,7 @@ async function withList(run: (env: any) => Promise<void>) {
   const frame = async (ms: number) => { now += ms; await act(async () => {
     const queued = [...frames.values()]; frames.clear(); queued.forEach((fn) => fn(now));
   }); };
-  const settle = async () => { for (let t = 0; t <= PIN_TRAVEL_MS + PIN_HISTORY_LAG_MS + 32; t += 16) await frame(16); };
+  const settle = async () => { for (let t = 0; t <= PIN_SETTLE_MS + 32; t += 16) await frame(16); };
   try {
     await run({ dom, q, render, list, geometry, frame, settle, observers,
       scrollToCalls: () => scrollToCalls,
@@ -85,6 +85,7 @@ const target = VIEWPORT * 2 + (ROW_Y - VIEWPORT * 2) - PIN_OFFSET_PX; // row top
 test('pin timing mirrors the motion tokens: 300ms strong ease-out without overshoot', () => {
   assert.equal(PIN_TRAVEL_MS, 300);
   assert.ok(PIN_HISTORY_LAG_MS >= 80 && PIN_HISTORY_LAG_MS <= 120);
+  assert.ok(PIN_SETTLE_MS >= 300 && PIN_SETTLE_MS <= 350, 'send-to-settled ~300-350ms');
   assert.ok(PIN_ACTIVITY_DELAY_MS >= 150 && PIN_ACTIVITY_DELAY_MS <= 250);
   assert.ok(PIN_OFFSET_PX >= 40 && PIN_OFFSET_PX <= 60, 'tail strip is 40-60px');
   let last = 0;
@@ -203,6 +204,27 @@ test('manual scroll-up or jump-latest leaves the pin and removes fade and blur',
     await act(async () => jump!.click());
     assert.equal(env.scrollToCalls(), calls + 1, 'jump-latest scrolls to the bottom');
     assert.equal(q('pin-pin-turn-spacer')!.style.height, '0px', 'turn spacer released');
+  });
+});
+
+test('scrolling down from the pin (wheel, PageDown, trackpad) also leaves it and removes fade and blur', async () => {
+  await withList(async ({ dom, q, render, list, geometry, settle }) => {
+    await render(list(history));
+    const scroll = geometry();
+    await render(list([...history, msg('local_b', true)]));
+    await settle();
+    assert.equal(scroll.dataset.chatPinned, 'true');
+    // A scroll that keeps the bubble in its slot (anchoring, prepend offset) stays pinned.
+    scroll.scrollTop = target + 3;
+    await act(async () => { scroll.dispatchEvent(new dom.window.Event('scroll')); });
+    assert.equal(scroll.dataset.chatPinned, 'true', 'sub-threshold drift keeps the pin');
+    // The reader scrolls down into the reply.
+    scroll.scrollTop = target + 120;
+    await act(async () => { scroll.dispatchEvent(new dom.window.Event('scroll')); });
+    assert.equal(scroll.dataset.chatPinned, undefined);
+    assert.ok(!scroll.className.includes('ui-chat-pin-tail-mask'), 'fade removed');
+    assert.ok(q('pin-pin-tail-blur')!.className.includes('hidden'), 'blur removed');
+    assert.equal(q('pin-message-local_b')!.getAttribute('data-chat-pin-row'), null);
   });
 });
 

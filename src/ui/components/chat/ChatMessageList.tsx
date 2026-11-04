@@ -76,11 +76,17 @@ function useReducedMotion(): boolean {
 // renders below it; the strip above it shows the faded tail of the previous message.
 // Timing mirrors the motion tokens: --duration-slow (300ms) on --ease-standard
 // (cubic-bezier(0.2, 0.8, 0.2, 1)). The history follows the bubble PIN_HISTORY_LAG_MS
-// later so the two read as one motion. Only transforms animate.
+// later over a shorter PIN_HISTORY_TRAVEL_MS leg, so the two read as one motion and
+// send-to-settled stays at ~350ms. Only transforms animate.
 export const PIN_OFFSET_PX = 52;
 export const PIN_TRAVEL_MS = 300;
 export const PIN_HISTORY_LAG_MS = 100;
+export const PIN_HISTORY_TRAVEL_MS = 250;
+export const PIN_SETTLE_MS = Math.max(PIN_TRAVEL_MS, PIN_HISTORY_LAG_MS + PIN_HISTORY_TRAVEL_MS);
 export const PIN_ACTIVITY_DELAY_MS = 200;
+// How far the pinned bubble may drift from its slot before a scroll counts as the
+// reader's own and leaves the pin (REQ-PIN-5).
+const PIN_DRIFT_PX = 4;
 const PIN_EASE: [number, number, number, number] = [0.2, 0.8, 0.2, 1];
 
 // Solves a CSS cubic-bezier timing function for progress x in [0, 1].
@@ -387,10 +393,10 @@ export default function ChatMessageList({
     const historyFrom = node.scrollTop - fromScroll;
     const bubbleFrom = startVisual - PIN_OFFSET_PX;
     if (Math.abs(historyFrom) < 1 && Math.abs(bubbleFrom) < 1) { settle(); return; }
-    const total = PIN_TRAVEL_MS + PIN_HISTORY_LAG_MS;
+    const total = PIN_SETTLE_MS;
     const apply = (elapsed: number) => {
-      const bubble = bubbleFrom * (1 - cubicBezierAt(PIN_EASE, elapsed / PIN_TRAVEL_MS));
-      const lag = Math.max(0, elapsed - PIN_HISTORY_LAG_MS) / PIN_TRAVEL_MS;
+      const bubble = bubbleFrom * (1 - cubicBezierAt(PIN_EASE, Math.min(1, elapsed / PIN_TRAVEL_MS)));
+      const lag = Math.min(1, Math.max(0, elapsed - PIN_HISTORY_LAG_MS) / PIN_HISTORY_TRAVEL_MS);
       const history = historyFrom * (1 - cubicBezierAt(PIN_EASE, lag));
       content.style.transform = history ? `translate3d(0, ${history}px, 0)` : '';
       // The row lives inside the content, so subtract the history shift from it.
@@ -626,8 +632,17 @@ export default function ChatMessageList({
     const node = scrollRef.current;
     if (!node) return;
     prevScrollHeightRef.current = node.scrollHeight;
-    // Pinned: only the explicit scroll-up gestures (cancelTailFollow) leave the pin.
-    if (pinPhaseRef.current !== 'idle') return;
+    // Travelling: only the explicit scroll-up gestures (cancelTailFollow) leave the pin.
+    if (pinPhaseRef.current === 'travel') return;
+    if (pinPhaseRef.current === 'pinned') {
+      // Programmatic shifts (prepend offset, scroll anchoring) keep the bubble in its
+      // slot. Any other movement, such as wheel-down, PageDown, Space or a trackpad
+      // scroll, is the reader's, so give back the normal history (REQ-PIN-3/5).
+      const row = contentRef.current?.querySelector<HTMLElement>('[data-chat-pin-row="true"]');
+      const slot = row ? row.getBoundingClientRect().top - node.getBoundingClientRect().top : PIN_OFFSET_PX;
+      if (Math.abs(slot - PIN_OFFSET_PX) <= PIN_DRIFT_PX) return;
+      unpin();
+    }
     const distance = node.scrollHeight - node.scrollTop - node.clientHeight;
     const spacer = turnSpacerRef.current;
     if (spacer && spacer.offsetHeight > 0 && distance > 0) {
@@ -641,7 +656,7 @@ export default function ChatMessageList({
     stickyRef.current = nearBottom;
     if (bottomAnchorRef.current) bottomAnchorRef.current.style.overflowAnchor = nearBottom ? 'auto' : 'none';
     setShowJump(!nearBottom && messages.length > 0);
-  }, [messages.length, onScrollProp]);
+  }, [messages.length, onScrollProp, unpin]);
 
   const cancelTailFollow = () => {
     cancelAnimationFrame(pendingBottomFrameRef.current);

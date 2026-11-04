@@ -1852,7 +1852,17 @@ export function AgentChatPane({
         }),
       );
     } catch (err: any) {
-      if (!mountedRef.current || routeGeneration.current !== submittedGeneration || currentTargetRef.current !== submittedTarget || (submittedQuotes.length && ((reduxStore.getState() as any).composerContext?.epoch !== submittedEpoch || selectActiveVaultKey() !== submittedKey))) return;
+      // The input was cleared at send, so every failure path puts the draft back.
+      if (!mountedRef.current || routeGeneration.current !== submittedGeneration || currentTargetRef.current !== submittedTarget) {
+        // The pane moved on: restore the draft to storage for the submitted route
+        // unless a newer one was typed there meanwhile.
+        if (!readComposerDraft(submittedRoute)) writeComposerDraft(submittedRoute, submittedDraft);
+        return;
+      }
+      if (submittedQuotes.length && ((reduxStore.getState() as any).composerContext?.epoch !== submittedEpoch || selectActiveVaultKey() !== submittedKey)) {
+        if (!updateDraftRef.current) updateDraft(submittedDraft);
+        return;
+      }
       setError(errMsg(err, 'Send failed. Your draft is retained.'));
       if (!updateDraftRef.current) updateDraft(submittedDraft);
       setLocalMessages(current => current.filter(item => msgId(item, 0) !== localId));
