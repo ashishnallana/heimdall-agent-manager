@@ -16,6 +16,7 @@ Groups:
 
 ### Architecture and contributor deep-dives
 
+- [README.md](README.md): this index of everything under `docs/`.
 - [architecture.md](architecture.md): verified architecture walkthrough of the hub, bridge, CLI and UI.
 - [ui-debug-ids.md](ui-debug-ids.md): the UI debug-id conventions, extracted from AGENTS.md.
 - [socket-lifetime.md](socket-lifetime.md): socket lifetime rules, extracted from AGENTS.md.
