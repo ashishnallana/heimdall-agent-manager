@@ -7,12 +7,14 @@ export {
   VAULT_ARMOR_PREFIX,
   MIN_ARMOR_PAYLOAD_BYTES,
   isVaultArmored,
+  isWholeVaultArmored,
   containsVaultArmored,
   isValidBase64,
   bytesToBase64,
   base64ToBytes,
   resolveKeyring,
   encryptVaultText,
+  encryptVaultBytes,
   decryptVaultText,
   decryptVaultBytes,
   type VaultBytesResult,
@@ -24,7 +26,7 @@ export {
   findVaultTokens,
 } from './vaultCrypto.ts';
 
-import { isVaultArmored, containsVaultArmored, resolveKeyring, decryptVaultText, getActiveVaultKey, findVaultTokens, replaceVaultTokens, VAULT_LOCKED_MARKER, type VaultKeyring } from './vaultCrypto.ts';
+import { isVaultArmored, isWholeVaultArmored, containsVaultArmored, resolveKeyring, decryptVaultText, getActiveVaultKey, findVaultTokens, replaceVaultTokens, VAULT_LOCKED_MARKER, type VaultKeyring } from './vaultCrypto.ts';
 
 /** Placeholder substituted for vault-armored text that is not available in plaintext. */
 export const VAULT_MASK_PLACEHOLDER = VAULT_LOCKED_MARKER;
@@ -97,6 +99,17 @@ export async function decryptEmbeddedVaultTokens(
 }
 
 /**
+ * Open a vault-sealed label (title, display name, preview): a whole envelope through
+ * decryptVaultText (throws on a bad token, so callers keep their fallback), text with
+ * embedded tokens such as "<sealed agent name> #3" token-by-token, anything else as is.
+ */
+export async function decryptVaultLabel(text: string, keyring?: VaultKeyring | null): Promise<string> {
+  if (isWholeVaultArmored(text)) return decryptVaultText(text, keyring);
+  if (containsVaultArmored(text)) return decryptEmbeddedVaultTokens(text, keyring);
+  return text;
+}
+
+/**
  * Plaintext for copying a message body to the clipboard: never the raw ciphertext.
  *
  * Armored and embedded vault tokens are decrypted with `key`; any token that cannot be
@@ -111,9 +124,7 @@ export async function resolveCopyableVaultText(
   let result = text;
   if (key) {
     try {
-      result = isVaultArmored(text)
-        ? await decryptVaultText(text, key)
-        : await decryptEmbeddedVaultTokens(text, key);
+      result = await decryptVaultLabel(text, key);
     } catch {
       result = text;
     }

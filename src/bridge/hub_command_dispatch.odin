@@ -7,7 +7,9 @@ import "core:strings"
 import "core:sync"
 import "core:thread"
 import "core:time"
+import contracts "odin_test:contracts"
 import jsonx "odin_test:lib/jsonx"
+import vault "odin_test:lib/vault"
 import ws "odin_test:lib/ws"
 
 // Commands known to perform process, PTY-host, filesystem, or network waits are
@@ -71,12 +73,15 @@ Bridge_Dispatch_Job :: struct {
 	enqueued_ns: i64,
 	owned_bytes: int,
 	cost_units: int,
+	// Charged to the large-MCP lane (bridge_dispatch_mcp_large_bytes), not owned_bytes.
+	mcp_large: bool,
 }
 
 Bridge_Dispatch_Output :: struct {
 	text: string,
 	generation: i64,
 	sensitive: bool,
+	mcp_large: bool,
 }
 
 Bridge_Dispatch_Claim :: struct {
@@ -124,6 +129,29 @@ BRIDGE_DISPATCH_OWNED_BYTES_LIMIT :: 4 * 1024 * 1024
 BRIDGE_DISPATCH_RECOVERY_BYTES_RESERVE :: 256 * 1024
 BRIDGE_DISPATCH_COMMAND_BYTES_LIMIT :: 1024 * 1024
 BRIDGE_DISPATCH_OUTBOX_BYTES_LIMIT :: 8 * 1024 * 1024
+// Large-MCP lane: only an mcp_transform command/result above the 1 MiB command
+// limit (an artifacts.create html-bundle seal or artifacts.get bundle download,
+// base64 of <=15 MiB plus job/reply envelope). Its bytes are charged to a dedicated
+// budget sized for ONE such job in flight (queued, running, or its result in the
+// outbox), so it never consumes the general 4 MiB owned / 8 MiB outbox budgets and
+// a second concurrent large job is refused busy.
+BRIDGE_DISPATCH_MCP_LARGE_BYTES_LIMIT :: vault.CONTROL_JOB_ARTIFACT_PAYLOAD_MAX + 2 * 1024 * 1024
+#assert(BRIDGE_DISPATCH_MCP_LARGE_BYTES_LIMIT < ws.WS_READER_DEFAULT_MAX_BUFFER_BYTES)
+#assert(BRIDGE_DISPATCH_MCP_LARGE_BYTES_LIMIT <= contracts.BRIDGE_WS_MAX_REASSEMBLY_BYTES && BRIDGE_DISPATCH_MCP_LARGE_BYTES_LIMIT <= ws.CHUNK_MAX_MESSAGE_BYTES)
+#assert(BRIDGE_DISPATCH_MCP_LARGE_BYTES_LIMIT / contracts.BRIDGE_WS_HUB_TO_BRIDGE_CHUNK_PAYLOAD_BYTES + 1 <= contracts.BRIDGE_WS_MAX_CHUNK_COUNT)
+bridge_dispatch_mcp_large_bytes: int
+bridge_command_dispatch_is_mcp_large :: proc(command_type: string, n: int) -> bool {
+	return command_type == "mcp_transform" && n > BRIDGE_DISPATCH_COMMAND_BYTES_LIMIT
+}
+bridge_command_dispatch_is_mcp_large_result :: proc(text: string) -> bool {
+	return len(text) > BRIDGE_DISPATCH_COMMAND_BYTES_LIMIT && len(text) <= BRIDGE_DISPATCH_MCP_LARGE_BYTES_LIMIT && strings.has_prefix(text, `{"type":"mcp_transform_result"`)
+}
+// One LIMIT-sized job (or result frame) at a time per lane.
+bridge_command_dispatch_mcp_large_admit :: proc(lane_bytes, incoming: int) -> bool {
+	return incoming > 0 && lane_bytes + incoming <= BRIDGE_DISPATCH_MCP_LARGE_BYTES_LIMIT
+}
+// Large-lane result frames waiting in the outbox (at most one LIMIT-sized frame).
+bridge_dispatch_mcp_large_outbox_bytes: int
 BRIDGE_DISPATCH_DEFAULT_TIMEOUT_MS :: 30_000
 BRIDGE_DISPATCH_CLAIM_LIMIT :: 256
 BRIDGE_DISPATCH_COST_LIMIT :: 256
@@ -200,7 +228,7 @@ bridge_command_dispatch_drop_stale_queue_locked :: proc(queue: ^[dynamic]Bridge_
 			delete(bridge_dispatch_claims[claim_i].result_json, runtime.default_allocator())
 			ordered_remove(&bridge_dispatch_claims, claim_i)
 		}
-		bridge_dispatch_owned_bytes -= job.owned_bytes
+		if job.mcp_large {bridge_dispatch_mcp_large_bytes -= job.owned_bytes} else {bridge_dispatch_owned_bytes -= job.owned_bytes}
 		bridge_dispatch_queued_cost -= job.cost_units
 		if job.command_type=="mcp_transform" && job.text!="" do crypto.zero_explicit(raw_data(job.text),len(job.text))
 		delete(job.text, runtime.default_allocator())
@@ -273,6 +301,8 @@ bridge_command_spec :: proc(command_type: string) -> (Bridge_Command_Spec, bool)
 		return Bridge_Command_Spec{class = .Exclusive, priority = .Interactive, key_kind = .Bridge, queued = true, requires_id = true, timeout_ms = 30_000, cost_units = 64}, true
 	case "bridge_uninstall":
 		return Bridge_Command_Spec{class = .Exclusive, priority = .Interactive, key_kind = .Bridge, queued = true, requires_id = true, timeout_ms = 15_000, cost_units = 64}, true
+	case "session_projects":
+		return Bridge_Command_Spec{class = .General_IO, priority = .Background, key_kind = .None, queued = true, requires_id = true, timeout_ms = 8000, cost_units = 4, retry_safe = true}, true
 	case "validate_project_path", "fs_list_dir", "fs_stat", "fs_read_file", "agent_run_dir_list", "agent_run_dir_read", "fs_find_files", "fs_grep":
 		return Bridge_Command_Spec{class = .General_IO, priority = .Background, key_kind = .None, queued = true, requires_id = true, timeout_ms = 15_000, cost_units = 4, retry_safe = true}, true
 	case "fs_make_dir", "fs_create_file", "fs_write_file", "fs_batch_write", "fs_move", "fs_delete":
@@ -516,7 +546,8 @@ bridge_command_dispatch :: proc(conn: ^ws.Connection, text: string, generation: 
 		_ = bridge_hub_send(conn, protocol_error)
 		return true
 	}
-	if len(text) > BRIDGE_DISPATCH_COMMAND_BYTES_LIMIT {
+	mcp_large := bridge_command_dispatch_is_mcp_large(command_type, len(text))
+	if len(text) > (BRIDGE_DISPATCH_MCP_LARGE_BYTES_LIMIT if mcp_large else BRIDGE_DISPATCH_COMMAND_BYTES_LIMIT) {
 		protocol_error := bridge_command_dispatch_protocol_error_json(command_id, "command_too_large")
 		defer delete(protocol_error)
 		_ = bridge_hub_send(conn, protocol_error)
@@ -547,7 +578,8 @@ bridge_command_dispatch :: proc(conn: ^ws.Connection, text: string, generation: 
 		return true
 	}
 
-	scope := bridge_command_dispatch_admission_scope(class, bridge_command_dispatch_total_locked(), bridge_command_dispatch_queue_len_locked(class), bridge_dispatch_owned_bytes, bridge_dispatch_outbox_bytes, owned_bytes, spec.priority == .Recovery, bridge_dispatch_queued_cost, spec.cost_units)
+	scope := bridge_command_dispatch_admission_scope(class, bridge_command_dispatch_total_locked(), bridge_command_dispatch_queue_len_locked(class), bridge_dispatch_owned_bytes, bridge_dispatch_outbox_bytes, 0 if mcp_large else owned_bytes, spec.priority == .Recovery, bridge_dispatch_queued_cost, spec.cost_units)
+	if scope == "" && mcp_large && !bridge_command_dispatch_mcp_large_admit(bridge_dispatch_mcp_large_bytes, owned_bytes) do scope = "mcp_large"
 	if scope == "" && bridge_command_may_spawn_process(command_type) && bridge_process_slot_count() >= BRIDGE_PROCESS_SLOT_LIMIT do scope = "process"
 	if scope == "" && !bridge_command_dispatch_prune_claim_locked() do scope = "global"
 	if scope != "" {
@@ -570,6 +602,7 @@ bridge_command_dispatch :: proc(conn: ^ws.Connection, text: string, generation: 
 		enqueued_ns = now_ns,
 		owned_bytes = owned_bytes,
 		cost_units = spec.cost_units,
+		mcp_large = mcp_large,
 	}
 	switch class {
 	case .Lifecycle: append(&bridge_dispatch_lifecycle, job)
@@ -581,7 +614,7 @@ bridge_command_dispatch :: proc(conn: ^ws.Connection, text: string, generation: 
 	case .Model_Discovery: append(&bridge_dispatch_model_discovery, job)
 	}
 	append(&bridge_dispatch_claims, Bridge_Dispatch_Claim{command_id = strings.clone(command_id, runtime.default_allocator()), state = .Queued})
-	bridge_dispatch_owned_bytes += owned_bytes
+	if mcp_large {bridge_dispatch_mcp_large_bytes += owned_bytes} else {bridge_dispatch_owned_bytes += owned_bytes}
 	bridge_dispatch_queued_cost += spec.cost_units
 	bridge_dispatch_metrics.accepted += 1
 	bridge_dispatch_metrics.queue_high_water = max(bridge_dispatch_metrics.queue_high_water, bridge_command_dispatch_total_locked())
@@ -640,6 +673,7 @@ bridge_command_dispatch_take_queue_locked :: proc(queue: ^[dynamic]Bridge_Dispat
 			enqueued_ns = queue[i].enqueued_ns,
 			owned_bytes = queue[i].owned_bytes,
 			cost_units = queue[i].cost_units,
+			mcp_large = queue[i].mcp_large,
 		}
 		queue[i] = {}
 		ordered_remove(queue, i)
@@ -665,7 +699,7 @@ bridge_command_dispatch_finish :: proc(worker: ^Bridge_Dispatch_Worker, job: ^Br
 		bridge_dispatch_claims[i].result_json=""
 		if job.command_type!="mcp_transform" do bridge_dispatch_claims[i].result_json = strings.clone(worker.last_result, runtime.default_allocator())
 	}
-	bridge_dispatch_owned_bytes -= job.owned_bytes
+	if job.mcp_large {bridge_dispatch_mcp_large_bytes -= job.owned_bytes} else {bridge_dispatch_owned_bytes -= job.owned_bytes}
 	bridge_dispatch_queued_cost -= job.cost_units
 	bridge_dispatch_metrics.completed += 1
 	if worker.started_ns > 0 {
@@ -715,6 +749,10 @@ bridge_command_dispatch_worker :: proc(data: rawptr) {
 			bridge_hub_handle_command(&worker.sink_conn, job.text)
 		}
 		bridge_command_dispatch_finish(worker, &job)
+		// Handlers allocate freely from the per-thread temp arena. Workers live for
+		// the whole process, so without a per-job reset every command's temp
+		// allocations (and every block grown for a large payload) are retained forever.
+		free_all(context.temp_allocator)
 	}
 }
 
@@ -759,7 +797,10 @@ bridge_command_worker_capture_send :: proc(conn: ^ws.Connection, text: string) -
 		if worker.output_failed do return false
 		captured := text
 		fallback := ""
-		if len(text) > BRIDGE_DISPATCH_COMMAND_BYTES_LIMIT || bridge_dispatch_outbox_bytes + len(text) > BRIDGE_DISPATCH_OUTBOX_BYTES_LIMIT {
+		// A large mcp_transform_result (bundle seal/download) uses its own one-frame
+		// budget; every other frame keeps the 1 MiB / 8 MiB outbox caps.
+		mcp_large := bridge_command_dispatch_is_mcp_large_result(text) && bridge_command_dispatch_mcp_large_admit(bridge_dispatch_mcp_large_outbox_bytes, len(text))
+		if !mcp_large && (len(text) > BRIDGE_DISPATCH_COMMAND_BYTES_LIMIT || bridge_dispatch_outbox_bytes + len(text) > BRIDGE_DISPATCH_OUTBOX_BYTES_LIMIT) {
 			// Reserve a bounded terminal answer even when a normal result cannot fit.
 			// At most one such small over-cap frame exists per worker, so the byte
 			// budget remains bounded and the Hub sees a failure instead of timing out.
@@ -772,8 +813,8 @@ bridge_command_worker_capture_send :: proc(conn: ^ws.Connection, text: string) -
 		frame_type:=extract_json_string(captured,"type","")
 		sensitive:=frame_type=="mcp_transform_result"
 		delete(frame_type)
-		append(&bridge_dispatch_outputs, Bridge_Dispatch_Output{text = strings.clone(captured, runtime.default_allocator()), generation = worker.current_generation,sensitive=sensitive})
-		bridge_dispatch_outbox_bytes += len(captured)
+		append(&bridge_dispatch_outputs, Bridge_Dispatch_Output{text = strings.clone(captured, runtime.default_allocator()), generation = worker.current_generation,sensitive=sensitive,mcp_large=mcp_large})
+		if mcp_large {bridge_dispatch_mcp_large_outbox_bytes += len(captured)} else {bridge_dispatch_outbox_bytes += len(captured)}
 		delete(worker.last_result, runtime.default_allocator())
 		if sensitive {worker.last_result=""} else {worker.last_result = strings.clone(captured, runtime.default_allocator())}
 		return true
@@ -789,7 +830,7 @@ bridge_command_dispatch_drain :: proc(conn: ^ws.Connection, generation: i64) {
 		if len(bridge_dispatch_outputs) > 0 {
 			output = bridge_dispatch_outputs[0]
 			ordered_remove(&bridge_dispatch_outputs, 0)
-			bridge_dispatch_outbox_bytes -= len(output.text)
+			if output.mcp_large {bridge_dispatch_mcp_large_outbox_bytes -= len(output.text)} else {bridge_dispatch_outbox_bytes -= len(output.text)}
 			have = true
 		}
 		sync.mutex_unlock(&bridge_dispatch_mu)

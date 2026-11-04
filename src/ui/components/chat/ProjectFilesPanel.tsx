@@ -29,7 +29,7 @@ import { useTheme } from '../../store/themeSlice';
 import { LspNoticeBanner } from '../../lsp/LspNoticeBanner';
 import { lspServerNoticeKey } from '../../lsp/lspServerNotice';
 import { useMonacoLsp } from '../../lsp/useMonacoLsp';
-import { Icon, IconButton } from '@ui';
+import { Badge, Icon, IconButton } from '@ui';
 import { VaultText } from '../vault/VaultText';
 import { useDialogA11y } from '../ui/composites/useDialogA11y';
 import {
@@ -50,6 +50,7 @@ import {
   type FsSearchScope,
   type ScopedSearchMatch,
 } from '../../api/endpoints/projectFs';
+import { LOSSY_NAME_HINT } from '../../api/endpoints/bridgeFs';
 import { useListBridgesQuery } from '../../api/endpoints/bridgeSupport';
 import { useFetchTaskChainDetailQuery, useAddChainDirectoryMutation, type TaskChainDirectory } from '../../api/endpoints/tasks';
 import BridgeDirectoryPicker from '../BridgeDirectoryPicker';
@@ -512,7 +513,7 @@ export default function ProjectFilesPanel({
     return chainDetailQuery.data?.chain?.directories || [];
   }, [propDirectories, chainDetailQuery.data?.chain?.directories]);
 
-  const bridgesQuery = useListBridgesQuery(undefined, { pollingInterval: 120000 });
+  const bridgesQuery = useListBridgesQuery(undefined);
   const bridges = useMemo(() => bridgesQuery.data?.bridges || [], [bridgesQuery.data?.bridges]);
 
   const [activeDirectoryId, setActiveDirectoryId] = useState<string>('primary');
@@ -2717,12 +2718,12 @@ export default function ProjectFilesPanel({
                       </li>
                     ) : null}
 
-                    {sortedEntries.map((e) => {
+                    {sortedEntries.map((e, i) => {
                       const isOpening = !e.is_dir && openingInEditor === joinPath(cwd, e.name);
                       const isActiveFile = !e.is_dir && activeTabPath === joinPath(cwd, e.name);
                       return (
                         <li
-                          key={`${e.is_dir ? 'd' : 'f'}:${e.name}`}
+                          key={`${e.is_dir ? 'd' : 'f'}:${e.name_lossy ? `lossy-${i}` : e.name}`}
                           ref={isActiveFile ? activeEntryRef : undefined}
                           data-debug-id={isActiveFile ? 'project-files-active-entry' : undefined}
                           data-active-file={isActiveFile ? 'true' : 'false'}
@@ -2733,9 +2734,10 @@ export default function ProjectFilesPanel({
                           <button
                             data-debug-id={`${debugPrefix}-entry-${e.name}`}
                             type="button"
-                            disabled={isOpening}
+                            disabled={isOpening || e.name_lossy}
+                            title={e.name_lossy ? LOSSY_NAME_HINT : undefined}
                             onClick={() => (e.is_dir ? openDir(joinPath(cwd, e.name)) : void openFileInEditor(joinPath(cwd, e.name)))}
-                            className="flex min-w-0 flex-1 items-center gap-2 text-left"
+                            className="flex min-w-0 flex-1 items-center gap-2 text-left disabled:cursor-not-allowed"
                           >
                             {isOpening ? (
                               <Icon name="refresh" size={14} className="shrink-0 animate-spin text-accent" title="Loading file…" />
@@ -2744,11 +2746,13 @@ export default function ProjectFilesPanel({
                             )}
                             <span className={`min-w-0 flex-1 truncate text-[12px] ${isActiveFile ? 'font-medium text-accent' : e.hidden ? 'text-faint' : 'text-primary'}`}>{e.name}</span>
                             {e.has_git ? <span className="shrink-0 rounded bg-success-soft px-1.5 py-0.2 text-[9px] font-bold text-success">git</span> : null}
+                            {e.name_lossy ? <Badge tone="warning" emphasis="soft" className="text-[9px]">Unreadable name</Badge> : null}
                             {!isNarrowExplorer && !e.is_dir ? <span className="shrink-0 text-[10px] tabular-nums text-faint">{formatBytes(e.size)}</span> : null}
                             {!isNarrowExplorer && e.modified_at ? <span className="hidden shrink-0 text-[10px] text-faint sm:inline">{formatModified(e.modified_at)}</span> : null}
                           </button>
-                          {/* Row actions (edit / rename / delete) — visible on hover/focus. */}
-                          <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
+                          {/* Row actions (edit / rename / delete) — visible on hover/focus. A
+                              name_lossy entry has none: its name does not address it on disk. */}
+                          {e.name_lossy ? null : <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
                             {!e.is_dir ? (
                               <button
                                 data-debug-id={`${debugPrefix}-edit-${e.name}`}
@@ -2777,7 +2781,7 @@ export default function ProjectFilesPanel({
                                 </button>
                               </>
                             ) : null}
-                          </div>
+                          </div>}
                         </li>
                       );
                     })}

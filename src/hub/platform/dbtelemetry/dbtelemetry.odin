@@ -1,6 +1,7 @@
 package dbtelemetry
 
 import "core:fmt"
+import "core:strings"
 import "core:sync"
 import metrics "odin_test:lib/metrics"
 
@@ -98,6 +99,25 @@ SCOPE_LABELS := [Scope]string {
 	.Scrape     = "scrape",
 }
 
+// Phase names the in-transaction steps of taskv2 after_chain_change (the one
+// place every chain write funnels through). Closed vocabulary: phase labels
+// never carry a task or chain id.
+Phase :: enum u8 {
+	Requirements,     // requirements reconcile over every task of the chain
+	Refold,           // refold_chain passes (settle loop and the final pass)
+	Release_Workflow, // release_task_blocks, on_output triggers, workflow reconcile
+	Summary,          // rebuild_chain_summary_in_uow
+	Match,            // match_chain_in_uow
+}
+
+PHASE_LABELS := [Phase]string {
+	.Requirements     = "requirements",
+	.Refold           = "refold",
+	.Release_Workflow = "release_workflow",
+	.Summary          = "summary",
+	.Match            = "match",
+}
+
 // lib/metrics caps histograms at 10 buckets (cardinality guard), so these are
 // the plan's §2.2 layouts thinned to 10 bounds, keeping the decision points:
 // 1 us floor, the 1 ms "waited" line, and the 5 s busy_timeout ceiling (wait);
@@ -148,6 +168,8 @@ Telemetry_Metrics :: struct {
 	held:           [Lock]^metrics.Series, // app locks only
 	scope_seconds:  [Scope][Component]^metrics.Series,
 	slow_dropped:   [Slow_Reason]^metrics.Series,
+	phase_seconds:  [Phase]^metrics.Series,
+	phase_stmts:    [Phase]^metrics.Series,
 	// High-water mark of waiters since the previous scrape (collector resets it).
 	waiters_max:    [Lock]i64,
 }
@@ -189,6 +211,14 @@ init :: proc(reg: ^metrics.Registry) {
 	dropped := metrics.new_counter(reg, "heimdall_db_slow_log_dropped_total",
 		"db_slow_request / db_slow_scope records dropped by the rate limiter.", {"reason"})
 	for r in Slow_Reason do tm.slow_dropped[r] = metrics.with(dropped, SLOW_REASON_LABELS[r])
+	phase_seconds := metrics.new_histogram_seconds(reg, "heimdall_db_phase_seconds",
+		"In-transaction time per taskv2 after_chain_change phase, one observation per phase per call (contains the phase's waits and execution).", {"phase"}, HOLD_BUCKETS[:])
+	phase_stmts := metrics.new_counter(reg, "heimdall_db_phase_statements_total",
+		"SQLite statement executions per taskv2 after_chain_change phase.", {"phase"})
+	for p in Phase {
+		tm.phase_seconds[p] = metrics.with(phase_seconds, PHASE_LABELS[p])
+		tm.phase_stmts[p] = metrics.with(phase_stmts, PHASE_LABELS[p])
+	}
 	metrics.registry_add_collector(reg, nil, waiters_max_collect)
 	tm.initialised = true
 }
@@ -229,6 +259,7 @@ Thread_Acc :: struct {
 	tx_hold_ns:  i64,
 	busy_errors: int,
 	top:         [3]Top_Call,
+	phase:       [Phase]Phase_Totals,
 }
 
 Top_Call :: struct {
@@ -285,6 +316,7 @@ Scope_Totals :: struct {
 	tx_hold_ns:  i64,
 	busy_errors: int,
 	top:         [3]Top_Call,
+	phase:       [Phase]Phase_Totals, // zero unless the scope ran after_chain_change
 }
 
 // scope_begin opens a per-thread accounting scope. Re-entrant: only the
@@ -308,13 +340,79 @@ scope_end :: proc "contextless" () -> (totals: Scope_Totals, ok: bool) {
 	if tl.scope_depth > 0 do return
 	totals = Scope_Totals{
 		scope = tl.scope, elapsed_ns = now_ns() - tl.start_ns, component = tl.component, steps = tl.steps, statements = tl.statements,
-		tx_count = tl.tx_count, tx_hold_ns = tl.tx_hold_ns, busy_errors = tl.busy_errors, top = tl.top,
+		tx_count = tl.tx_count, tx_hold_ns = tl.tx_hold_ns, busy_errors = tl.busy_errors, top = tl.top, phase = tl.phase,
 	}
 	for c in Component {
 		if s := tm.scope_seconds[tl.scope][c]; s != nil && totals.component[c] > 0 do sync.atomic_add(&s.value, u64(totals.component[c]))
 	}
 	tl = Thread_Acc{}
 	return totals, true
+}
+
+// ---------------------------------------------------------------------------
+// Phase timing (taskv2 after_chain_change). The caller keeps a Phase_Set on its
+// stack, brackets each phase with phase_mark / phase_record, and calls
+// phase_flush once at the end. Durations come from the same vDSO clock; the
+// statement count is the delta of the thread's statement counter, which the
+// sqlite wrappers already maintain, so no SQL and no allocation is added. A
+// phase that nests another after_chain_change (e.g. a matcher side effect)
+// contains the nested call's time and statements.
+
+Phase_Totals :: struct {
+	ns:         i64,
+	statements: int,
+	calls:      int, // phase_record calls (refold runs once per settle pass)
+}
+
+Phase_Set :: struct {
+	phase: [Phase]Phase_Totals,
+}
+
+Phase_Mark :: struct {
+	ns:         i64,
+	statements: int,
+	timed:      bool,
+}
+
+phase_mark :: #force_inline proc "contextless" () -> Phase_Mark {
+	if !enabled() do return {}
+	return Phase_Mark{ns = now_ns(), statements = tl.statements, timed = true}
+}
+
+// phase_record adds the time and statements since `m` to phase `p` of `set`.
+phase_record :: #force_inline proc "contextless" (set: ^Phase_Set, p: Phase, m: Phase_Mark) {
+	if !m.timed do return
+	set.phase[p].ns += now_ns() - m.ns
+	set.phase[p].statements += tl.statements - m.statements
+	set.phase[p].calls += 1
+}
+
+// phase_flush observes every phase that ran once in heimdall_db_phase_seconds,
+// adds its statements to heimdall_db_phase_statements_total, and keeps the
+// breakdown on the thread's open scope for the slow-request / slow-scope line.
+phase_flush :: proc "contextless" (set: ^Phase_Set) {
+	if !enabled() do return
+	for p in Phase {
+		pt := set.phase[p]
+		if pt.calls == 0 do continue
+		observe_ns(tm.phase_seconds[p], pt.ns)
+		counter_add(tm.phase_stmts[p], u64(max(pt.statements, 0)))
+		if tl.scope_depth > 0 {
+			tl.phase[p].ns += pt.ns
+			tl.phase[p].statements += pt.statements
+			tl.phase[p].calls += pt.calls
+		}
+	}
+}
+
+// format_phases appends " phase_<name>=ns=…/statements=…/calls=…" for every
+// phase the scope ran (nothing when after_chain_change did not run).
+format_phases :: proc(b: ^strings.Builder, phases: [Phase]Phase_Totals) {
+	for p in Phase {
+		pt := phases[p]
+		if pt.calls == 0 do continue
+		fmt.sbprintf(b, " phase_%s=ns=%d/statements=%d/calls=%d", PHASE_LABELS[p], pt.ns, pt.statements, pt.calls)
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -411,10 +509,12 @@ scope_end_background :: proc() {
 	if !ok do return
 	d := slow_decide(totals.elapsed_ns, slow_config.scope_slow_ms)
 	if !d.emit do return
-	b: [512]u8
-	line := fmt.bprintf(b[:], "db_slow_scope reason=%s scope=%s elapsed_ns=%d app_lock_wait_ns=%d conn_wait_ns=%d exec_ns=%d busy_wait_ns=%d steps=%d statements=%d tx_count=%d tx_hold_ns=%d busy_errors=%d dropped_since_last=%d",
+	buf: [1024]u8
+	b := strings.builder_from_bytes(buf[:])
+	fmt.sbprintf(&b, "db_slow_scope reason=%s scope=%s elapsed_ns=%d app_lock_wait_ns=%d conn_wait_ns=%d exec_ns=%d busy_wait_ns=%d steps=%d statements=%d tx_count=%d tx_hold_ns=%d busy_errors=%d dropped_since_last=%d",
 		SLOW_REASON_LABELS[d.reason], SCOPE_LABELS[totals.scope], totals.elapsed_ns,
 		totals.component[.App_Lock_Wait], totals.component[.Conn_Wait], totals.component[.Exec_Excl_Busy], totals.component[.Busy_Wait],
 		totals.steps, totals.statements, totals.tx_count, totals.tx_hold_ns, totals.busy_errors, d.dropped_since_last)
-	fmt.eprintln(line)
+	format_phases(&b, totals.phase)
+	fmt.eprintln(strings.to_string(b))
 }

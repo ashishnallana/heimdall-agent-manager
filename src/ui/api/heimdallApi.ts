@@ -118,6 +118,17 @@ export const heimdallApi = createApi({
   endpoints: () => ({}),
 });
 
+// The app store's dispatch, for modules outside React that read through the RTK
+// cache (e.g. readBridgeRows). Bound here rather than imported from store/store.ts,
+// which imports the endpoint modules and would make the import circular.
+let appDispatch: ((action: any) => any) | null = null;
+
+/** The app store's dispatch, or null before the store exists (tests, demos). */
+export function heimdallApiDispatch(): ((action: any) => any) | null {
+  return appDispatch;
+}
+
 export function setupHeimdallApiListeners(dispatch: Parameters<typeof setupListeners>[0]) {
+  appDispatch = dispatch as (action: any) => any;
   setupListeners(dispatch);
 }

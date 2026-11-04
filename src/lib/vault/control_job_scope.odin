@@ -19,6 +19,7 @@ control_job_scope_ok :: proc(scope,tool,operation:string)->bool {
 	case "chains.list","chains.get","events.wait":return operation=="read"
 	case "chains.create":return operation=="seal"
 	case "tasks.list","tasks.get":return operation=="read" && control_scope_has(scope,"mcp:tasks:read")
+	case "chains.message":return operation=="seal_message" && control_scope_has(scope,"mcp:chains:message")
 	case "tasks.comment":return operation=="seal_comment" && control_scope_has(scope,"mcp:tasks:write")
 	case "tasks.create","tasks.update","tasks.control":return operation=="seal_task" && control_scope_has(scope,"mcp:tasks:write")
 	}

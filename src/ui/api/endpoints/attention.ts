@@ -16,6 +16,7 @@
 // surface: Allow / Deny call POST /agent-instances/{id}/blockers/{id}/resolve.
 import { cookieJsonFetch, customQueryError } from '../cookieFetch';
 import { heimdallApi } from '../heimdallApi';
+import { recoverCardPlacement } from '../../services/attention/attentionActions';
 
 export type AttentionRange = '6h' | '24h' | '7d' | 'all';
 export type AttentionKind = 'message' | 'task' | 'memory' | 'agent_blocker';
@@ -33,7 +34,8 @@ export type AttentionTaskDetails = {
   assignee_name: string;
   excerpt: AttentionExcerpt | null;
   /** Tickets: why the task needs the user. */
-  attention?: 'review' | 'blocked';
+  attention?: 'review' | 'blocked' | 'placement';
+  targets?: PlacementTarget[];
   /** review | gate | question | agent_not_running | merge_conflict | budget_exhausted | oscillation */
   badge?: string;
   state?: string;
@@ -45,6 +47,38 @@ export type AttentionTaskDetails = {
   /** A review card on a held task (task hold): the verdict still counts; the gate resumes on release. */
   held?: boolean;
   hold_reason?: string;
+};
+
+/** Observation supplied by the Hub; zero attempts and empty assignments are valid. */
+export type PlacementGuard = {
+  expected_attempt: number;
+  phase: 'work' | 'review';
+  agent_id: string;
+  role: string;
+  fingerprint: string;
+  configuration: string;
+  expected_assignment: string;
+};
+export type PlacementFailure = {
+  phase: 'work' | 'review'; agent_id: string; role: string; bridge_id: string;
+  directory_id: string; source: string; reason: string; message: string;
+  provider: string; provider_profile: string; model: string;
+  fingerprint: string; configuration: string;
+};
+export type PlacementTarget = {
+  failure: PlacementFailure;
+  guard: PlacementGuard;
+  bridge_action: 'change_bridge' | 'configure_coordinator';
+  bridge_action_label: string; bridge_scope_label: string;
+  identity_action: 'change_assignee' | 'change_reviewer' | 'configure_fleet';
+  identity_action_label: string; identity_scope: 'ticket' | 'chain_fleet';
+  fleet_configuration: boolean; affected_task_ids: string[];
+};
+export type PlacementRecoveryInput = PlacementGuard & {
+  action: 'change_bridge' | 'change_assignee' | 'change_reviewer';
+  scope: 'ticket' | 'chain_fleet';
+  bridge_id?: string;
+  replacement_agent_id?: string;
 };
 
 export type AttentionMessageDetails = {
@@ -138,6 +172,21 @@ function attentionQuery(path: string, range: AttentionRange, kind?: AttentionKin
 
 export const attentionApi = heimdallApi.injectEndpoints({
   endpoints: (build) => ({
+    recoverPlacement: build.mutation<any, { cardId: string; chainId: string; taskId: string; input: PlacementRecoveryInput }>({
+      queryFn: async ({ cardId, input }) => {
+        try { return { data: await recoverCardPlacement(cardId, input) }; }
+        catch (error) { return { error: customQueryError(error) as any }; }
+      },
+      // Conflicts also reconcile the source card. Never optimistically hide a
+      // task: its independent review/question/Start cards must survive.
+      invalidatesTags: (_result, _error, { chainId, taskId }) => [
+        { type: 'Attention' as const, id: 'ALL' },
+        { type: 'Task' as const, id: taskId },
+        { type: 'TaskChainFleets' as const, id: chainId },
+        { type: 'ChainTasks' as const, id: chainId },
+        { type: 'Chain' as const, id: chainId },
+      ],
+    }),
     getAttentionSummary: build.query<AttentionSummary, { since: AttentionRange }>({
       queryFn: async ({ since }) => {
         try {
@@ -172,4 +221,4 @@ export const attentionApi = heimdallApi.injectEndpoints({
   }),
 });
 
-export const { useGetAttentionSummaryQuery, useGetAttentionQuery } = attentionApi;
+export const { useGetAttentionSummaryQuery, useGetAttentionQuery, useRecoverPlacementMutation } = attentionApi;

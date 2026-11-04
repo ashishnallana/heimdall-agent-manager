@@ -3,6 +3,7 @@ package main
 import "core:strings"
 import "core:sync"
 import "core:testing"
+import vault "odin_test:lib/vault"
 import ws "odin_test:lib/ws"
 
 @(test)
@@ -140,7 +141,7 @@ bridge_command_registry_covers_every_reader_command :: proc(t: ^testing.T) {
 		"launch_agent", "launch_provider_test", "stop_agent", "wake_agent", "agent_pty_input", "agent_pty_resize", "bridge_unseal", "set_telemetry", "lsp_start", "lsp_stop",
 		"notify_agent_message", "notify_task_nudge", "notify_shell_run", "notify_title_nudge", "task_status_changed_notify", "capture_agent_pane", "get_agent_pane",
 		"provider_discover", "shell_stream_attach", "bridge_update",
-		"fs_list_dir", "fs_stat", "fs_make_dir", "fs_read_file", "agent_run_dir_list", "agent_run_dir_read", "fs_create_file", "fs_write_file", "fs_batch_write", "fs_move", "fs_delete", "fs_find_files", "fs_grep",
+		"session_projects", "fs_list_dir", "fs_stat", "fs_make_dir", "fs_read_file", "agent_run_dir_list", "agent_run_dir_read", "fs_create_file", "fs_write_file", "fs_batch_write", "fs_move", "fs_delete", "fs_find_files", "fs_grep",
 		"vcs_capabilities", "vcs_status", "vcs_files", "vcs_diff", "vcs_stage", "vcs_unstage", "vcs_revert", "vcs_save_file", "vcs_commit", "vcs_upload", "vcs_push", "vcs_sync", "vcs_pull", "vcs_log", "vcs_commit_diff", "vcs_workspaces",
 		"get_shell_output", "shell_pty_input", "shell_pty_resize", "shell_stream_detach", "shell_start", "shell_background", "shell_kill", "shell_signal", "shell_restart", "shell_set_port", "shell_list", "shell_logs", "shell_capture", "shell_get_pane",
 	}
@@ -323,7 +324,7 @@ HUB_TO_BRIDGE_RUNTIME_FRAME_TYPES := []string{
 	// tunnels / preview proxy
 	"tunnel_open", "tunnel_data", "tunnel_close", "proxy_data", "proxy_close",
 	// filesystem
-	"validate_project_path", "fs_list_dir", "fs_stat", "fs_read_file", "fs_make_dir", "fs_create_file",
+	"session_projects", "validate_project_path", "fs_list_dir", "fs_stat", "fs_read_file", "fs_make_dir", "fs_create_file",
 	"fs_write_file", "fs_batch_write", "fs_move", "fs_delete", "fs_find_files", "fs_grep",
 	"agent_run_dir_list", "agent_run_dir_read",
 	// vcs
@@ -380,4 +381,23 @@ test_bridge_hub_plan_refusal_logs_upgrade_url :: proc(t: ^testing.T) {
 	defer delete(message)
 	testing.expect(t, strings.contains(message, "Bridge disabled by plan limits"))
 	testing.expect(t, strings.contains(message, "https://hub.example.test/#/settings/account"))
+}
+
+@(test)
+test_bridge_dispatch_mcp_large_lane_is_mcp_only_and_one_at_a_time :: proc(t: ^testing.T) {
+	// A 15 MiB html-bundle job: base64 payload + job/command envelope.
+	bundle_job := vault.CONTROL_JOB_ARTIFACT_PAYLOAD_MAX + 1024 * 1024
+	testing.expect(t, bundle_job <= BRIDGE_DISPATCH_MCP_LARGE_BYTES_LIMIT, "lane holds a full 15 MiB bundle job")
+	testing.expect(t, bridge_command_dispatch_is_mcp_large("mcp_transform", 3 * 1024 * 1024))
+	testing.expect(t, !bridge_command_dispatch_is_mcp_large("mcp_transform", BRIDGE_DISPATCH_COMMAND_BYTES_LIMIT), "small MCP jobs stay in the general budget")
+	testing.expect(t, !bridge_command_dispatch_is_mcp_large("provider_profile_op", 3 * 1024 * 1024), "other commands keep the 1 MiB cap")
+	testing.expect(t, bridge_command_dispatch_mcp_large_admit(0, bundle_job))
+	testing.expect(t, !bridge_command_dispatch_mcp_large_admit(bundle_job, bundle_job), "a second large job is refused busy")
+	testing.expect(t, !bridge_command_dispatch_mcp_large_admit(0, BRIDGE_DISPATCH_MCP_LARGE_BYTES_LIMIT + 1))
+	big := strings.concatenate({`{"type":"mcp_transform_result","command_id":"c","reply":{"result":"`, strings.repeat("A", 2 * 1024 * 1024, context.temp_allocator), `"}}`}, context.temp_allocator)
+	testing.expect(t, bridge_command_dispatch_is_mcp_large_result(big))
+	other := strings.concatenate({`{"type":"command_result","command_id":"c","result":"`, strings.repeat("A", 2 * 1024 * 1024, context.temp_allocator), `"}`}, context.temp_allocator)
+	testing.expect(t, !bridge_command_dispatch_is_mcp_large_result(other), "non-MCP results keep the outbox caps")
+	// The general admission budget is unchanged: a large job charged there is refused.
+	testing.expect_value(t, bridge_command_dispatch_admission_scope(.Interactive, 0, 0, 0, 0, bundle_job), "global")
 }

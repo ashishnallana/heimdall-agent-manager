@@ -510,6 +510,9 @@ evaluate_guard :: proc(s: ^Card_Service, owner: domain.User_ID, card: domain.Car
 		if !task_ok || task.owner_user_id != owner {
 			return false, "referenced task does not exist"
 		}
+		if card.provider == CARD_PROVIDER_TASK_PLACEMENT {
+			return placement_card_guard(s, task, card), "placement observation changed"
+		}
 		if expected_status != "" {
 			actual_status := domain.task_state_string(task.state)
 			if actual_status != expected_status {
@@ -613,7 +616,7 @@ get_card :: proc(s: ^Card_Service, auth: contracts.Auth_Context, id: domain.Card
 	c, ok, err := iface.card_get(s.cards, id)
 	if !ok {
 		id_str := string(id)
-		if strings.has_prefix(id_str, "crd_task_") || strings.has_prefix(id_str, "crd_mem_") {
+		if strings.has_prefix(id_str, "crd_task_") || strings.has_prefix(id_str, "crd_mem_") || strings.has_prefix(id_str, ATTENTION_PLACEMENT_CARD_PREFIX) {
 			sync_projected_cards(s, owner)
 			c, ok, err = iface.card_get(s.cards, id)
 			if !ok do return domain.Card{}, false, err
@@ -692,6 +695,9 @@ update_card_status :: proc(s: ^Card_Service, auth: contracts.Auth_Context, id: d
 update_card :: proc(s: ^Card_Service, auth: contracts.Auth_Context, id: domain.Card_ID, input: Card_Update_Input) -> (domain.Card, bool, domain.Domain_Error) {
 	card, ok, err := get_card(s, auth, id)
 	if !ok do return domain.Card{}, false, err
+	if card.provider == CARD_PROVIDER_TASK_PLACEMENT && (input.has_operations || input.has_guard || input.has_provider || input.has_source_refs) {
+		return {}, false, domain.domain_error(.Conflict, "placement cards are source-backed; use placement recovery")
+	}
 
 	if input.has_title {
 		t := strings.trim_space(input.title)

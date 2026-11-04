@@ -6,7 +6,7 @@ import "core:crypto"
 import auth "odin_test:hub/service/auth"
 
 // Append-only: persisted write digests bind these field-presence bit positions.
-RESOURCE_KEYS :: [?]string{"memory_id","project_id","issue_id","request_id","expected_revision","title","description","body","evidence","type","expires_at","agent_ids","project_ids","bridge_ids","template_ids","name","slug","repo_url","vcs_kind","default_path","bridge_paths","status","state","scope_type","target_id","chain_id","agent_id","bridge_id","template_id","cursor","limit","include_comments","comment_limit","comment_cursor","artifact_id","content","content_type","task_id","agent_instance_id","include_content"}
+RESOURCE_KEYS :: [?]string{"memory_id","project_id","issue_id","request_id","expected_revision","title","description","body","evidence","type","expires_at","agent_ids","project_ids","bridge_ids","template_ids","name","slug","repo_url","vcs_kind","default_path","bridge_paths","status","state","scope_type","target_id","chain_id","agent_id","bridge_id","template_id","cursor","limit","include_comments","comment_limit","comment_cursor","artifact_id","content","content_type","task_id","agent_instance_id","include_content","entry","files"}
 Resource_Bridge_Path :: struct {bridge_id,path:string}
 Resource_Arguments :: struct {
 	content_type,task_id,agent_instance_id:string,
@@ -14,6 +14,9 @@ Resource_Arguments :: struct {
 	agent_ids,project_ids,bridge_ids,template_ids:[]string,
 	bridge_paths:[]Resource_Bridge_Path,
 	fields:json.Object,
+	// artifacts.create html-bundle input: entry page + {path:{text|base64,type?}}.
+	entry:string,
+	files:json.Object,
 	present:u64,
 	limit,comment_limit:int,
 	include_comments:bool,
@@ -43,6 +46,14 @@ resource_cursor :: proc(owner,tool:string,a:Resource_Arguments,text,parent:strin
 resource_next :: proc(c:Resource_Cursor,created,id:string)->string {next:=c;next.created_at=created;next.id=id;encoded,_:=json.marshal(next,allocator=context.temp_allocator);return string(encoded)}
 resource_digest :: proc(value:$T)->string {encoded,_:=json.marshal(value,allocator=context.temp_allocator);defer if len(encoded)>0 do crypto.zero_explicit(raw_data(encoded),len(encoded));return auth.sha256_hex(string(encoded))}
 resource_write_digest :: proc(a:Resource_Arguments)->string {
+	// html-bundle creates bind the exact entry/files input; text artifact digests
+	// (below) keep their established v1 encoding so existing replays still match.
+	if resource_present(a,"files") {
+		files,err:=json.marshal(a.files,{sort_maps_by_key=true},allocator=context.temp_allocator)
+		if err!=nil do return ""
+		defer if len(files)>0 do crypto.zero_explicit(raw_data(files),len(files))
+		return resource_digest(struct {v:int,request_id,content_type,task_id,chain_id,project_id,agent_id,agent_instance_id,name,description,entry,files_sha256:string,present:u64}{2,a.request_id,a.content_type,a.task_id,a.chain_id,a.project_id,a.agent_id,a.agent_instance_id,resource_text(a.fields,"name"),resource_text(a.fields,"description"),a.entry,auth.sha256_hex(string(files)),a.present})
+	}
 	// Artifact digests are independent of the established resource v1 encoding.
 	if resource_present(a,"artifact_id") || resource_present(a,"content") || resource_present(a,"content_type") {
 		return resource_digest(struct {v:int,id,request_id,expected_revision,content_type,task_id,chain_id,project_id,agent_id,agent_instance_id,name,description,content:string,present:u64}{1,a.id,a.request_id,a.expected_revision,a.content_type,a.task_id,a.chain_id,a.project_id,a.agent_id,a.agent_instance_id,resource_text(a.fields,"name"),resource_text(a.fields,"description"),resource_text(a.fields,"content"),a.present})

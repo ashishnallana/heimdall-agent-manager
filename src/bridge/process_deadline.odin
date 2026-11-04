@@ -79,7 +79,7 @@ bridge_process_run_capture_status_env :: proc(args: []string, timeout: time.Dura
 	}
 	defer os.close(stderr_r)
 
-	process, start_err := os.process_start(os.Process_Desc{command = args, stdout = stdout_w, stderr = stderr_w, env = env})
+	process, start_err := bridge_os_start_hidden(os.Process_Desc{command = args, stdout = stdout_w, stderr = stderr_w, env = env})
 	_ = os.close(stdout_w)
 	_ = os.close(stderr_w)
 	if start_err != nil do return "", "", exit_code, false, false

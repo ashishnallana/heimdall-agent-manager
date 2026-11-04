@@ -1,5 +1,5 @@
 // Pure view-model helpers for the attention deck (no React; unit-tested).
-import type { AttentionBlockerItem, AttentionCounts, AttentionItem, AttentionKind } from '../../api/endpoints/attention';
+import type { AttentionBlockerItem, AttentionCounts, AttentionItem, AttentionKind, PlacementTarget, PlacementRecoveryInput } from '../../api/endpoints/attention';
 
 /** Messages and Tasks hold live cards; Snoozed holds cards whose snooze is running. */
 export type DeckTab = AttentionKind | 'snoozed';
@@ -106,6 +106,7 @@ export function formatAge(sinceIso: string, now: number): string {
 /** Human reason line, e.g. "Waiting on your review · 2h". Never shows ids. */
 /** Why a task card is in the deck (ticket attention kind + badge). */
 export function taskReason(d: { attention?: string; badge?: string }): string {
+  if (d.attention === 'placement') return 'Worker or reviewer placement needs repair';
   if (d.attention === 'blocked') {
     switch (d.badge) {
       case 'agent_not_running': return 'Start the agent to continue';
@@ -118,8 +119,52 @@ export function taskReason(d: { attention?: string; badge?: string }): string {
   return d.badge === 'gate' ? 'Approve the plan to continue' : 'Waiting on your review';
 }
 
+export function isPlacementItem(item: AttentionItem): boolean {
+  return item.kind === 'task' && item.details.attention === 'placement';
+}
+
+/** Stable across observation refreshes; each review requirement has its own draft. */
+export function placementTargetKey(cardId: string, target: PlacementTarget): string {
+  const f = target.failure;
+  return [cardId, f.phase, f.agent_id, f.role].join(':');
+}
+
+/** No instance/template fallback: native recovery requires an existing fleet role. */
+export function placementIdentityCandidates(target: PlacementTarget, fleets: readonly any[], agents: readonly any[], excluded: readonly string[] = []): ReviewerCandidate[] {
+  const worker = target.failure.phase === 'work';
+  const role = target.failure.role;
+  return agents.filter((a) => {
+    const id = String(a.agent_id || a.id || '');
+    if (!id.startsWith('agt_') || id === target.failure.agent_id || excluded.includes(id) || (a.state || 'active') !== 'active') return false;
+    const row = fleets.find((f) => (f.agent_id || f.agentId) === id);
+    if (!row) return false;
+    const roles: string[] = row.roles || ['worker', 'reviewer'];
+    const paused: string[] = row.paused_roles || [];
+    const required = worker ? ['worker'] : target.identity_action === 'configure_fleet' ? [role] : ['reviewer', 'named-reviewer'];
+    return required.some((r) => roles.includes(r)) && !paused.includes('*') && !required.some((r) => paused.includes(r));
+  }).map((a) => ({ agentId: String(a.agent_id || a.id), name: String(a.name || a.display_name || a.slug || 'Agent'), source: 'fleet' as const }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/** Copy only observation guards, never arbitrary card operations or stale destinations. */
+export function placementRecoveryInput(target: PlacementTarget, action: 'bridge' | 'identity', destination: string): PlacementRecoveryInput {
+  const g = target.guard;
+  const guard = {
+    expected_attempt: g.expected_attempt, phase: g.phase, agent_id: g.agent_id, role: g.role,
+    fingerprint: g.fingerprint, configuration: g.configuration, expected_assignment: g.expected_assignment,
+  };
+  if (action === 'bridge' && target.bridge_action === 'change_bridge') {
+    return { ...guard, action: 'change_bridge', scope: g.phase === 'work' ? 'ticket' : 'chain_fleet', bridge_id: destination };
+  }
+  if (action === 'identity' && target.identity_action !== 'configure_fleet') {
+    return { ...guard, action: target.identity_action, scope: 'ticket', replacement_agent_id: destination };
+  }
+  throw new Error('Use the native fleet or coordinator configuration for this target');
+}
+
 /** The short chip for a task card's attention badge. */
 export const TASK_BADGE_LABELS: Record<string, string> = {
+  placement: 'Placement needs repair',
   review: 'Waiting on review',
   gate: 'Plan gate',
   question: 'Question',

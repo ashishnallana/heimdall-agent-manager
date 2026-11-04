@@ -13,7 +13,7 @@ import metrics "odin_test:lib/metrics"
 
 // DB latency telemetry (plan §4.3). These tests flip the process-global
 // telemetry mode and assert exact counter deltas on shared series, so they
-// only run single-threaded in their own binary: verify-db-telemetry.sh passes
+// only run single-threaded in their own binary: build the package with
 // -define:DBT_TESTS=true -define:ODIN_TEST_THREADS=1. In a plain package run
 // they are skipped (concurrent tests would move the shared counters).
 DBT_TESTS :: #config(DBT_TESTS, false)
@@ -322,6 +322,12 @@ test_labels_bounded :: proc(t: ^testing.T) {
 	for s in sqlite_tm.exec_f.series {
 		testing.expectf(t, conn_ok(s.label_values[0]) && op_ok(s.label_values[1]), "unbounded label %v", s.label_values)
 	}
+	for s in dbt.tm.phase_seconds {
+		if s == nil do continue
+		found := false
+		for l in dbt.PHASE_LABELS do if l == s.label_values[0] { found = true; break }
+		testing.expectf(t, found, "unbounded phase label %v", s.label_values)
+	}
 	for s in sqlite_tm.site_exec.series {
 		v := s.label_values[1]
 		testing.expectf(t, strings.contains(v, ".odin:") && !strings.contains(v, " "), "site label %q is file:procedure", v)
@@ -452,6 +458,74 @@ test_statement_count_reuse :: proc(t: ^testing.T) {
 	testing.expect_value(t, metrics.counter_value(ins), i0 + 2)
 }
 
+// Phase timing (taskv2 after_chain_change): each phase is observed once per
+// flush with the statements executed between its mark and record, the open
+// scope carries the breakdown for the slow line, and off records nothing.
+@(test)
+test_phase_recording :: proc(t: ^testing.T) {
+	if !DBT_TESTS do return
+	dbt_enable()
+	conn, path, ok := dbt_open(t, "dbt_phase", .Main)
+	defer tmpl_remove_db(path)
+	if !ok do return
+	defer close(&conn)
+	refold0 := metrics.histogram_count(dbt.tm.phase_seconds[.Refold])
+	match0 := metrics.histogram_count(dbt.tm.phase_seconds[.Match])
+	summary0 := metrics.histogram_count(dbt.tm.phase_seconds[.Summary])
+	refold_stmts0 := metrics.counter_value(dbt.tm.phase_stmts[.Refold])
+	match_stmts0 := metrics.counter_value(dbt.tm.phase_stmts[.Match])
+
+	dbt.scope_begin(.Http)
+	phases: dbt.Phase_Set
+	for pass in 0..<2 { // two settle passes fold into one observation
+		mark := dbt.phase_mark()
+		testing.expect(t, mark.timed, "basic marks are timed")
+		exec(&conn, fmt.tprintf("INSERT INTO p (k, v) VALUES (%d, 1);", 300 + pass))
+		exec(&conn, fmt.tprintf("UPDATE p SET v = 2 WHERE k = %d;", 300 + pass))
+		dbt.phase_record(&phases, .Refold, mark)
+	}
+	mark := dbt.phase_mark()
+	exec(&conn, "SELECT 1;")
+	dbt.phase_record(&phases, .Match, mark)
+	testing.expect_value(t, phases.phase[.Refold].statements, 4)
+	testing.expect_value(t, phases.phase[.Refold].calls, 2)
+	testing.expect(t, phases.phase[.Refold].ns > 0, "refold timed")
+	dbt.phase_flush(&phases)
+	totals, scope_ok := dbt.scope_end()
+	testing.expect(t, scope_ok, "scope closed")
+
+	testing.expect_value(t, metrics.histogram_count(dbt.tm.phase_seconds[.Refold]), refold0 + 1)
+	testing.expect_value(t, metrics.histogram_count(dbt.tm.phase_seconds[.Match]), match0 + 1)
+	testing.expect_value(t, metrics.histogram_count(dbt.tm.phase_seconds[.Summary]), summary0) // phase not run: no observation
+	testing.expect_value(t, metrics.counter_value(dbt.tm.phase_stmts[.Refold]), refold_stmts0 + 4)
+	testing.expect_value(t, metrics.counter_value(dbt.tm.phase_stmts[.Match]), match_stmts0 + 1)
+	testing.expect_value(t, totals.phase[.Refold].statements, 4)
+	testing.expect_value(t, totals.phase[.Match].calls, 1)
+	testing.expect_value(t, totals.phase[.Summary].calls, 0)
+
+	// Outside a scope the metrics still move but nothing lingers on the thread.
+	outside: dbt.Phase_Set
+	m2 := dbt.phase_mark()
+	exec(&conn, "SELECT 1;")
+	dbt.phase_record(&outside, .Requirements, m2)
+	dbt.phase_flush(&outside)
+	dbt.scope_begin(.Http)
+	fresh, _ := dbt.scope_end()
+	testing.expect_value(t, fresh.phase[.Requirements].calls, 0)
+
+	// Off: marks are untimed, so records and flushes are no-ops.
+	dbt.set_mode(.Off)
+	defer dbt_enable()
+	off: dbt.Phase_Set
+	m3 := dbt.phase_mark()
+	testing.expect(t, !m3.timed, "off marks are untimed")
+	dbt.phase_record(&off, .Match, m3)
+	testing.expect_value(t, off.phase[.Match].calls, 0)
+	match1 := metrics.histogram_count(dbt.tm.phase_seconds[.Match])
+	dbt.phase_flush(&off)
+	testing.expect_value(t, metrics.histogram_count(dbt.tm.phase_seconds[.Match]), match1)
+}
+
 @(private = "file")
 Queue_Worker :: struct {
 	mu: ^sync.Mutex,
@@ -490,7 +564,7 @@ test_waiters_max_scrape_reset :: proc(t: ^testing.T) {
 
 // test_db_telemetry_bench is the §4.1 overhead gate: ns per wrapped call, off
 // vs basic, for step (with site) and prepare+finalize. Prints, never asserts
-// (timing on shared hosts is noisy); verify-db-telemetry.sh reports the lines.
+// (timing on shared hosts is noisy); read the lines from the test output.
 @(test)
 test_db_telemetry_bench :: proc(t: ^testing.T) {
 	if !DBT_TESTS do return

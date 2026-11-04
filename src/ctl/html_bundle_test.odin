@@ -9,6 +9,7 @@ import "core:os"
 import "core:slice"
 import "core:strings"
 import "core:testing"
+import "odin_test:contracts"
 
 // ── REQ-BUNDLE-1/2/5: html-bundle packaging and validation ──────────────────
 
@@ -228,9 +229,9 @@ test_html_bundle_rejects_unsafe_archives :: proc(t: ^testing.T) {
 	check(t, {ok, hb_entry("a\x01.css", "x")}, "control character")
 	check(t, {ok, hb_entry("caf\xc3\xa9.css", "x")}, "not ASCII and not flagged UTF-8")
 	check(t, {ok, hb_entry("index.html", "y")}, "duplicate member path")
-	check(t, {ok, hb_entry("a", "x"), hb_entry("a/b.css", "y")}, "both a file and a directory")
+	check(t, {ok, hb_entry("a.css", "x"), hb_entry("a.css/b.css", "y")}, "both a file and a directory")
 	check(t, {ok, hb_entry("site.zip", "x")}, "nested archive")
-	check(t, {ok, hb_entry("blob.bin", "PK\x03\x04rest")}, "nested archive")
+	check(t, {ok, hb_entry("blob.png", "PK\x03\x04rest")}, "nested archive")
 	check(t, {ok, {name = "s.css", data = transmute([]byte)string("x"), declared_size = -1, flags = ZIP_FLAG_ENCRYPTED}}, "encrypted")
 	check(t, {ok, {name = "s.css", data = transmute([]byte)string("x"), declared_size = -1, method = 12}}, "unsupported compression method 12")
 	check(t, {ok, {name = "link.css", data = transmute([]byte)string("/etc/passwd"), declared_size = -1, made_by = 3 << 8, external = u32(0o120777) << 16}}, "symbolic link")
@@ -247,7 +248,7 @@ test_html_bundle_rejects_unsafe_archives :: proc(t: ^testing.T) {
 	// Declared expansion past 50 MiB fails before any member is read.
 	many := make([dynamic]Hb_Test_Entry, context.temp_allocator)
 	append(&many, ok)
-	for i in 0 ..< 6 do append(&many, Hb_Test_Entry{name = fmt.tprintf("f%d.bin", i), data = transmute([]byte)string("x"), method = 8, declared_size = HTML_BUNDLE_MAX_MEMBER})
+	for i in 0 ..< 6 do append(&many, Hb_Test_Entry{name = fmt.tprintf("f%d.txt", i), data = transmute([]byte)string("x"), method = 8, declared_size = HTML_BUNDLE_MAX_MEMBER})
 	check(t, many[:], "expands past")
 
 	entries := make([dynamic]Hb_Test_Entry, context.temp_allocator)
@@ -302,4 +303,62 @@ test_html_bundle_create_params_seal_the_archive_bytes :: proc(t: ^testing.T) {
 	plain, res := ctl_vault_open(string(armored), tkr(TEST_ARTIFACT_VAULT_KEY), context.temp_allocator)
 	testing.expect(t, res == .Ok, "archive must be sealed")
 	testing.expect(t, plain == string(expected.zip), "sealed payload is exactly the packed archive")
+}
+
+// ── REQ-ART-2: 15 MB archive limit and member type allowlist ────────────────
+
+@(test)
+test_html_bundle_archive_limit_is_the_artifact_limit :: proc(t: ^testing.T) {
+	testing.expect_value(t, HTML_BUNDLE_MAX_ARCHIVE, contracts.ARTIFACT_MAX_CONTENT_BYTES)
+	testing.expect_value(t, HTML_BUNDLE_MAX_ARCHIVE, 15_728_640)
+	testing.expect_value(t, HTML_BUNDLE_MAX_MEMBER, 15_728_640)
+	testing.expect_value(t, HTML_BUNDLE_MAX_EXPANDED, 50 * 1024 * 1024)
+	// Exactly 15 MiB passes the size gate (and then fails as a non-ZIP); one more byte is too large.
+	at_limit := make([]byte, HTML_BUNDLE_MAX_ARCHIVE, context.temp_allocator)
+	_, err := html_bundle_parse_zip(at_limit)
+	hb_expect_error(t, err, "not a ZIP archive")
+	over := make([]byte, HTML_BUNDLE_MAX_ARCHIVE + 1, context.temp_allocator)
+	_, err = html_bundle_parse_zip(over)
+	hb_expect_error(t, err, "the limit is 15728640 (15 MB = 15 MiB)")
+}
+
+@(test)
+test_html_bundle_member_type_allowlist :: proc(t: ^testing.T) {
+	for path in ([]string{"index.html", "a/b.HTM", "s.css", "app.js", "mod.mjs", "data.json", "app.js.map", "notes.txt", "README.md", "feed.xml", "t.csv", "site.webmanifest", "i.png", "i.JPG", "i.jpeg", "i.gif", "i.webp", "i.avif", "i.bmp", "favicon.ico", "logo.svg", "f.woff", "f.woff2", "f.ttf", "f.otf", "f.eot", HTML_BUNDLE_MANIFEST}) {
+		testing.expectf(t, html_bundle_member_type_allowed(path), "%q must be allowed", path)
+	}
+	for path in ([]string{"LICENSE", ".DS_Store", "a/.htaccess", "run.exe", "x.wasm", "index.php", "page.xhtml", "m.mp4", "doc.pdf", "trailing."}) {
+		testing.expectf(t, !html_bundle_member_type_allowed(path), "%q must be rejected", path)
+	}
+
+	// A prepared ZIP with JS and assets is accepted; JS is carried as-is (inert in the viewer).
+	good := hb_test_zip([]Hb_Test_Entry{
+		hb_entry("index.html", `<script src="app.js"></script><link rel="stylesheet" href="s.css"><img src="i.svg">`),
+		hb_entry("app.js", "document.title='x'"),
+		hb_entry("s.css", "body{color:red}"),
+		hb_entry("i.svg", "<svg xmlns='http://www.w3.org/2000/svg'/>"),
+		hb_entry("fonts/f.woff2", "wOF2"),
+	})
+	result, err := html_bundle_from_zip(good, "", context.temp_allocator)
+	testing.expect_value(t, err, "")
+	testing.expect_value(t, result.entry, "index.html")
+
+	bad := hb_test_zip([]Hb_Test_Entry{hb_entry("index.html", "x"), hb_entry("tool.exe", "MZ")})
+	_, err = html_bundle_from_zip(bad, "", context.temp_allocator)
+	hb_expect_error(t, err, "\"tool.exe\" has an unsupported file type")
+	no_ext := hb_test_zip([]Hb_Test_Entry{hb_entry("index.html", "x"), hb_entry("LICENSE", "MIT")})
+	_, err = html_bundle_from_zip(no_ext, "", context.temp_allocator)
+	hb_expect_error(t, err, "unsupported file type")
+
+	// The directory packer applies the same allowlist.
+	root := hb_tmp_root(t, "types")
+	defer os.remove_all(root)
+	hb_write(t, root, "index.html", "<p>x</p>")
+	hb_write(t, root, "js/app.js", "1")
+	packed, pack_err := html_bundle_from_directory(root, "", context.temp_allocator)
+	testing.expect_value(t, pack_err, "")
+	testing.expect(t, len(packed.zip) > 0, "directory with js packs")
+	hb_write(t, root, "server.php", "<?php")
+	_, pack_err = html_bundle_from_directory(root, "", context.temp_allocator)
+	hb_expect_error(t, pack_err, "unsupported file type")
 }

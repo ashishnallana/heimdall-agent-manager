@@ -381,7 +381,7 @@ export function takeRememberedRow(): string {
  * The form
  * ------------------------------------------------------------------ */
 
-export type ProjectFormField = 'name' | 'slug' | 'description' | 'repoUrl' | 'vcsKind' | 'defaultPath' | 'form';
+export type ProjectFormField = 'name' | 'description' | 'repoUrl' | 'vcsKind' | 'defaultPath' | 'form';
 
 /**
  * PATCH merges only NON-EMPTY fields (`project_service.odin:232-239`:

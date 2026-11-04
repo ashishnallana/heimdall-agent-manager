@@ -38,6 +38,36 @@ control_reply_statement :: proc(job:Control_Job,device_id,result:string)->string
 	// All identifiers and hashes are restricted single-line values.
 	return fmt.tprintf("heimdall-mcp-worker-result/v1\n%s\n%s\n%s\n%s\n%s\n%d\n%s\n%s\n%s\n%d\n%s",job.owner,job.resource,job.grant,job.request_id,job.generation,job.revision,job.head,job.digest,device_id,job.deadline_ms,sha256_hex(result))
 }
+// Artifact-specific bound: only an artifacts.create seal job may carry a packed
+// html-bundle (base64 of <=15 MiB + 1 MiB framing); every other job keeps 4 MiB.
+CONTROL_JOB_PAYLOAD_MAX :: 4*1024*1024
+CONTROL_JOB_ARTIFACT_PAYLOAD_MAX :: CONTROL_ARTIFACT_BUNDLE_BASE64_MAX+1024*1024
+control_job_payload_max :: proc(operation,tool:string)->int {
+	if operation=="seal_resource" && tool=="artifacts.create" do return CONTROL_JOB_ARTIFACT_PAYLOAD_MAX
+	if operation=="read" && tool=="artifacts.get" do return CONTROL_JOB_ARTIFACT_PAYLOAD_MAX
+	return CONTROL_JOB_PAYLOAD_MAX
+}
+// Data bound for read jobs/results: only a single artifacts.get record that
+// carries an html-bundle (content_base64) may exceed the 4 MiB default.
+control_data_payload_max :: proc(data:Control_Data)->int {
+	if data.records_kind=="artifact" && len(data.records)==1 && data.chain==nil && len(data.chains)==0 && len(data.tasks)==0 && len(data.comments)==0 {
+		if _,bundle:=data.records[0]["content_base64"];bundle do return CONTROL_JOB_ARTIFACT_PAYLOAD_MAX
+	}
+	return CONTROL_JOB_PAYLOAD_MAX
+}
+// Device job deadlines. Ordinary jobs keep the 5 s window. artifacts.create
+// seal_resource and artifacts.get read jobs can carry an html-bundle (~21 MiB
+// base64 each way), so the Hub may give them up to 20 s, still inside the 30 s
+// MCP request window. Verifiers reject anything further out.
+CONTROL_JOB_DEADLINE_MAX_MS :: 5000
+CONTROL_JOB_ARTIFACT_DEADLINE_MAX_MS :: 20000
+#assert(CONTROL_JOB_ARTIFACT_DEADLINE_MAX_MS<30000)
+control_job_deadline_max_ms :: proc(operation,tool:string)->i64 {
+	if control_job_payload_max(operation,tool)>CONTROL_JOB_PAYLOAD_MAX do return CONTROL_JOB_ARTIFACT_DEADLINE_MAX_MS
+	return CONTROL_JOB_DEADLINE_MAX_MS
+}
+// Reply bound: a bundle seal returns the armored archive token (~base64 size).
+control_reply_max :: proc(operation,tool:string)->int {return control_job_payload_max(operation,tool)}
 control_job_digest :: proc(job:Control_Job)->string {
 	// Include EVERY authority/operation field and public directory snapshot.
 	j:=job;j.digest=""
@@ -47,7 +77,7 @@ control_job_digest :: proc(job:Control_Job)->string {
 	return sha256_hex(string(encoded))
 }
 control_job_verify :: proc(job:Control_Job,owner,resource,device_id:string,kr:^Vault_Keyring,now:i64,root_pin:^Root_Pin=nil)->bool {
-	if job.owner!=owner || job.resource!=resource || job.request_id=="" || !valid_id_value(job.request_id) || job.generation=="" || !valid_id_value(job.generation) || job.deadline_ms<=now || job.deadline_ms>now+5000 || len(job.payload)>4*1024*1024 || job.digest!=control_job_digest(job) || (job.operation!="read" && job.operation!="seal" && job.operation!="seal_comment" && job.operation!="seal_task" && job.operation!="seal_agent" && job.operation!="seal_resource") do return false
+	if job.owner!=owner || job.resource!=resource || job.request_id=="" || !valid_id_value(job.request_id) || job.generation=="" || !valid_id_value(job.generation) || job.deadline_ms<=now || job.deadline_ms>now+control_job_deadline_max_ms(job.operation,job.tool) || len(job.payload)>control_job_payload_max(job.operation,job.tool) || job.digest!=control_job_digest(job) || (job.operation!="read" && job.operation!="seal" && job.operation!="seal_comment" && job.operation!="seal_message" && job.operation!="seal_task" && job.operation!="seal_agent" && job.operation!="seal_resource") do return false
 	c:Control_Consent
 	if json.unmarshal_string(job.consent,&c,.JSON,context.temp_allocator)!=nil do return false
 	if !control_job_scope_ok(c.scope,job.tool,job.operation) do return false
@@ -107,7 +137,7 @@ control_transform_data :: proc(data:Control_Data,kr:^Vault_Keyring,details:=fals
 	out.comments=make([]json.Object,len(data.comments),context.temp_allocator)
 	for c,i in data.comments {out.comments[i],ok=transform(c,.Comment,kr,&opened);if !ok do return "",false}
 	encoded,err:=json.marshal(out,allocator=context.temp_allocator)
-	if err!=nil || len(encoded)>4*1024*1024 {
+	if err!=nil || len(encoded)>control_data_payload_max(data) {
 		if len(encoded)>0 do crypto.zero_explicit(raw_data(encoded),len(encoded))
 		return "",false
 	}
@@ -132,7 +162,15 @@ control_job_transform :: proc(job:Control_Job,kr:^Vault_Keyring)->(string,bool) 
 		if err!=nil || !typed do return "",false
 		return control_seal_task_fields(kr,fields)
 	}
-	if job.operation=="seal_comment" {
+	if job.operation=="seal_comment" || job.operation=="seal_message" {
+		if job.operation=="seal_message" {
+			value,err:=json.parse_string(job.payload,parse_integers=true,allocator=context.temp_allocator)
+			defer control_wipe_value(value)
+			obj,typed:=value.(json.Object)
+			if err!=nil || !typed || len(obj)!=1 do return "",false
+			body,is_text:=obj["body"].(json.String)
+			if !is_text || strings.trim_space(string(body))=="" do return "",false
+		}
 		input:struct {body:string}
 		if json.unmarshal_string(job.payload,&input,.JSON,context.temp_allocator)!=nil do return "",false
 		defer if input.body!="" do crypto.zero_explicit(raw_data(input.body),len(input.body))

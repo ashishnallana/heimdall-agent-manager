@@ -55,43 +55,7 @@ function filterRecentTaskChains(
   });
 }
 
-// 2a. ActionItemsTab card filter logic (src/ui/components/home/ActionItemsTab.tsx:125-152)
-function filterActionItemsTabCards(
-  cards: Array<{ card_id: string; title: string; rationale?: string; project_id?: string; scope?: string; provider?: string; operations?: any[] }>,
-  searchQuery: string,
-  projectMap: Map<string, { name: string }> = new Map(),
-  formatOpLabel: (op: any) => string = (op) => op?.title || op?.label || '',
-) {
-  return cards.filter((card) => {
-    if (searchQuery.trim()) {
-      const q = searchQuery.toLowerCase().trim();
-      const project = card.project_id ? projectMap.get(card.project_id) : null;
-      const opLabels = (card.operations || []).map((op) => formatOpLabel(op).toLowerCase()).join(' ');
-      const safeTitle = !isVaultArmored(card.title) ? card.title : null;
-      const safeRationale = !isVaultArmored(card.rationale) ? card.rationale : null;
-      const safeProjectName = !isVaultArmored(project?.name) ? project?.name : null;
-      const haystack = [
-        safeTitle,
-        safeRationale,
-        card.scope,
-        card.provider,
-        card.card_id,
-        safeProjectName,
-        opLabels,
-      ]
-        .filter(Boolean)
-        .join(' ')
-        .toLowerCase();
-
-      if (!haystack.includes(q)) {
-        return false;
-      }
-    }
-    return true;
-  });
-}
-
-// 2b. CardsPanel filter logic (src/ui/components/cards/CardsPanel.tsx:82-103)
+// 2. CardsPanel filter logic (src/ui/components/cards/CardsPanel.tsx:82-103). The Home ActionItemsTab copy was removed with the tab.
 function filterCardsPanelCards(
   cards: Array<{ card_id: string; title: string; rationale?: string; project_id?: string; scope?: string; provider?: string; operations?: any[] }>,
   searchQuery: string,
@@ -332,10 +296,10 @@ test('Area 1: RecentTaskChainsTab - armored chain titles and project names never
 });
 
 // =============================================================================
-// Area 2: ActionItemsTab & CardsPanel Logic
+// Area 2: CardsPanel Logic
 // =============================================================================
 
-test('Area 2: ActionItemsTab & CardsPanel - armored card titles, rationales, and project names are excluded from search haystack and never match', async () => {
+test('Area 2: CardsPanel - armored card titles, rationales, and project names are excluded from search haystack and never match', async () => {
   const secretTitle = 'Rotate Master Database Encryption Keys';
   const secretRationale = 'Quarterly Zero-Trust Compliance Requirement';
   const secretProject = 'Secure Banking Gateway';
@@ -389,7 +353,6 @@ test('Area 2: ActionItemsTab & CardsPanel - armored card titles, rationales, and
   ];
 
   for (const [panelName, filterFn] of [
-    ['ActionItemsTab', filterActionItemsTabCards],
     ['CardsPanel', filterCardsPanelCards],
   ] as const) {
     // 1. Searching for 'vault' returns 0 matches
@@ -784,10 +747,9 @@ test('Cross-cutting: Encrypted items across all 7 areas are completely immune to
       const chains = [{ chainId: 'c1', title: armored, projectName: armored, status: 'active' }];
       assert.equal(filterRecentTaskChains(chains, q).length, 0, `Chains search must yield 0 for "${q}"`);
 
-      // 2. ActionItemsTab & CardsPanel
+      // 2. CardsPanel
       const cards = [{ card_id: 'card1', title: armored, rationale: armored, project_id: 'p1' }];
       const projectMap = new Map([['p1', { name: armored }]]);
-      assert.equal(filterActionItemsTabCards(cards, q, projectMap).length, 0, `ActionItemsTab must yield 0 for "${q}"`);
       assert.equal(filterCardsPanelCards(cards, q, projectMap).length, 0, `CardsPanel must yield 0 for "${q}"`);
 
       // 3. ActionListPage

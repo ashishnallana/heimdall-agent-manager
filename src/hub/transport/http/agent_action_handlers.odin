@@ -986,6 +986,7 @@ agent_action_artifact_create_handler :: proc(ctx: rawptr, req: Request) -> Respo
 	h := (^Agent_Action_Handlers)(ctx)
 	auth, inst, ok, resp := require_instance_action_auth(h, req)
 	if !ok do return resp
+	if size_err, too_large := artifact_request_too_large(req); too_large do return respond_error(size_err, req.request_id)
 	params := json_object_raw(req.body, "params")
 	content := json_string(params, "content")
 	b64 := json_string(params, "content_base64")

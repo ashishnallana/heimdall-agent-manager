@@ -265,7 +265,7 @@ post_bridge_shell_resize_handler :: bridge_shell_resize_handler
 // Live pass-through to the target bridge (no hub persistence). Same owner + online
 // guards as the provider relay; the bridge sandboxes every path to its fs_root.
 
-bridge_fs_relay :: proc(h: ^Bridge_Handlers, req: Request, bridge_id, command_type, path: string) -> (string, bool, domain.Domain_Error) {
+bridge_fs_relay :: proc(h: ^Bridge_Handlers, req: Request, bridge_id, command_type, path: string, offset := 0, read_limit := 0) -> (string, bool, domain.Domain_Error) {
 	auth_ctx, auth_ok, _ := require_auth(h.auth, req)
 	if !auth_ok do return "", false, domain.domain_error(.Unauthenticated, "authentication required")
 	bridge, bridge_ok, bridge_err := bridge_service.get_bridge(h.bridges, auth_ctx, bridge_id)
@@ -273,7 +273,7 @@ bridge_fs_relay :: proc(h: ^Bridge_Handlers, req: Request, bridge_id, command_ty
 	if bridge.status == .Revoked do return "", false, domain.domain_error(.Bridge_Revoked, "bridge is revoked")
 	if bridge.status != .Online || !project_service.bridge_runtime_registry_has_live(h.bridge_runtime_registry, bridge.bridge_id) do return "", false, domain.domain_error(.Bridge_Offline, fmt.tprintf("Bridge %s is not connected", bridge.bridge_id))
 	command_id := fmt.tprintf("cmd_fs_%d", time.to_unix_nanoseconds(time.now()))
-	cmd_body := bridge_fs_command_json(command_type, command_id, path)
+	cmd_body := bridge_fs_command_json(command_type, command_id, path, offset, read_limit)
 	reply, reply_ok, reply_err := bridge_runtime_service.send_runtime_command_wait(h.bridge_runtime_registry, project_service.Runtime_Command{bridge_id = bridge.bridge_id, command_id = command_id, body_json = cmd_body}, fs_command_timeout_ms(command_type))
 	if !reply_ok do return "", false, reply_err
 	// The bridge fs_* result IS the payload we return verbatim (already a flat JSON
@@ -281,13 +281,29 @@ bridge_fs_relay :: proc(h: ^Bridge_Handlers, req: Request, bridge_id, command_ty
 	return reply, true, domain.Domain_Error{}
 }
 
-bridge_fs_command_json :: proc(command_type, command_id, path: string) -> string {
+// offset/read_limit are the fs_read_file byte-range page (0 = omitted, so the
+// bridge starts at byte 0 and uses its default page size); other commands pass 0.
+bridge_fs_command_json :: proc(command_type, command_id, path: string, offset := 0, read_limit := 0) -> string {
 	b := strings.builder_make()
 	strings.write_string(&b, "{\"type\":\""); write_handler_json_string(&b, command_type)
 	strings.write_string(&b, "\",\"command_id\":\""); write_handler_json_string(&b, command_id)
 	strings.write_string(&b, "\",\"path\":\""); write_handler_json_string(&b, path)
-	strings.write_string(&b, "\"}")
+	strings.write_string(&b, "\"")
+	if offset > 0 {
+		strings.write_string(&b, ",\"offset\":"); strings.write_int(&b, offset)
+	}
+	if read_limit > 0 {
+		strings.write_string(&b, ",\"limit\":"); strings.write_int(&b, read_limit)
+	}
+	strings.write_string(&b, "}")
 	return strings.to_string(b)
+}
+
+list_bridge_session_projects_handler :: proc(ctx: rawptr, req: Request) -> Response {
+	h := (^Bridge_Handlers)(ctx)
+	result, ok, err := bridge_fs_relay(h, req, path_part(req.path, 4), "session_projects", "")
+	if !ok do return respond_error(err, req.request_id)
+	return respond_success(result, req.request_id, auth_ctx_server_time(req))
 }
 
 list_bridge_dir_handler :: proc(ctx: rawptr, req: Request) -> Response {
@@ -300,6 +316,27 @@ list_bridge_dir_handler :: proc(ctx: rawptr, req: Request) -> Response {
 stat_bridge_path_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	h := (^Bridge_Handlers)(ctx)
 	result, ok, err := bridge_fs_relay(h, req, path_part(req.path, 4), "fs_stat", query_value(req.query, "path"))
+	if !ok do return respond_error(err, req.request_id)
+	return respond_success(result, req.request_id, auth_ctx_server_time(req))
+}
+
+// read_bridge_file_handler reads one file anywhere under the bridge's fs_root, for
+// callers that have no project yet (the New project modal reads AGENTS.md/CLAUDE.md
+// from the folder it is about to register). It relays the bridge's existing
+// fs_read_file command without a project root, so the bridge sandboxes the path to
+// fs_root, refuses with vault_locked while its vault is locked, and returns the
+// content vault-encrypted — the same contract as the project-scoped /fs/file route.
+// Byte-range pagination: ?offset= (default 0) & ?limit= (bytes; 0 = bridge default).
+read_bridge_file_handler :: proc(ctx: rawptr, req: Request) -> Response {
+	h := (^Bridge_Handlers)(ctx)
+	path := query_value(req.query, "path")
+	if strings.trim_space(path) == "" {
+		if _, auth_ok, auth_resp := require_auth(h.auth, req); !auth_ok do return auth_resp
+		return respond_error(domain.domain_error(.Validation_Failed, "path is required"), req.request_id)
+	}
+	offset := max(query_int(req.query, "offset", 0), 0)
+	rlimit := max(query_int(req.query, "limit", 0), 0)
+	result, ok, err := bridge_fs_relay(h, req, path_part(req.path, 4), "fs_read_file", path, offset, rlimit)
 	if !ok do return respond_error(err, req.request_id)
 	return respond_success(result, req.request_id, auth_ctx_server_time(req))
 }
@@ -1940,6 +1977,7 @@ bridge_ws_disconnect :: proc(
 	// A replacement already published its newer generation; do not publish old
 	// status summaries after its connection has started.
 	if project_service.bridge_runtime_registry_generation(h.bridge_runtime_registry, bridge_id) != 0 do return
+	taskv2.on_bridge_placement_changed(h.task_engine)
 	if changed {
 		summary := bridge_status_summary_json(domain.bridge_status_string(bridge.status))
 		events.publish_resource_changed(h.event_bus, string(bridge.owner_user_id), "bridge", bridge.bridge_id, "status_changed", summary)
@@ -2473,7 +2511,7 @@ bridge_ws_process_frame :: proc(h: ^Bridge_Handlers, bridge_id: string, connecti
 		mcp_bridge_result(h,bridge_id,text,connection_generation)
 	case "provider_profiles_report":
 		if err:=bridge_provider_profiles_frame(h,bridge_id,text);err.code!=.None do fmt.eprintln("provider profiles report:",err.message)
-	case "auto_update_config_result", "provider_profile_op_result", "command_result", "project_path_validation_result", "provider_discovery_report", "provider_model_discovery_report", "fs_list_dir_result", "fs_stat_result", "fs_make_dir_result", "fs_read_file_result", "fs_create_file_result", "fs_write_file_result", "fs_batch_write_result", "fs_move_result", "fs_delete_result", "vcs_capabilities_result", "vcs_status_result", "vcs_files_result", "vcs_diff_result", "vcs_log_result", "vcs_commit_diff_result", "vcs_show_file_result", "vcs_workspaces_result", "vcs_stage_result", "vcs_unstage_result", "vcs_revert_result", "vcs_save_file_result", "vcs_commit_result", "vcs_upload_result", "vcs_sync_result", "fs_find_files_result", "fs_grep_result", "shell_start_result", "shell_restart_result", "shell_list_result", "shell_logs_result", "shell_capture_result", "shell_set_port_result", "bridge_unseal_result", "task_chain_search_result", "taskv2_merge_worktree_result", "context_window_op_result":
+	case "session_projects_result", "auto_update_config_result", "provider_profile_op_result", "command_result", "project_path_validation_result", "provider_discovery_report", "provider_model_discovery_report", "fs_list_dir_result", "fs_stat_result", "fs_make_dir_result", "fs_read_file_result", "fs_create_file_result", "fs_write_file_result", "fs_batch_write_result", "fs_move_result", "fs_delete_result", "vcs_capabilities_result", "vcs_status_result", "vcs_files_result", "vcs_diff_result", "vcs_log_result", "vcs_commit_diff_result", "vcs_show_file_result", "vcs_workspaces_result", "vcs_stage_result", "vcs_unstage_result", "vcs_revert_result", "vcs_save_file_result", "vcs_commit_result", "vcs_upload_result", "vcs_sync_result", "fs_find_files_result", "fs_grep_result", "shell_start_result", "shell_restart_result", "shell_list_result", "shell_logs_result", "shell_capture_result", "shell_set_port_result", "bridge_unseal_result", "task_chain_search_result", "taskv2_merge_worktree_result", "context_window_op_result":
 		if ext_err := bridge_extension_frame(h, bridge_id, type, text); ext_err.code != .None do fmt.eprintln("extension command result:", ext_err.message)
 		command_id := json_string(text, "command_id")
 		_ = bridge_runtime_service.runtime_command_result_for_connection(h.bridge_runtime_registry, bridge_id, connection_generation, command_id, text)

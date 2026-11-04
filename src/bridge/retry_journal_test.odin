@@ -8,6 +8,35 @@ import "core:time"
 import contracts "odin_test:contracts"
 
 @(test)
+retry_journal_windows_native_path_reload_and_validation :: proc(t: ^testing.T) {
+    when ODIN_OS == .Windows {
+        temp := os.temp_dir(context.temp_allocator) or_else ""
+        dir := fmt.tprintf("%s/retry-native-%d", temp, time.to_unix_nanoseconds(time.now()))
+        path := strings.replace_all(fmt.tprintf("%s/receipts.json", dir), "/", "\\", context.temp_allocator) or_else ""
+        defer { _ = os.remove(path); _ = os.remove(strings.concatenate({path, ".initialized"}, context.temp_allocator)); _ = os.remove(dir) }
+        journal := Bridge_Retry_Journal{version = 1, loaded = true, receipts = make([dynamic]Bridge_Retry_Receipt, context.temp_allocator)}
+        append(&journal.receipts, Bridge_Retry_Receipt{key = "refresh:test", budget = {state = .Succeeded, attempts = 1, first_ms = 1000, deadline_ms = 2000, last_wall_ms = 1001}})
+        testing.expect(t, bridge_retry_journal_save(&journal, path))
+        // Exercise replacement as well as a first write using native separators.
+        testing.expect(t, bridge_retry_journal_save(&journal, path))
+        restored: Bridge_Retry_Journal
+        testing.expect(t, bridge_retry_journal_load(&restored, path), "a Windows journal written by this bridge must survive restart")
+        testing.expect_value(t, len(restored.receipts), 1)
+        if len(restored.receipts) == 1 do testing.expect_value(t, restored.receipts[0].budget.state, Bridge_Operation_State.Succeeded)
+
+        testing.expect(t, os.write_entire_file_from_string(path, "{broken") == nil)
+        corrupt: Bridge_Retry_Journal
+        testing.expect(t, !bridge_retry_journal_load(&corrupt, path) && corrupt.failed, "corruption remains fenced")
+        oversized := make([]byte, BRIDGE_RETRY_JOURNAL_MAX_BYTES+1, context.temp_allocator)
+        testing.expect(t, os.write_entire_file(path, oversized) == nil)
+        too_large: Bridge_Retry_Journal
+        testing.expect(t, !bridge_retry_journal_load(&too_large, path) && too_large.failed, "size limit remains enforced")
+        not_regular: Bridge_Retry_Journal
+        testing.expect(t, !bridge_retry_journal_load(&not_regular, dir) && not_regular.failed, "directories cannot be journals")
+    }
+}
+
+@(test)
 retry_atomic_write_windows_native_credential_path :: proc(t: ^testing.T) {
     sync.mutex_lock(&bridge_test_config_mutex); defer sync.mutex_unlock(&bridge_test_config_mutex)
     when ODIN_OS == .Windows {
@@ -28,6 +57,7 @@ retry_journal_disk_reservations_and_unsafe_crash_fence :: proc(t: ^testing.T) {
     sync.mutex_lock(&bridge_test_config_mutex); defer sync.mutex_unlock(&bridge_test_config_mutex)
     path := fmt.tprintf("%s/retry-journal-%d/receipts.json", os.temp_dir(context.temp_allocator), time.to_unix_nanoseconds(time.now()))
     j := Bridge_Retry_Journal{version = 1, loaded = true}
+    defer delete(j.receipts)
     append(&j.receipts, Bridge_Retry_Receipt{key = "ready:launch", budget = {}})
     append(&j.receipts, Bridge_Retry_Receipt{key = "slot:action:time", budget = {}})
     append(&j.receipts, Bridge_Retry_Receipt{key = "refresh:family", budget = {}})
@@ -54,11 +84,16 @@ retry_journal_invalid_schema_and_write_failure_park :: proc(t: ^testing.T) {
     sync.mutex_lock(&bridge_test_config_mutex); defer sync.mutex_unlock(&bridge_test_config_mutex)
     path := fmt.tprintf("%s/retry-journal-bad-%d/receipts.json", os.temp_dir(context.temp_allocator), time.to_unix_nanoseconds(time.now()))
     j := Bridge_Retry_Journal{version = 1, loaded = true}
+    defer delete(j.receipts)
     append(&j.receipts, Bridge_Retry_Receipt{key = "ready:bad", budget = {attempts = 2}})
     testing.expect(t, bridge_retry_journal_save(&j, path))
     restored: Bridge_Retry_Journal
     testing.expect(t, !bridge_retry_journal_load(&restored, path))
-    testing.expect(t, !bridge_retry_journal_save(&j, "/dev/null/receipts"))
+    temp := os.temp_dir(context.temp_allocator) or_else ""
+    blocked := fmt.tprintf("%s/retry-blocked-%d", temp, time.to_unix_nanoseconds(time.now()))
+    testing.expect(t, os.write_entire_file_from_string(blocked, "regular file") == nil)
+    defer os.remove(blocked)
+    testing.expect(t, !bridge_retry_journal_save(&j, fmt.tprintf("%s/receipts", blocked)))
     _ = os.remove(path)
     _ = os.remove(strings.concatenate({path, ".initialized"}, context.temp_allocator))
 }

@@ -601,9 +601,6 @@ export function ProjectDetailBody({
           <DetailRow label="Version control">
             <Text as="div" role="body-sm">{vcsLabel(record.vcsKind)}</Text>
           </DetailRow>
-          <DetailRow label="Slug">
-            <Text as="div" role="body-sm" className="font-mono">{record.slug || '—'}</Text>
-          </DetailRow>
           {/* No Created row and no Owner row: neither field is on the wire. */}
           <DetailRow label="Updated">
             <Text as="div" role="body-sm">{`${absoluteTime(record.updatedAt)} (${relativeTime(record.updatedAt)})`}</Text>

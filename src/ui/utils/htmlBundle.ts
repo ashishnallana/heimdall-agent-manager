@@ -20,15 +20,20 @@
 //     htmlBundleNavHash). The frame follows them natively and the host polls the frame's
 //     location.hash: WebKit never runs host-registered listeners in a script-disabled
 //     frame, so a click handler cannot follow them there.
-// The iframe is sandboxed without allow-scripts (see HtmlBundlePreview.tsx).
+// Bundled JavaScript (.js/.mjs) is accepted but inert: <script> elements are removed, the
+// CSP forbids scripts and the iframe is sandboxed without allow-scripts (see
+// HtmlBundlePreview.tsx). Members outside HTML_BUNDLE_ALLOWED_EXTENSIONS are rejected.
 
 export const HTML_BUNDLE_KIND = 'html-bundle';
 export const HTML_BUNDLE_MANIFEST = 'heimdall-artifact.json';
+// The archive is the artifact content, so its limit is the artifact content limit:
+// 15 MB = 15 MiB = 15,728,640 bytes (contracts.ARTIFACT_MAX_CONTENT_BYTES; MAX_UPLOAD_BYTES in
+// ArtifactUpload.tsx). Expanded size, entry count and member size bound decompression work.
 export const HTML_BUNDLE_LIMITS = Object.freeze({
-  archiveBytes: 10 * 1024 * 1024,
+  archiveBytes: 15 * 1024 * 1024,
   expandedBytes: 50 * 1024 * 1024,
   entries: 1000,
-  memberBytes: 10 * 1024 * 1024,
+  memberBytes: 15 * 1024 * 1024,
   manifestBytes: 64 * 1024,
   pathBytes: 1024,
 });
@@ -51,6 +56,24 @@ export type HtmlBundle = {
   pages: string[];
   files: Map<string, Uint8Array>;
 };
+
+// Member type allowlist (lowercase, no dot), shared with ham-ctl's
+// HTML_BUNDLE_ALLOWED_EXTENSIONS. Pages, stylesheets, images and fonts render; scripts and
+// data files are accepted but inert (never executed or loaded). Anything else is rejected.
+export const HTML_BUNDLE_ALLOWED_EXTENSIONS: ReadonlySet<string> = new Set([
+  'html', 'htm', 'css',
+  'js', 'mjs', 'json', 'map', 'txt', 'md', 'xml', 'csv', 'webmanifest',
+  'png', 'jpg', 'jpeg', 'gif', 'webp', 'avif', 'bmp', 'ico', 'svg',
+  'woff', 'woff2', 'ttf', 'otf', 'eot',
+]);
+
+/** Whether a file member's extension is on the allowlist; files without one are rejected. */
+export function isAllowedMemberType(path: string): boolean {
+  const base = path.slice(path.lastIndexOf('/') + 1);
+  const dot = base.lastIndexOf('.');
+  if (dot <= 0 || dot === base.length - 1) return false;
+  return HTML_BUNDLE_ALLOWED_EXTENSIONS.has(base.slice(dot + 1).toLowerCase());
+}
 
 const NESTED_ARCHIVE_EXT = ['.zip', '.jar', '.war', '.apk', '.gz', '.tgz', '.tar', '.bz2', '.xz', '.7z', '.rar', '.zst'];
 
@@ -115,7 +138,7 @@ const utf8Strict = new TextDecoder('utf-8', { fatal: true });
 
 /** Parse the central directory and enforce every rule that does not need member bytes. */
 export function parseZipDirectory(data: Uint8Array): ZipMember[] {
-  if (data.length > HTML_BUNDLE_LIMITS.archiveBytes) fail('too_large', `Archive is ${data.length} bytes; the limit is 10 MiB.`);
+  if (data.length > HTML_BUNDLE_LIMITS.archiveBytes) fail('too_large', `Archive is ${data.length} bytes; the limit is 15 MB (15 MiB, ${HTML_BUNDLE_LIMITS.archiveBytes} bytes).`);
   if (data.length < 22) fail('malformed', 'Not a ZIP archive.');
   const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
   const u16 = (o: number) => view.getUint16(o, true);
@@ -162,7 +185,8 @@ export function parseZipDirectory(data: Uint8Array): ZipMember[] {
     const isDir = path.endsWith('/');
     if (isDir && size !== 0) fail('malformed', `Directory member "${path}" has content.`);
     if (!isDir && NESTED_ARCHIVE_EXT.some((ext) => path.toLowerCase().endsWith(ext))) fail('unsafe', `Member "${path}" is a nested archive.`);
-    if (size > HTML_BUNDLE_LIMITS.memberBytes) fail('too_large', `Member "${path}" declares ${size} bytes; the per-member limit is 10 MiB.`);
+    if (!isDir && !isAllowedMemberType(path)) fail('unsafe', `Member "${path}" has an unsupported file type.`);
+    if (size > HTML_BUNDLE_LIMITS.memberBytes) fail('too_large', `Member "${path}" declares ${size} bytes; the per-member limit is 15 MiB.`);
     if (method === 0 && compressed !== size) fail('malformed', `Stored member "${path}" has mismatched sizes.`);
     declaredTotal += size;
     if (declaredTotal > HTML_BUNDLE_LIMITS.expandedBytes) fail('too_large', 'Archive expands past 50 MiB.');
@@ -375,7 +399,11 @@ export function parseHtmlBundleNavHash(hash: string): HtmlBundleNavTarget | null
 
 // ── Page compilation ─────────────────────────────────────────────────────────
 
-export type CompiledPage = { html: string; missing: string[] };
+/**
+ * `inertScripts` counts the <script> elements removed from the page: bundled JavaScript is
+ * accepted and kept in the archive (Download returns it), but never runs in the preview.
+ */
+export type CompiledPage = { html: string; missing: string[]; inertScripts: number };
 
 export type BundleRendererDeps = {
   createObjectURL?: (blob: Blob) => string;
@@ -518,6 +546,7 @@ export class HtmlBundleRenderer {
     const missing = new Set<string>();
     const doc = this.parseHtml(new TextDecoder().decode(bytes));
 
+    const inertScripts = doc.querySelectorAll('script').length;
     doc.querySelectorAll(REMOVED_ELEMENTS).forEach((el) => el.remove());
     for (const el of Array.from(doc.getElementsByTagName('*'))) {
       if (REMOVED_SVG_ANIMATION.has(el.localName.toLowerCase())) el.remove();
@@ -527,6 +556,15 @@ export class HtmlBundleRenderer {
       while (form.firstChild) div.appendChild(form.firstChild);
       for (const attr of Array.from(form.attributes)) if (attr.name === 'class' || attr.name === 'id' || attr.name === 'style') div.setAttribute(attr.name, attr.value);
       form.replaceWith(div);
+    });
+    // An element parsed with is="…" keeps that "is value" even after the attribute is
+    // removed, and the HTML serializer writes it back, so the reparse check would reject
+    // the page. Rebuild such elements without it (customized built-ins never run here).
+    doc.querySelectorAll('[is]').forEach((el) => {
+      const plain = doc.createElementNS(el.namespaceURI, el.tagName.toLowerCase());
+      for (const attr of Array.from(el.attributes)) if (attr.name.toLowerCase() !== 'is') plain.setAttributeNS(attr.namespaceURI, attr.name, attr.value);
+      while (el.firstChild) plain.appendChild(el.firstChild);
+      el.replaceWith(plain);
     });
     // Authored <style> first: stylesheets inlined from <link> below are already compiled.
     doc.querySelectorAll('style').forEach((style) => {
@@ -606,7 +644,7 @@ export class HtmlBundleRenderer {
     // the page closed instead of rendering it.
     const violation = this.findUnsafe(this.parseHtml(html));
     if (violation) throw new HtmlBundleError('unsafe', `Page "${page}" cannot be previewed safely (${violation}).`);
-    const compiled = { html, missing: [...missing].sort() };
+    const compiled = { html, missing: [...missing].sort(), inertScripts };
     this.pages.set(page, compiled);
     return compiled;
   }

@@ -41,9 +41,15 @@ bridge_retry_journal_load :: proc(j: ^Bridge_Retry_Journal, path: string) -> boo
         return true
     }
     info, stat_err := os.stat(path, context.temp_allocator)
-    forbidden := os.Permissions{.Read_Group, .Write_Group, .Execute_Group, .Read_Other, .Write_Other, .Execute_Other}
-    if stat_err != nil || info.type != .Regular || info.size > BRIDGE_RETRY_JOURNAL_MAX_BYTES || info.mode & forbidden != {} {
+    if stat_err != nil || info.type != .Regular || info.size > BRIDGE_RETRY_JOURNAL_MAX_BYTES {
         j.failed = true; return false
+    }
+    // Windows stat synthesizes group/other mode bits from file attributes;
+    // they do not describe its ACL. As with atomic writes, Windows relies on
+    // the ACL inherited from the user's profile; POSIX requires owner-only mode.
+    when ODIN_OS != .Windows {
+        forbidden := os.Permissions{.Read_Group, .Write_Group, .Execute_Group, .Read_Other, .Write_Other, .Execute_Other}
+        if info.mode & forbidden != {} { j.failed = true; return false }
     }
     raw, read_err := os.read_entire_file(path, context.allocator)
     if read_err != nil { j.failed = true; return false }

@@ -81,7 +81,7 @@ mcp_control_fixture :: proc(t:^testing.T,use_device:=false)->^MCP_Control_Fixtur
 	f.trepo=sqlite.new_taskchain_repository(&f.timpl,&f.impl.conn)
 	f.ids=platform.real_id_generator()
 	f.chains=tc.new_taskchain_service(&f.trepo,nil,&f.base.clock,&f.ids)
-	f.h={delegation=&f.delegation,control={chains=&f.chains},bus=&f.bus,create_ctx=f,create=mcp_control_test_create}
+	f.h={delegation=&f.delegation,control={chains=&f.chains},bus=&f.bus}
 	title,_:=vectors.alice.content["title"].(json.String);description,_:=vectors.alice.content["description"].(json.String)
 	_,chain_ok,chain_err:=iface.taskchain_save_chain(&f.trepo,{chain_id="chain_fixture",owner_user_id=domain.User_ID(v.request.owner),title=string(title),description=string(description),status=.Active,kind="mixed_work",defaults_json="{}",created_at=mcp_test_now(nil),updated_at=mcp_test_now(nil)})
 	testing.expectf(t,chain_ok && chain_err.code==.None,"seed chain: %s",chain_err.message)
@@ -90,15 +90,6 @@ mcp_control_fixture :: proc(t:^testing.T,use_device:=false)->^MCP_Control_Fixtur
 	_,comment_ok,comment_err:=iface.taskchain_save_comment(&f.trepo,{comment_id="cmt_fixture",task_id="task_fixture",chain_id="chain_fixture",owner_user_id=domain.User_ID(v.request.owner),body=string(title),created_at=mcp_test_now(nil),updated_at=mcp_test_now(nil)})
 	testing.expectf(t,comment_ok && comment_err.code==.None,"seed comment: %s",comment_err.message)
 	return f
-}
-mcp_control_test_create :: proc(ctx:rawptr,owner,title,description:string)->(string,bool) {
-	f:=(^MCP_Control_Fixture)(ctx)
-	c,ok,err:=tc.create_chain(&f.chains,mcp.control_auth(owner),{title=title,description=description})
-	return string(c.chain_id),ok && err.code==.None
-}
-mcp_control_test_fail_create :: proc(ctx:rawptr,owner,title,description:string)->(string,bool) {
-	id,_:=mcp_control_test_create(ctx,owner,title,description)
-	return id,false
 }
 mcp_control_close :: proc(f:^MCP_Control_Fixture) {mcp.worker_registrations_free(&f.h.registrations);vd.service_free(&f.directory);sqlite.close(&f.impl.conn);sqlite.close(&f.base.conn)}
 mcp_control_request :: proc(h:^MCP_Control_Handlers,token,body:string)->Response {
@@ -113,7 +104,7 @@ test_mcp_control_hosted_four_tools_ownership_creation_and_stateless_restart :: p
 	init:=mcp_control_request(&f.h,f.token,`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}`)
 	testing.expect(t,init.status==200 && strings.contains(init.body,"2025-06-18"))
 	list:=mcp_control_request(&f.h,f.token,`{"jsonrpc":"2.0","id":2,"method":"tools/list"}`)
-	testing.expect(t,strings.contains(list.body,"chains.list") && strings.contains(list.body,"chains.get") && strings.contains(list.body,"chains.create") && strings.contains(list.body,"events.wait") && !strings.contains(list.body,"lease.next"))
+	testing.expect(t,strings.contains(list.body,"chains.list") && strings.contains(list.body,"chains.get") && !strings.contains(list.body,"chains.create") && strings.contains(list.body,"events.wait") && !strings.contains(list.body,"lease.next"))
 	testing.expect(t,!strings.contains(list.body,"tasks.get") && !strings.contains(list.body,"tasks.create") && !strings.contains(list.body,"chains.configure"))
 	for name in ([]string{"agents.list","instances.list","bridges.list","providers.list","instances.create","instances.start","instances.stop","instances.reconfigure","instances.operations"}) do testing.expect(t,!strings.contains(list.body,name))
 	for call in ([]string{
@@ -145,23 +136,20 @@ test_mcp_control_hosted_four_tools_ownership_creation_and_stateless_restart :: p
 	testing.expect(t,strings.contains(other_owner.body,"not_found") && !strings.contains(other_owner.body,"other owner secret"))
 	listing:=mcp_control_request(&f.h,f.token,`{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"chains.list","arguments":{"limit":1}}}`)
 	testing.expect(t,strings.contains(listing.body,"chain_fixture") && !strings.contains(listing.body,"other owner secret"))
-	created:=mcp_control_request(&f.h,f.token,`{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"chains.create","arguments":{"title":"new private chain","description":"private description"}}}`)
-	testing.expectf(t,created.status==200 && strings.contains(created.body,"new private chain"),"create response: %s",created.body)
+	created:=mcp_control_request(&f.h,f.token,`{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"chains.create","arguments":{"title":"new private chain","coordinator_agent_id":"agt_fixture","bridge_id":"brg_fixture"}}}`)
+	testing.expect(t,strings.contains(created.body,"scope_missing"))
 	rows,rerr:=iface.taskchain_list_chains_by_owner(&f.trepo,domain.User_ID(f.state.vector.request.owner))
-	testing.expect(t,rerr.code==.None && len(rows)==2)
-	for c in rows do if c.chain_id!="chain_fixture" {testing.expect(t,vault.is_armored(c.title) && vault.is_armored(c.description));testing.expect(t,c.coordinator_agent_instance_id=="" && c.publish_state==.Draft)}
-	f.h.create=mcp_control_test_fail_create
-	failed:=mcp_control_request(&f.h,f.token,`{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"chains.create","arguments":{"title":"rolled back private chain"}}}`)
-	testing.expect(t,strings.contains(failed.body,"request_failed"))
-	rolled_back,_:=iface.taskchain_list_chains_by_owner(&f.trepo,domain.User_ID(f.state.vector.request.owner))
-	testing.expect(t,len(rolled_back)==2,"creation and grant check share one rollback boundary")
-	f.h.create=mcp_control_test_create
+	testing.expect(t,rerr.code==.None && len(rows)==1,"legacy delegation cannot launch coordinators")
 	// Fresh handler process state requires neither pairing nor an initialize/session cache.
 	restarted:=MCP_Control_Handlers{delegation=&f.delegation,control={chains=&f.chains},bus=&f.bus}
 	again:=mcp_control_request(&restarted,f.token,`{"jsonrpc":"2.0","id":"new-conversation","method":"tools/call","params":{"name":"chains.get","arguments":{"chain_id":"chain_fixture"}}}`)
 	testing.expect(t,strings.contains(again.body,"usr_alice_fixture secret"))
 	unauthorized:=mcp_control_request(&f.h,"hut_wrong",`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`)
-	testing.expect(t,unauthorized.status==401 && strings.contains(header_value(unauthorized.headers,"WWW-Authenticate"),"resource_metadata"))
+	testing.expect(t,unauthorized.status==401)
+	// The challenge advertises every supported scope so spec-following clients
+	// request (and the consent page offers) all capabilities.
+	testing.expect_value(t,header_value(unauthorized.headers,"WWW-Authenticate"),mcp_join("Bearer resource_metadata=\"",f.delegation.origin,"/.well-known/oauth-protected-resource/api/v1/mcp\", scope=\"",strings.join(mcp.supported_scopes()," ",context.temp_allocator),"\""))
+	testing.expect(t,strings.contains(header_value(unauthorized.headers,"WWW-Authenticate"),"scope=\"mcp:chains mcp:tasks:read "))
 }
 MCP_Wait_Run :: struct {h:^MCP_Control_Handlers,token,body,result:string,status:int}
 mcp_wait_run :: proc(ctx:rawptr) {
@@ -334,4 +322,60 @@ test_mcp_control_url_only_http_forwarding_and_sensitive_response :: proc(t:^test
 	thread.join(worker);thread.destroy(worker)
 	wire:=strings.to_string(response)
 	testing.expect(t,strings.has_prefix(wire,"HTTP/1.1 200") && strings.contains(wire,"Cache-Control: no-store") && strings.contains(wire,"usr_alice_fixture secret") && !strings.contains(wire,"vault:v2:"))
+}
+
+mcp_large_body :: proc(prefix,suffix:string)->string {
+	pad:=strings.repeat("x",MCP_CONTROL_MAX_BODY_BYTES+1024,context.temp_allocator)
+	return strings.concatenate({prefix,pad,suffix},context.temp_allocator)
+}
+// Bodies over 512 KiB that are not an artifacts.create bundle are refused with
+// -32602 and never reach a single-value type assertion (which would panic the Hub).
+@(test)
+test_mcp_control_large_body_non_bundle_shapes_are_refused_without_panic :: proc(t:^testing.T) {
+	context.allocator=context.temp_allocator
+	f:=mcp_control_fixture(t);defer mcp_control_close(f)
+	bodies:=[]string{
+		// (a) no arguments at all (passes the substring pre-gate via params.files)
+		mcp_large_body(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"artifacts.create","files":{},"pad":"`,`"}}`),
+		// (b) arguments is a string
+		mcp_large_body(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"artifacts.create","arguments":"x","files":{},"pad":"`,`"}}`),
+		// (c) another tool carrying a files object
+		mcp_large_body(`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"tasks.get","arguments":{"files":{}},"tag":"artifacts.create","pad":"`,`"}}`),
+		// (d) artifacts.create without files in arguments
+		mcp_large_body(`{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"artifacts.create","arguments":{"request_id":"r","name":"n"},"files":0,"pad":"`,`"}}`),
+		// (e) arguments.files is not an object
+		mcp_large_body(`{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"artifacts.create","arguments":{"files":"x"},"pad":"`,`"}}`),
+		// (f) name is a huge string: refused by the pre-parse gate
+		mcp_large_body(`{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"`,`"}}`),
+		// (g) non-call method over 512 KiB: refused by the pre-parse gate
+		mcp_large_body(`{"jsonrpc":"2.0","id":7,"method":"tools/list","params":{"pad":"`,`"}}`),
+	}
+	for body,i in bodies {
+		resp:=mcp_control_request(&f.h,f.token,body)
+		testing.expectf(t,resp.status==200 && strings.contains(resp.body,"-32602") && strings.contains(resp.body,"request_too_large"),"case %d: %d %s",i,resp.status,resp.body)
+	}
+	// A small call with non-object arguments is still the ordinary invalid-arguments error.
+	small:=mcp_control_request(&f.h,f.token,`{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"artifacts.create","arguments":"x"}}`)
+	testing.expectf(t,strings.contains(small.body,"-32602"),"small: %s",small.body)
+}
+// The Anthropic Messages API rejects input_schema with oneOf/allOf/anyOf (and not)
+// at the top level; claude.ai passes MCP tool schemas through to it.
+@(test)
+test_mcp_tools_catalog_has_no_top_level_schema_combinators :: proc(t:^testing.T) {
+	tools,err:=json.parse_string(#load("mcp_tools.json",string),parse_integers=true,allocator=context.temp_allocator)
+	testing.expect(t,err==nil)
+	catalog,_:=tools.(json.Array)
+	testing.expect(t,len(catalog)>0)
+	for value in catalog {
+		tool,_:=value.(json.Object)
+		name,_:=tool["name"].(json.String)
+		schema,typed:=tool["inputSchema"].(json.Object)
+		testing.expectf(t,typed,"%s: inputSchema missing",name)
+		for key in ([]string{"oneOf","anyOf","allOf","not","if","then","else"}) {
+			_,present:=schema[key]
+			testing.expectf(t,!present,"%s: top-level %s in inputSchema",name,key)
+		}
+		kind,_:=schema["type"].(json.String)
+		testing.expectf(t,string(kind)=="object","%s: inputSchema type %s",name,kind)
+	}
 }

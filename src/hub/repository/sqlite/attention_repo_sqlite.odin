@@ -115,6 +115,7 @@ attention_list_validation_task_ids_sqlite :: proc(ctx: rawptr, owner_user_id: do
 	// an operator's own hold (REQ-TV2-5) — minus the v2 backfill of legacy
 	// paused tasks.
 	query := "SELECT task_id FROM tasks WHERE owner_user_id = ? AND state NOT IN ('done','cancelled') AND (" +
+		"EXISTS (SELECT 1 FROM task_attempt_facets pf WHERE pf.task_id = tasks.task_id AND pf.attempt_no = tasks.attempt_no AND pf.kind = 'placement' AND json_array_length(pf.body_json, '$.failures') > 0) OR " +
 		"(state = 'in_review' AND (requires_user_approval = 1 OR kind = 'gate')) OR " +
 		"(blocked_on_json <> '' AND COALESCE(json_extract(blocked_on_json, '$.kind'), '') NOT IN ('task', 'hold') " +
 		"AND COALESCE(json_extract(blocked_on_json, '$.reason'), '') <> 'paused_before_v2')" +

@@ -207,6 +207,7 @@ attention_item_for :: proc(c: domain.Card, now: time.Time) -> Attention_Item {
 	switch c.kind {
 	case domain.CARD_KIND_TASK:
 		item.reason = ATTENTION_REASON_AWAITING_REVIEW
+		if c.provider == CARD_PROVIDER_TASK_PLACEMENT do item.reason = "placement"
 		item.urgency = ATTENTION_URGENCY_ERROR if age > ATTENTION_TASK_ERROR_AFTER else ATTENTION_URGENCY_WARN
 		item.primary_op = attention_first_op(c.operations_json)
 	case domain.CARD_KIND_MESSAGE:

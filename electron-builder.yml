@@ -41,7 +41,8 @@ win:
   # additionally provide an explicit publisher and forceCodeSigning.
   verifyUpdateCodeSignature: true
 nsis:
-  # build/installer.nsh adds the App / Bridge / both page (REQ-ENR-4).
+  # App only: Bridge installation/enrollment lives in the in-app setup wizard.
+  # Reject obsolete Bridge-component flags instead of silently ignoring them.
   include: build/installer.nsh
   oneClick: false
   perMachine: false

@@ -211,7 +211,7 @@ class BootstrapTests(unittest.TestCase):
         for word in ('Register-ScheduledTask', 'schtasks', 'enroll.ps1', 'apply-bridge-update', 'Set-Acl'):
             self.assertNotIn(word, ps1)
         self.assertIn("'setup', '--headless'", ps1)
-        # The Windows installer's Bridge component: setup without --headless.
+        # Standalone interactive CLI installation still supports browser approval.
         self.assertIn("elseif ($Interactive) { $argv += 'setup' }", ps1)
         # The same promoted-release rule on both sides.
         self.assertIn('-not $r.draft -and -not $r.prerelease', ps1)

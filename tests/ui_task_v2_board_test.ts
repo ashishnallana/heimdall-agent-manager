@@ -465,6 +465,99 @@ test('getTaskPeople resolves the assignee pin, fleet workers, role reviewers and
   assert.deepEqual(getTaskPeople(makeTask(), []).workers, []);
 });
 
+test('getTaskPeople lists review-lease holders with their role, including non-member instances', async () => {
+  const { getTaskPeople } = await import('../src/ui/components/tasks/taskV2Types.ts');
+  const fleets = [
+    { agent_id: 'agt_rev', roles: ['reviewer'] },
+    { agent_id: 'agt_sec', roles: ['security'] },
+  ];
+  const task = makeTask({
+    state: 'in_review',
+    brief: { goal: 'g', acceptance: ['a'], review_roles: ['reviewer', 'security'] },
+    leases: [
+      { kind: 'work', holder_instance_id: 'inst_worker' },
+      { kind: 'review', review_role: 'reviewer', holder_instance_id: 'inst_rev1', expires_at: '2026-10-17T05:07:00Z' },
+      // A JIT instance that is not a chain member still surfaces by instance id.
+      { kind: 'review', review_role: 'security', holder_instance_id: 'inst_jit77', expires_at: '2026-10-17T05:09:00Z' },
+      { kind: 'review', review_role: 'reviewer', holder_instance_id: '' },
+    ] as any,
+  });
+  const people = getTaskPeople(task, fleets);
+  assert.equal(people.holder, 'inst_worker');
+  assert.deepEqual(people.reviewHolders, [
+    { instanceId: 'inst_rev1', role: 'reviewer', expiresAt: '2026-10-17T05:07:00Z' },
+    { instanceId: 'inst_jit77', role: 'security', expiresAt: '2026-10-17T05:09:00Z' },
+  ]);
+  // Reviewer candidates stay the fleet's role holders.
+  assert.deepEqual(people.reviewers, ['agt_rev', 'agt_sec']);
+  assert.deepEqual(getTaskPeople(makeTask(), fleets).reviewHolders, []);
+});
+
+test('task details: the Reviewers row names each agent reviewing now, with its role', async () => {
+  const React = (await import('react')).default;
+  const { Provider } = await import('react-redux');
+  const { renderToStaticMarkup } = await import('react-dom/server');
+  const { makeVaultStore } = await import('./helpers/vaultEndpointHarness.ts');
+  const { tasksApi } = await import('../src/ui/api/endpoints/tasks.ts');
+  const { agentsApi } = await import('../src/ui/api/endpoints/agents.ts');
+  const { TaskDetails } = await import('../src/ui/components/tasks/TaskDetails.tsx');
+
+  const store = await makeVaultStore();
+  await store.dispatch(tasksApi.util.upsertQueryData('fetchTaskEvents', { chainId: 'chain-test-1', taskId: 'task-test-1' }, { events: [] }));
+  // Neither instance is a chain member: <HolderName> names them from the instance.
+  await store.dispatch(agentsApi.util.upsertQueryData('fetchAgentInstance', { instanceId: 'inst_rev1' }, { instance: { display_name: 'Reviewer #3' } } as any));
+  await store.dispatch(agentsApi.util.upsertQueryData('fetchAgentInstance', { instanceId: 'inst_jit77' }, { instance: { display_name: 'Ad-hoc #9' } } as any));
+  const task = makeTask({
+    state: 'in_review',
+    brief: { goal: 'g', acceptance: ['a'], review_roles: ['reviewer'] },
+    leases: [
+      { kind: 'review', review_role: 'reviewer', holder_instance_id: 'inst_rev1', expires_at: new Date(Date.now() + 5 * 60000).toISOString() },
+      { kind: 'review', review_role: 'coordinator', holder_instance_id: 'inst_jit77', expires_at: new Date(Date.now() + 5 * 60000).toISOString() },
+    ] as any,
+  });
+  const actions: any = { busy: false, approve: async () => true, requestChanges: async () => true, comment: async () => true };
+  const html = renderToStaticMarkup(
+    React.createElement(Provider, { store, children: React.createElement(TaskDetails, { chainId: 'chain-test-1', task, actions, chainFleets: [{ agent_id: 'agt_rev', roles: ['reviewer'] }] }) }),
+  );
+  store.dispatch(tasksApi.util.resetApiState());
+  store.dispatch(agentsApi.util.resetApiState());
+
+  const row = html.slice(html.indexOf('data-debug-id="task-detail-reviewers"'), html.indexOf('>Bridge<'));
+  const text = row.replace(/<[^>]+>/g, '');
+  assert.match(text, /reviewer role:.*now Reviewer #3 \(reviewer\)/);
+  assert.match(text, /now Ad-hoc #9 \(coordinator\)/);
+  assert.match(row, /task-holder-link-inst_rev1/);
+  assert.doesNotMatch(text, /inst_/);
+});
+
+test('task card: the in-review sentence names the reviewing agent, role-only text without a review lease', async () => {
+  const React = (await import('react')).default;
+  const { Provider } = await import('react-redux');
+  const { renderToStaticMarkup } = await import('react-dom/server');
+  const { makeVaultStore } = await import('./helpers/vaultEndpointHarness.ts');
+  const { agentsApi } = await import('../src/ui/api/endpoints/agents.ts');
+  const { TaskCard } = await import('../src/ui/components/tasks/TaskCard.tsx');
+
+  const store = await makeVaultStore();
+  // A JIT reviewer that is not a chain member: named from its instance.
+  await store.dispatch(agentsApi.util.upsertQueryData('fetchAgentInstance', { instanceId: 'inst_jit77' }, { instance: { display_name: 'Reviewer #3' } } as any));
+  const brief = { goal: 'g', acceptance: ['a'], review_roles: ['security'] };
+  const status = (task: TaskWire) => {
+    const html = renderToStaticMarkup(React.createElement(Provider, { store, children: React.createElement(TaskCard, { chainId: 'chain-test-1', task }) }));
+    const at = html.indexOf(`data-debug-id="task-card-status-${task.task_id}"`);
+    return html.slice(at, html.indexOf('</p>', at)).replace(/<[^>]+>/g, '');
+  };
+  const reviewing = status(makeTask({
+    state: 'in_review',
+    brief,
+    leases: [{ kind: 'review', review_role: 'security', holder_instance_id: 'inst_jit77', expires_at: new Date(Date.now() + 6 * 60000 + 1000).toISOString() }] as any,
+  }));
+  assert.match(reviewing, /Reviewer #3 is reviewing \(security\), 6m left · Attempt 1 submitted · review in progress/);
+  assert.doesNotMatch(reviewing, /inst_|Waiting on reviewer roles/);
+  assert.match(status(makeTask({ state: 'in_review', brief })), /Waiting on reviewer roles: security/);
+  store.dispatch(agentsApi.util.resetApiState());
+});
+
 test('getTaskPeople names the Soloist from its implicit fleet row', async () => {
   const { getTaskPeople } = await import('../src/ui/components/tasks/taskV2Types.ts');
   // GET /fleets lists the Soloist coordinator's implicit worker row (no stored row).

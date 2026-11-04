@@ -10,7 +10,9 @@ import "core:unicode/utf8"
 // forward a ciphertext placeholder as though it were a successfully read result.
 control_text :: proc(kr:^Vault_Keyring,text:string)->(string,bool) {
 	if kr==nil do return "",false
-	if is_armored(text) {
+	// Whole-token fast path only for exactly one token; "<token> #3" (a sealed
+	// agent name plus the native run counter) takes the embedded path below.
+	if is_armored(text) && token_end(text,0)==len(text) {
 		plain,result:=open(text,kr,context.temp_allocator)
 		if result!=.Ok || !utf8.valid_string(plain) {if plain!="" do crypto.zero_explicit(raw_data(plain),len(plain));return "",false}
 		return plain,true
@@ -73,6 +75,12 @@ control_record_json :: proc(kr:^Vault_Keyring,kind:Control_Record_Kind,record:js
 		append(&opened,plain);out[key]=json.String(plain)
 	}
 	if kind==.Artifact {
+		if value,present:=out["content_base64"];present {
+			token,typed:=value.(json.String)
+			if _,text:=out["content"];text || !typed do return "",false
+			encoded,ok:=control_artifact_bundle_open(kr,record,string(token));if !ok do return "",false
+			append(&opened,encoded);out["content_base64"]=json.String(encoded)
+		}
 		if value,present:=out["content"];present {
 			text,typed:=value.(json.String)
 			if !typed || !control_artifact_type_ok(out) || !utf8.valid_string(string(text)) || len(text)>65536 || strings.contains(string(text),"\x00") do return "",false

@@ -1,6 +1,7 @@
 import { useCallback, useRef, useState } from 'react';
 import { useSelector } from 'react-redux';
 import { useCreateArtifactMutation } from '../api/endpoints/artifacts';
+import { HTML_BUNDLE_KIND, HtmlBundleError, readHtmlBundle } from '../utils/htmlBundle';
 
 // Keep this helper aligned with the daemon artifact allowlist. Rich preview is
 // narrower than upload support; unsupported preview kinds still fall back to the
@@ -11,10 +12,18 @@ const ARTIFACT_UPLOAD_SPECS = [
   { kind: 'jpeg', mime: 'image/jpeg', exts: ['.jpg', '.jpeg'] },
   { kind: 'csv', mime: 'text/csv', exts: ['.csv'] },
   { kind: 'html', mime: 'text/html', exts: ['.html', '.htm'] },
+  // A static site: a ZIP with heimdall-artifact.json (docs/html-bundle-artifacts.md).
+  // Validated in the browser before upload; a ZIP that is not a valid bundle is refused.
+  { kind: HTML_BUNDLE_KIND, mime: 'application/zip', exts: ['.zip'] },
 ] as const;
 export const ARTIFACT_UPLOAD_ACCEPT = ARTIFACT_UPLOAD_SPECS.flatMap((spec) => [...spec.exts, spec.mime]).join(',');
-const SUPPORTED_FILE_ERROR = 'Unsupported file. Upload a supported artifact (.md, .png, .jpg, .jpeg, .csv, .html, or .htm).';
-export const MAX_UPLOAD_BYTES = 50 * 1024 * 1024; // Mirror Hub artifact payload guardrail for friendlier client-side errors.
+const SUPPORTED_FILE_ERROR = 'Unsupported file. Upload a supported artifact (.md, .png, .jpg, .jpeg, .csv, .html, .htm, or an HTML bundle .zip).';
+// Mirrors the Hub's artifact content limit (contracts.ARTIFACT_MAX_CONTENT_BYTES): 15 MB means
+// exactly 15 MiB = 15,728,640 bytes of the file as selected (before vault encryption, which the
+// Hub budgets separately). Checked client-side for a friendlier error before upload.
+export const MAX_UPLOAD_BYTES = 15 * 1024 * 1024;
+export const MAX_UPLOAD_LABEL = '15 MB';
+export const UPLOAD_TOO_LARGE_ERROR = `File is too large. Maximum upload size is ${MAX_UPLOAD_LABEL}.`;
 
 type ArtifactKindMime = { kind: string; mime: string };
 export type ClipboardUploadResult = { handled: boolean; link: string | null };
@@ -47,6 +56,22 @@ function classifyFile(file: File): ArtifactKindMime | null {
   const byMime = ARTIFACT_UPLOAD_SPECS.find((spec) => spec.mime === type);
   if (byMime) return { kind: byMime.kind, mime: byMime.mime };
   return null;
+}
+
+/**
+ * Validate a ZIP as an html-bundle with the viewer's own reader (same limits, path rules,
+ * type allowlist and manifest checks), so an archive the viewer would reject is never
+ * uploaded. Returns '' when valid, else a message for the user.
+ */
+export async function htmlBundleUploadError(file: Blob): Promise<string> {
+  if (file.size > MAX_UPLOAD_BYTES) return UPLOAD_TOO_LARGE_ERROR;
+  try {
+    await readHtmlBundle(new Uint8Array(await file.arrayBuffer()));
+    return '';
+  } catch (err) {
+    const message = err instanceof HtmlBundleError ? err.message : String((err as Error)?.message || err);
+    return `Not a valid HTML bundle: ${message} Package a site with \`ham-ctl artifact create --kind html-bundle --directory <dir>\`.`;
+  }
 }
 
 function buildClipboardImageName() {
@@ -115,7 +140,7 @@ export function useArtifactUpload(context: ArtifactUploadContext = {}): UseArtif
   const uploadArtifact = useCallback(async ({ file, name, kind, mime, projectId, originKind, originRef }: UploadArtifactParams): Promise<string | null> => {
     if (!file) return null;
     if (file.size > MAX_UPLOAD_BYTES) {
-      setError(`File is too large. Maximum upload size is ${Math.round(MAX_UPLOAD_BYTES / (1024 * 1024))} MB.`);
+      setError(UPLOAD_TOO_LARGE_ERROR);
       return null;
     }
     if (!hasArtifactUploadAuth(session)) {
@@ -154,6 +179,13 @@ export function useArtifactUpload(context: ArtifactUploadContext = {}): UseArtif
     if (!classified) {
       setError(SUPPORTED_FILE_ERROR);
       return null;
+    }
+    if (classified.kind === HTML_BUNDLE_KIND) {
+      const reason = await htmlBundleUploadError(file);
+      if (reason) {
+        setError(reason);
+        return null;
+      }
     }
     const fallbackExt = ARTIFACT_UPLOAD_SPECS.find((spec) => spec.kind === classified.kind)?.exts[0] || '';
     return uploadArtifact({

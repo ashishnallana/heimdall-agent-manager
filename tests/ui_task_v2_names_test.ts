@@ -393,3 +393,31 @@ test('holder and time left come from the work lease even when a review lease is 
   assert.equal(getTaskStatusLines(t, [], now, names)[0], 'Backend Dev is working, 20m left');
   assert.ok(getTaskBadges(t, [], now, names).some((b) => b.kind === 'lease' && b.label === 'Backend Dev · 20m left'));
 });
+
+test('the in-review sentence names each review-lease holder; role-only text without a review lease', () => {
+  const now = Date.parse('2026-10-17T05:00:00Z');
+  const inReview = (leases: any[], extra: any = {}) =>
+    ({
+      task_id: 'task_rev',
+      chain_id: 'chain_x',
+      title: 'Reviewing',
+      state: 'in_review',
+      attempt_no: 2,
+      brief: { goal: 'g', acceptance: ['a'], review_roles: ['reviewer', 'security'] },
+      leases,
+      ...extra,
+    }) as unknown as TaskWire;
+  const two = inReview([
+    { kind: 'review', review_role: 'reviewer', holder_instance_id: 'inst_member02', expires_at: '2026-10-17T05:07:00Z' },
+    { kind: 'review', review_role: 'security', holder_instance_id: 'inst_fleet99', expires_at: '2026-10-17T05:03:00Z' },
+  ]);
+  const [line, detail] = getTaskStatusLines(two, [], now, names);
+  assert.equal(line, 'Backend Dev is reviewing (reviewer), 7m left; An agent is reviewing (security), 3m left');
+  assert.equal(detail, 'Attempt 2 submitted · review in progress');
+  assert.ok(!RAW_ID.test(line), line);
+  const withYou = getTaskStatusLines(inReview([{ kind: 'review', review_role: '', holder_instance_id: 'inst_coord01', expires_at: '2026-10-17T05:10:00Z' }], { requires_user_approval: true }), [], now, names);
+  assert.equal(withYou[0], 'soloist #20 is reviewing, 10m left; then you');
+  // No review lease (or only a work lease left over): role-only text.
+  assert.equal(getTaskStatusLines(inReview([]), [], now, names)[0], 'Waiting on reviewer roles: reviewer, security');
+  assert.equal(getTaskStatusLines(inReview([{ kind: 'work', holder_instance_id: 'inst_member02' }]), [], now, names)[0], 'Waiting on reviewer roles: reviewer, security');
+});

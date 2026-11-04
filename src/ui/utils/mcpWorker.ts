@@ -1,4 +1,4 @@
-import { resourceSpecs, resourceToolKinds, sealResourceFields } from './mcpResourceFields.ts';
+import { mcpJobPayloadMax, openArtifactBundle, resourceSpecs, resourceToolKinds, sealResourceFields } from './mcpResourceFields.ts';
 import { mcpConsentVersion, mcpConsentDomain, validMcpScopes } from './mcpCapabilities.ts';
 import type { DeviceIdentity } from './deviceIdentity.ts';
 import type { VerifiedChain } from './vaultDirectoryVerify.ts';
@@ -7,9 +7,16 @@ import { kindPolicy, signP256, verifySignature } from './vaultStatements.ts';
 import { sha256HexOfText } from './vaultRequestSigner.ts';
 import { decryptVaultBytes, encryptVaultText, findVaultTokens, replaceVaultTokens, VAULT_TOKEN_RE } from './vaultContent.ts';
 
+// Mirrors vault.control_job_deadline_max_ms: html-bundle capable artifact jobs
+// (artifacts.create seal_resource, artifacts.get read) may run up to 20 s.
+export const MCP_JOB_DEADLINE_MAX_MS = 5000;
+export const MCP_JOB_ARTIFACT_DEADLINE_MAX_MS = 20000;
+export function mcpJobDeadlineMaxMs(operation: string, tool?: string): number {
+  return mcpJobPayloadMax(operation, tool) > mcpJobPayloadMax('read') ? MCP_JOB_ARTIFACT_DEADLINE_MAX_MS : MCP_JOB_DEADLINE_MAX_MS;
+}
 export interface McpWorkerJob {
   request_id: string; generation: string; owner: string; resource: string; grant: string; head: string;
-  operation: 'read' | 'seal' | 'seal_comment' | 'seal_task' | 'seal_agent' | 'seal_resource'; payload: string; digest: string; revision: number; deadline_ms: number;
+  operation: 'read' | 'seal' | 'seal_comment' | 'seal_message' | 'seal_task' | 'seal_agent' | 'seal_resource'; payload: string; digest: string; revision: number; deadline_ms: number;
   tool?: string;
   epoch: number; consent: string; signature: string; directory: Record<string, unknown>;
 }
@@ -33,13 +40,14 @@ export function mcpJobScopeAllowed(scope: string, tool: string | undefined, oper
   if (tool === 'chains.create') return operation === 'seal';
   if (['tasks.list', 'tasks.get'].includes(tool)) return operation === 'read' && scope.split(' ').includes('mcp:tasks:read');
   if (['tasks.create', 'tasks.update', 'tasks.control'].includes(tool)) return operation === 'seal_task' && scope.split(' ').includes('mcp:tasks:write');
+  if (tool === 'chains.message') return operation === 'seal_message' && scope.split(' ').includes('mcp:chains:message');
   return tool === 'tasks.comment' && operation === 'seal_comment' && scope.split(' ').includes('mcp:tasks:write');
 }
 /** No worker gets an OAuth token. Verify the original approver's signed grant
  * against this device's independently pinned, freshly verified directory. */
 export async function verifyMcpWorkerJob(j: McpWorkerJob, identity: DeviceIdentity, chain: VerifiedChain, resource: string, now = Date.now()): Promise<void> {
   const id = (s: unknown) => typeof s === 'string' && /^[A-Za-z0-9_.:-]{1,256}$/.test(s);
-  if (!id(j.request_id) || !id(j.generation) || j.owner !== identity.userId || j.owner !== chain.userId || j.resource !== resource || j.head !== chain.headHash || j.epoch !== chain.currentEpoch || !Number.isSafeInteger(j.deadline_ms) || j.deadline_ms <= now || j.deadline_ms > now + 5000 || typeof j.payload !== 'string' || j.payload.length > 4 * 1024 * 1024 || !['read', 'seal', 'seal_comment', 'seal_task', 'seal_agent', 'seal_resource'].includes(j.operation) || j.digest !== await mcpJobDigest(j)) throw new Error('Stale or mismatched MCP request');
+  if (!id(j.request_id) || !id(j.generation) || j.owner !== identity.userId || j.owner !== chain.userId || j.resource !== resource || j.head !== chain.headHash || j.epoch !== chain.currentEpoch || !Number.isSafeInteger(j.deadline_ms) || j.deadline_ms <= now || j.deadline_ms > now + mcpJobDeadlineMaxMs(j.operation, j.tool) || typeof j.payload !== 'string' || j.payload.length > mcpJobPayloadMax(j.operation, j.tool) || !['read', 'seal', 'seal_comment', 'seal_message', 'seal_task', 'seal_agent', 'seal_resource'].includes(j.operation) || j.digest !== await mcpJobDigest(j)) throw new Error('Stale or mismatched MCP request');
   const me = chain.trusted.get(identity.deviceId);
   if (!me || !kindPolicy(me.kind).receivesWrap) throw new Error('Approved device required');
   const c = JSON.parse(j.consent);
@@ -51,7 +59,7 @@ export async function verifyMcpWorkerJob(j: McpWorkerJob, identity: DeviceIdenti
   for (const [ep, proof] of chain.epochs) if (proof.seq <= c.directory_version && ep > epoch) epoch = ep;
   if (c.epoch !== epoch || !await verifySignature(signer.sign_alg, signer.sign_public_key, new TextEncoder().encode(mcpConsentDomain(c.v) + j.consent), j.signature)) throw new Error('MCP consent signature does not verify');
 }
-const chainFields = ['chain_id', 'title', 'description', 'status', 'kind', 'work_revision', 'task_count', 'completed_task_count', 'user_validation_count', 'created_at', 'updated_at', 'configuration_revision', 'fleet'];
+const chainFields = ['chain_id', 'title', 'description', 'status', 'kind', 'project_id', 'work_revision', 'task_count', 'completed_task_count', 'user_validation_count', 'created_at', 'updated_at', 'configuration_revision', 'fleet'];
 const taskFields = ['task_id', 'title', 'description', 'state', 'kind', 'attempt_no', 'requires_user_approval', 'reviews', 'updated_at'];
 const taskDetailFields = [...taskFields, 'chain_id', 'goal', 'acceptance', 'inputs', 'review_roles', 'reviewers', 'assignee_agent_id', 'bridge_id', 'depends_on', 'publish_state', 'priority', 'revision', 'blocked_kind', 'blocked_ref', 'blocked_reason', 'blocked_since', 'blocked_since_ms', 'hold_reason', 'hold_since_ms', 'hold_by', 'checkpoint_requested', 'allowed_actions', 'latest_attempt_no', 'latest_attempt_holder_instance_id', 'latest_attempt_outcome', 'latest_attempt_started_at', 'latest_attempt_ended_at', 'latest_attempt_summary', 'latest_attempt_summary_error', 'requirements_revision', 'requirements_submitted_revision', 'requirements_submitted_head', 'requirements_checkpoint_required', 'requirements_acknowledgements', 'requirements_history', 'requirements_history_truncated'];
 const commentFields = ['comment_id', 'chain_id', 'task_id', 'body', 'created_at', 'author_kind', 'author_user_id', 'author_agent_instance_id', 'delegated_client_id', 'delegated_grant_id', 'body_error', 'body_bytes'];
@@ -77,7 +85,10 @@ async function readable(raw: Record<string, unknown>, fields: string[], textFiel
       try { return new TextDecoder('utf-8', { fatal: true }).decode(opened.bytes); }
       finally { opened.bytes.fill(0); }
     };
-    if (value.startsWith('vault:v2:')) out[key] = await open(value);
+    // Whole token only on an exact match: "<token> #3" (sealed agent name plus the
+    // native run counter) is opened through the embedded path.
+    const whole = findVaultTokens(value);
+    if (whole.length === 1 && whole[0] === value) out[key] = await open(value);
     else if (value.includes('vault:v2:')) {
       if (replaceVaultTokens(value, '').includes('vault:v2:')) throw new Error('Malformed MCP envelope');
       const tokens = new Map<string, string>();
@@ -117,8 +128,9 @@ export async function transformMcpWorkerJob(job: McpWorkerJob, keyring: VaultKey
     }
     return JSON.stringify(sealed);
   }
-  if (job.operation === 'seal_comment') {
-    if (typeof input.body !== 'string' || input.body.length < 1 || new TextEncoder().encode(input.body).length > 20000) throw new Error('Invalid comment body');
+  if (job.operation === 'seal_comment' || job.operation === 'seal_message') {
+    if (job.operation === 'seal_message' && (Object.keys(input).length !== 1 || !Object.hasOwn(input, 'body'))) throw new Error('Invalid message fields');
+    if (typeof input.body !== 'string' || input.body.length < 1 || (job.operation === 'seal_message' && !input.body.trim()) || new TextEncoder().encode(input.body).length > 20000) throw new Error('Invalid message or comment body');
     return JSON.stringify({ body: await encryptVaultText(input.body, keyring) });
   }
   if (job.operation === 'seal') {
@@ -135,8 +147,12 @@ export async function transformMcpWorkerJob(job: McpWorkerJob, keyring: VaultKey
     if (input.records !== undefined && !Array.isArray(input.records)) throw new Error('Invalid catalog records');
     const spec = catalogFields[expectedKind];
     out.records = await Promise.all((input.records || []).map(async (record: Record<string, unknown>) => {
-      const source = expectedKind === 'provider' ? { ...record, models: undefined } : expectedKind === 'issue' ? { ...record, comments: undefined } : record;
+      const source = expectedKind === 'provider' ? { ...record, models: undefined } : expectedKind === 'issue' ? { ...record, comments: undefined } : expectedKind === 'artifact' ? { ...record, content_base64: undefined } : record;
       const row = await readable(source, spec.fields, spec.text, keyring, job.owner, expectedKind === 'memory');
+      if (expectedKind === 'artifact' && record.content_base64 !== undefined) {
+        if (record.content !== undefined || job.tool !== 'artifacts.get') throw new Error('Invalid artifact bundle');
+        row.content_base64 = await openArtifactBundle(record.kind, record.content_base64, keyring);
+      }
       if (expectedKind === 'artifact' && row.content !== undefined) {
         const mime = String(row.mime || row.content_type || '').split(';', 1)[0].trim().toLowerCase();
         if (!['text/plain', 'text/markdown', 'application/json'].includes(mime) || typeof row.content !== 'string' || new TextEncoder().encode(row.content).length > 65536 || row.content.includes('\0')) throw new Error('Invalid or oversized artifact text');

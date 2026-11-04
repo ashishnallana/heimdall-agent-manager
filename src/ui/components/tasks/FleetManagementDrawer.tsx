@@ -235,12 +235,15 @@ export interface FleetManagementDrawerProps {
   chainId: string;
   isOpen: boolean;
   onClose: () => void;
+  /** Recovery opens the native fleet editor with the failed review role in context. */
+  focusRole?: string;
 }
 
 export const FleetManagementDrawer: React.FC<FleetManagementDrawerProps> = ({
   chainId,
   isOpen,
   onClose,
+  focusRole,
 }) => {
   // REQ-FLEET-POLLING-1: fetch once on open — no polling interval. Mutation
   // cache invalidation plus the explicit refetch() after an apply keep this
@@ -268,7 +271,7 @@ export const FleetManagementDrawer: React.FC<FleetManagementDrawerProps> = ({
 
   // Use the same effective bridge as reconciliation for role-wide settings.
   const allInstancesQuery = useListAgentInstancesQuery({ limit: 1000 }, { skip: !isOpen });
-  const bridgesQuery = useListBridgesQuery(undefined, { skip: !isOpen, pollingInterval: 120000 });
+  const bridgesQuery = useListBridgesQuery(undefined, { skip: !isOpen });
   const activeBridges = useMemo(() => {
     return (bridgesQuery.data?.bridges || []).filter((b: any) => !isRevokedBridge(b));
   }, [bridgesQuery.data?.bridges]);
@@ -884,6 +887,7 @@ export const FleetManagementDrawer: React.FC<FleetManagementDrawerProps> = ({
             <div>
               <h2 className="text-sm font-bold text-primary">Fleet Management</h2>
               <p className="text-[11px] text-muted">Placement, roles, concurrency &amp; live slots</p>
+              {focusRole ? <p data-debug-id="fleet-drawer-recovery-role" role="status" className="text-xs text-warning">Fleet role: {focusRole}. Changes affect the whole chain. Keep existing ticket review requirements.</p> : null}
             </div>
           </div>
           <IconButton
@@ -1086,13 +1090,13 @@ export const FleetManagementDrawer: React.FC<FleetManagementDrawerProps> = ({
                           aria-label={`Add review role for ${roleName}`}
                           placeholder="+ role"
                           title="Add a custom review role (e.g. security); tasks list it in review_roles"
-                          value={customRoleDrafts[agentId] ?? ''}
+                          value={customRoleDrafts[agentId] ?? (focusRole && !effectiveRoles.includes(focusRole) ? focusRole : '')}
                           disabled={isUpdating || isApplying}
                           onChange={(e) => setCustomRoleDrafts((prev) => ({ ...prev, [agentId]: e.target.value }))}
                           onKeyDown={(e) => {
                             if (e.key !== 'Enter') return;
                             e.preventDefault();
-                            const role = String(customRoleDrafts[agentId] ?? '').trim().toLowerCase();
+                            const role = String(customRoleDrafts[agentId] ?? focusRole ?? '').trim().toLowerCase();
                             if (!isValidFleetRoleName(role)) {
                               setErrorMsg('Role names are 1-32 chars of a-z, 0-9, _ or -, starting with a letter');
                               return;

@@ -6,6 +6,7 @@ import {
   useFetchWorkflowDefinitionsQuery,
 } from '../../api/endpoints/tasks';
 import { useListAgentIdentitiesQuery } from '../../api/endpoints/agents';
+import { createChainErrorMessage, createChainFormProblem } from './createChainForm';
 
 export interface CreateChainModalProps {
   isOpen: boolean;
@@ -27,6 +28,7 @@ export const CreateChainModal: React.FC<CreateChainModalProps> = ({
   const [description, setDescription] = useState('');
   const [projectId, setProjectId] = useState(defaultProjectId);
   const [coordinatorAgentId, setCoordinatorAgentId] = useState('');
+  const [submitError, setSubmitError] = useState('');
 
   // Workflow template state
   // The modal stays mounted while closed (it returns null below), so every query is
@@ -80,10 +82,13 @@ export const CreateChainModal: React.FC<CreateChainModalProps> = ({
 
   if (!isOpen) return null;
 
+  const formProblem = createChainFormProblem(kind, projectId, coordinatorAgentId);
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!title.trim()) return;
+    if (!title.trim() || formProblem) return;
 
+    setSubmitError('');
     try {
       if (kind === 'workflow') {
         const payload: any = {
@@ -116,6 +121,7 @@ export const CreateChainModal: React.FC<CreateChainModalProps> = ({
       }
     } catch (err) {
       console.error('Failed to create chain', err);
+      setSubmitError(createChainErrorMessage(err));
     }
   };
 
@@ -303,6 +309,18 @@ export const CreateChainModal: React.FC<CreateChainModalProps> = ({
             </div>
           )}
 
+          {kind === 'ticket' && formProblem && (
+            <p data-debug-id="create-chain-form-problem" className="rounded-lg border border-subtle bg-surface-raised px-3 py-2 text-[11px] text-muted">
+              {formProblem}
+            </p>
+          )}
+
+          {submitError && (
+            <p role="alert" data-debug-id="create-chain-error" className="whitespace-normal text-[11px] text-danger">
+              {submitError}
+            </p>
+          )}
+
           {/* Footer buttons */}
           <div className="flex items-center justify-end gap-2 pt-3 border-t border-subtle">
             <button
@@ -314,7 +332,7 @@ export const CreateChainModal: React.FC<CreateChainModalProps> = ({
             </button>
             <button
               type="submit"
-              disabled={isSubmitting || !title.trim()}
+              disabled={isSubmitting || !title.trim() || Boolean(formProblem)}
               className="rounded-lg bg-accent px-4 py-2 text-xs font-semibold text-accent-fg hover:opacity-90 transition-opacity disabled:opacity-50"
             >
               {isSubmitting

@@ -328,8 +328,8 @@ test_bridge_pin_and_offline_hold_until_hello :: proc(t: ^testing.T) {
 	seed_instance(fx, chain, "inst_w1", "agt_w", "br_1", "idle")
 	seed_instance(fx, chain, "inst_w2", "agt_w", "br_2", "idle")
 	task := publish_task(t, fx, chain, "task_pinned", bridge_pin = "br_2")
-	testing.expect_value(t, task.state, domain.Task_State.Backlog)
-	testing.expect(t, is_agent_not_running_block(task.blocked_on_json), "offline placement asks user")
+	testing.expect_value(t, task.state, domain.Task_State.Ready)
+	testing.expect(t, strings.contains(placement_body(fx, string(task.task_id)), "bridge_offline"), "offline placement is separate from task state")
 	_, h1 := lease_of(fx, "inst_w1")
 	testing.expect(t, !h1, "br_1 instance never gets a br_2-pinned task")
 	// bridge comes online → hello → match

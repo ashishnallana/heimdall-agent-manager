@@ -17,10 +17,13 @@ import "core:time"
 import jsonx "../jsonx"
 
 CHUNK_RAW_BYTES         :: 24 * 1024
-CHUNK_MAX_BUFFERED_BYTES :: 16 * 1024 * 1024
-CHUNK_MAX_MESSAGE_BYTES :: 16 * 1024 * 1024
+// Message/buffer/count bounds match contracts.BRIDGE_WS_MAX_REASSEMBLY_BYTES /
+// BRIDGE_WS_MAX_CHUNK_COUNT (32 MiB, 8192): sized for one MCP html-bundle job
+// (~24 MiB) per connection; per-command caps still apply after reassembly.
+CHUNK_MAX_BUFFERED_BYTES :: 32 * 1024 * 1024
+CHUNK_MAX_MESSAGE_BYTES :: 32 * 1024 * 1024
 CHUNK_MAX_INFLIGHT      :: 64
-CHUNK_MAX_COUNT         :: 4096
+CHUNK_MAX_COUNT         :: 8192
 CHUNK_REASSEMBLY_TTL    :: 30 * time.Second
 
 Chunk_Outcome :: enum {

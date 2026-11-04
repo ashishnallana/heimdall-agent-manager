@@ -13,8 +13,11 @@ import dbt "odin_test:hub/platform/dbtelemetry"
 import metrics "odin_test:lib/metrics"
 import ws "odin_test:lib/ws"
 
-// Allow 50 MiB artifact payloads plus multipart/base64 framing overhead.
+// Shared reader cap for every route. It must admit the largest artifact create request
+// (ARTIFACT_MAX_REQUEST_BYTES: a vault-armored 15 MiB artifact, base64'd inside JSON, plus
+// metadata); artifact routes then enforce their own tighter bound.
 MAX_HTTP_REQUEST_BYTES :: 80 * 1024 * 1024
+#assert(MAX_HTTP_REQUEST_BYTES >= ARTIFACT_MAX_REQUEST_BYTES)
 
 Server_Config :: struct {
 	bind_host: string,

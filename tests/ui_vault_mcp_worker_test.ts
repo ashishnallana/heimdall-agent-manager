@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mcpWorkerFixture } from './helpers/mcpWorkerFixture.ts';
-import { verifyMcpWorkerJob, transformMcpWorkerJob, mcpJobDigest, mcpJobScopeAllowed } from '../src/ui/utils/mcpWorker.ts';
+import { verifyMcpWorkerJob, transformMcpWorkerJob, mcpJobDigest, mcpJobScopeAllowed, mcpJobDeadlineMaxMs, MCP_JOB_ARTIFACT_DEADLINE_MAX_MS, MCP_JOB_DEADLINE_MAX_MS } from '../src/ui/utils/mcpWorker.ts';
 import { decryptVaultBytes } from '../src/ui/utils/vaultContent.ts';
 
 test('requirement changes seal their reason and extended reads decrypt history without changing acknowledgement metadata', async () => {
@@ -197,4 +197,53 @@ test('browser worker is off by default, registers only on explicit opt-in, and w
   while (!registrations.some(r => r.enabled === false) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 5));
   assert.equal(registrations.at(-1).enabled, false);
   assert.equal(registrations.at(-1).generation, registrations[0].generation);
+});
+
+test('MCP job deadline window: 20 s only for html-bundle capable artifact jobs (mirrors vault.control_job_deadline_max_ms)', () => {
+  assert.equal(MCP_JOB_DEADLINE_MAX_MS, 5000);
+  assert.equal(MCP_JOB_ARTIFACT_DEADLINE_MAX_MS, 20000);
+  assert.equal(mcpJobDeadlineMaxMs('seal_resource', 'artifacts.create'), 20000);
+  assert.equal(mcpJobDeadlineMaxMs('read', 'artifacts.get'), 20000);
+  assert.equal(mcpJobDeadlineMaxMs('read', 'artifacts.list'), 5000);
+  assert.equal(mcpJobDeadlineMaxMs('seal_resource', 'memories.create'), 5000);
+  assert.equal(mcpJobDeadlineMaxMs('read', 'chains.get'), 5000);
+  assert.equal(mcpJobDeadlineMaxMs('seal'), 5000);
+});
+
+test('coordinator messages require dedicated signed consent and seal as user-message text', async () => {
+  const f = await mcpWorkerFixture(Date.now(), 'mcp:chains mcp:chains:message');
+  const job = { ...f.job, tool: 'chains.message', operation: 'seal_message' as const, payload: JSON.stringify({ body: 'Private coordinator text' }) };
+  job.digest = await mcpJobDigest(job);
+  await verifyMcpWorkerJob(job, f.identity, f.chain, job.resource, f.now);
+  const sealed = JSON.parse(await transformMcpWorkerJob(job, f.keyring));
+  assert.deepEqual(Object.keys(sealed), ['body']);
+  const opened = await decryptVaultBytes(sealed.body, f.keyring);
+  assert.equal(opened.status, 'ok');
+  if (opened.status === 'ok') {
+    assert.equal(new TextDecoder().decode(opened.bytes), 'Private coordinator text');
+    opened.bytes.fill(0);
+  }
+  for (const scope of ['mcp:chains', 'mcp:chains mcp:tasks:write', 'mcp:chains mcp:instances:control']) {
+    assert.equal(mcpJobScopeAllowed(scope, 'chains.message', 'seal_message'), false);
+  }
+  assert.equal(mcpJobScopeAllowed('mcp:chains mcp:chains:message', 'tasks.comment', 'seal_message'), false);
+  await assert.rejects(verifyMcpWorkerJob({ ...job, operation: 'seal_comment' }, f.identity, f.chain, job.resource, f.now));
+  for (const body of ['', '   ', 'é'.repeat(10001)]) {
+    await assert.rejects(transformMcpWorkerJob({ ...job, payload: JSON.stringify({ body }) }, f.keyring));
+  }
+});
+
+test('instance reads open a sealed agent name carrying the native run counter and fail closed on malformed armor', async () => {
+  const f = await mcpWorkerFixture(Date.now(), 'mcp:chains mcp:instances:read');
+  const token = JSON.parse(f.job.payload).chain.title;
+  const read = async (display_name: string) => {
+    const job = { ...f.job, tool: 'instances.get', operation: 'read' as const, payload: JSON.stringify({ records_kind: 'instance', records: [{ owner_user_id: f.job.owner, agent_instance_id: 'inst_label', display_name }] }) };
+    job.digest = await mcpJobDigest(job);
+    await verifyMcpWorkerJob(job, f.identity, f.chain, job.resource, f.now);
+    return JSON.parse(await transformMcpWorkerJob(job, f.keyring)).records[0].display_name;
+  };
+  assert.equal(await read(token), 'worker secret title');
+  assert.equal(await read(`${token} #3`), 'worker secret title #3');
+  assert.equal(await read('coordinator #7'), 'coordinator #7');
+  for (const bad of [`${token.slice(0, -8)} #3`, `${token} #3 vault:v2:zz`, 'vault:v2:not-a-token #3']) await assert.rejects(read(bad), `malformed label must fail closed: ${bad.slice(0, 24)}`);
 });

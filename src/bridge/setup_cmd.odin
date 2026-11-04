@@ -201,7 +201,7 @@ bridge_setup_port_busy :: proc(port: int) -> bool {
 }
 
 bridge_setup_exec_inherit :: proc(argv: []string) -> bool {
-	p, err := os.process_start(os.Process_Desc{command = argv, stdin = os.stdin, stdout = os.stdout, stderr = os.stderr})
+	p, err := bridge_os_start_hidden(os.Process_Desc{command = argv, stdin = os.stdin, stdout = os.stdout, stderr = os.stderr})
 	if err != nil do return false
 	state, werr := os.process_wait(p)
 	// core:os on Windows reports success for every exited process (dev-2026-09/10
@@ -542,6 +542,9 @@ bridge_setup_register :: proc(s: ^Bridge_Setup) -> bridgesvc.Step_Result {
 		run_cmd := bridgesvc.windows_run_cmd_path(l)
 		bridge_setup_backup(s, run_cmd)
 		if err := os.write_entire_file_from_string(run_cmd, bridgesvc.render_windows_run_cmd(s.host, l, in_)); err != nil do return {failure = .Fatal, message = fmt.tprintf("cannot write %s: %v", run_cmd, err)}
+		launcher := bridgesvc.windows_launcher_path(l)
+		bridge_setup_backup(s, launcher)
+		if err := os.write_entire_file_from_string(launcher, bridgesvc.render_windows_launcher(l)); err != nil do return {failure = .Fatal, message = fmt.tprintf("cannot write %s: %v", launcher, err)}
 		xml := bridgesvc.pjoin(l.data_dir, "task.xml")
 		_ = os.write_entire_file_from_string(xml, bridgesvc.render_service_file(s.host, l, in_))
 		tn := strings.concatenate({"\\", l.service_name}, context.temp_allocator)
@@ -643,6 +646,7 @@ bridge_setup_undo :: proc(data: rawptr, step: bridgesvc.Step) {
 		#partial switch l.backend {
 		case .Schtasks:
 			bridge_setup_restore(s, bridgesvc.windows_run_cmd_path(l))
+			bridge_setup_restore(s, bridgesvc.windows_launcher_path(l))
 			if !s.was_installed do _, _ = bridge_service_exec({"schtasks", "/Delete", "/TN", strings.concatenate({"\\", l.service_name}, context.temp_allocator), "/F"})
 		case:
 			bridge_setup_restore(s, l.service_file)

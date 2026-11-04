@@ -48,6 +48,7 @@ import {
   type AgentFormField,
 } from './agentModel';
 import { getRouteSearch } from '../../utils/appLocation';
+import { slugify } from '../../utils/slug';
 
 /* ------------------------------------------------------------------ *
  * Unsaved-changes guard (same mechanism as ProjectFormPage)
@@ -109,10 +110,6 @@ const EMPTY_FORM: FormState = {
   templateId: '',
   requireApprovals: false,
 };
-
-function slugify(name: string): string {
-  return name.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
-}
 
 function formFromRecord(record: AgentRecord): FormState {
   return {

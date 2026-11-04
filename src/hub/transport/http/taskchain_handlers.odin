@@ -1387,6 +1387,15 @@ create_task_chain_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	auth_ctx, ok, auth_resp := require_auth_any(h.auth, req)
 	if !ok do return auth_resp
 	coord_inst_id := json_string(req.body, "coordinator_agent_instance_id")
+	// project_id places the chain under a project through its launched
+	// coordinator instance. Validate it before the chain row exists so a bad,
+	// foreign or archived project leaves no orphan chain, and refuse it when no
+	// coordinator is launched (it would otherwise be dropped silently).
+	if project_id := json_string(req.body, "project_id"); project_id != "" {
+		if json_string(req.body, "coordinator_agent_id") == "" do return respond_error(domain.domain_error(.Validation_Failed, "project_id requires coordinator_agent_id: the chain's project is its launched coordinator's project"), req.request_id)
+		if h.agents == nil do return respond_error(domain.domain_error(.Internal_Error, "agent service is not configured"), req.request_id)
+		if perr := agent_service.validate_launch_project(h.agents, auth_ctx, domain.Project_ID(project_id), json_string(req.body, "bridge_id")); perr.code != .None do return respond_error(perr, req.request_id)
+	}
 	chain, created, err := taskchain_service.create_chain(h.taskchains, auth_ctx, taskchain_service.Create_Chain_Input{
 		title = json_string(req.body, "title"),
 		description = json_string(req.body, "description"),
@@ -1771,6 +1780,24 @@ hold_task_handler :: proc(ctx: rawptr, req: Request) -> Response {
 // review requirements, readiness, dispatch and a done task's merge-back; never
 // approves, never touches a live lease, and a repeat call is a no-op. The
 // response lists what changed (`actions`) and why the rest holds (`reasons`).
+recover_task_placement_handler :: proc(ctx: rawptr, req: Request) -> Response {
+	h := (^Taskchain_Handlers)(ctx)
+	auth, ok, resp := require_auth(h.auth, req)
+	if !ok do return resp
+	task_id := domain.Task_ID(path_part(req.path, 4))
+	if path_part(req.path, 3) != "tasks" {
+		task_id = domain.Task_ID(path_part(req.path, 6))
+		if matched, mismatch := require_task_path_scope(h, auth, domain.Task_Chain_ID(path_part(req.path, 4)), task_id, req); !matched do return mismatch
+	}
+	input, err := placement_recovery_input(req.body)
+	if err.code != .None do return respond_error(err, req.request_id)
+	task, repaired, rerr := taskchain_service.recover_placement(h.taskchains, auth, task_id, input)
+	if !repaired do return respond_error(rerr, req.request_id)
+	b := strings.builder_make()
+	write_task_json(&b, task)
+	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req))
+}
+
 recheck_task_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	h := (^Taskchain_Handlers)(ctx)
 	auth_ctx, ok, auth_resp := require_auth_any(h.auth, req)

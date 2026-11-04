@@ -23,6 +23,7 @@
    * 1. Color — single dark theme. Public names state role, not hue.  *
    * ---------------------------------------------------------------- */
   --color-backdrop: rgb(0 0 0 / 0.55);
+  --color-scrim: rgb(0 0 0 / 0.6);
   --color-canvas: #0f0f0f;
   --color-surface: #191919;
   --color-surface-raised: #1f1f1f;
@@ -77,6 +78,15 @@
   --text-display-leading: 1.1875;
   --text-display-tracking: -0.01em;
 
+  /* Launcher sentence headline (new conversation page): serif, roomy leading so
+     the dotted token underlines clear the next line. 26/44 below md. */
+  --text-headline-size: 32px;
+  --text-headline-weight: 400;
+  --text-headline-leading: 52px;
+  --text-headline-tracking: -0.01em;
+  --text-headline-sm-size: 26px;
+  --text-headline-sm-leading: 44px;
+
   --text-heading-size: 20px;
   --text-heading-weight: 500;
   --text-heading-leading: 1.4;
@@ -116,6 +126,11 @@
   --text-code-weight: 400;
   --text-code-leading: 1.6;
   --text-code-tracking: normal;
+
+  --text-code-sm-size: 12px;
+  --text-code-sm-weight: 400;
+  --text-code-sm-leading: 16px;
+  --text-code-sm-tracking: normal;
 
   /* ---------------------------------------------------------------- *
    * 3. Spacing — base unit 4px. Values match Tailwind's default      *
@@ -184,6 +199,9 @@
   --duration-slow: 300ms;
   --duration-slower: 500ms;
   --ease-standard: cubic-bezier(0.2, 0.8, 0.2, 1);
+  /* Emphasized: fast start, long soft settle. Entrances in the conversation
+     launcher (token swaps, menus, sheets). */
+  --ease-emphasized: cubic-bezier(0.22, 1, 0.36, 1);
   --ease-linear: linear;
 
   /* ---------------------------------------------------------------- *

@@ -4,6 +4,7 @@ import domain "odin_test:hub/domain"
 import iface "odin_test:hub/repository/iface"
 import mcp "odin_test:hub/service/mcp"
 import content "odin_test:hub/service/content"
+import hb "odin_test:lib/html_bundle"
 
 mcp_resource_artifact :: proc(g:^App_Graph,view:mcp.Access_View,c:mcp.Resource_Command)->(string,string,string) {
 	context.allocator=context.temp_allocator
@@ -13,7 +14,14 @@ mcp_resource_artifact :: proc(g:^App_Graph,view:mcp.Access_View,c:mcp.Resource_C
 	case "artifacts.create":
 		if a.task_id!="" && a.chain_id=="" {task,found,e:=iface.taskchain_get_task(&g.repos.taskchains,domain.Task_ID(a.task_id));if !found || e.code!=.None || string(task.owner_user_id)!=view.owner do return "","","not_found";a.chain_id=string(task.chain_id)}
 		ext:="txt";if a.content_type=="text/markdown" do ext="md";if a.content_type=="application/json" do ext="json"
-		row,ok,err=content.create_artifact(&g.content,auth,{kind="file",name=mcp.resource_text(c.sealed,"name"),description=mcp.resource_text(c.sealed,"description"),content=mcp.resource_text(c.sealed,"content"),content_type=a.content_type,mime=a.content_type,ext=ext,project_id=domain.Project_ID(a.project_id),chain_id=a.chain_id,task_id=a.task_id,agent_id=a.agent_id,agent_instance_id=a.agent_instance_id})
+		kind:="file";body:=mcp.resource_text(c.sealed,"content")
+		// entry/files creates: the sealed archive token, stored exactly like a
+		// ham-ctl/UI html-bundle upload so every authorized device's viewer opens it.
+		if bundle:=mcp.resource_text(c.sealed,"content_base64");bundle!="" {
+			if a.content_type!=hb.HTML_BUNDLE_CONTENT_TYPE || body!="" do return "","","invalid_arguments"
+			kind=hb.HTML_BUNDLE_KIND;ext="zip";body=bundle
+		}
+		row,ok,err=content.create_artifact(&g.content,auth,{kind=kind,name=mcp.resource_text(c.sealed,"name"),description=mcp.resource_text(c.sealed,"description"),content=body,content_type=a.content_type,mime=a.content_type,ext=ext,project_id=domain.Project_ID(a.project_id),chain_id=a.chain_id,task_id=a.task_id,agent_id=a.agent_id,agent_instance_id=a.agent_instance_id})
 	case "artifacts.update":row,ok,err=content.update_artifact_bounded(&g.content,auth,a.id,mcp.resource_text(c.sealed,"name"),mcp.resource_text(c.sealed,"description"))
 	case "artifacts.delete":ok,err=content.delete_artifact_bounded(&g.content,auth,a.id);if ok && err.code==.None do return a.id,"deleted",""
 	}

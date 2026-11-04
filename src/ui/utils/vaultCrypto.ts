@@ -72,6 +72,18 @@ export function isVaultArmored(text: unknown): boolean {
   return typeof text === 'string' && text.startsWith(VAULT_ARMOR_PREFIX);
 }
 
+/**
+ * Whether a vault-armored string must be opened as ONE whole envelope: an exact single
+ * token, or text with the armor prefix that holds no complete token (malformed armor,
+ * which the whole-envelope parser rejects so callers fail closed). Text that starts
+ * with a token and carries more, e.g. "<sealed agent name> #3" (native run counter),
+ * is NOT whole: open it with the embedded-token path instead.
+ */
+export function isWholeVaultArmored(text: unknown): boolean {
+  if (typeof text !== 'string' || !text.startsWith(VAULT_ARMOR_PREFIX)) return false;
+  return VAULT_TOKEN_EXACT_RE.test(text) || !VAULT_TOKEN_TEST_RE.test(text);
+}
+
 /** Whether a string contains at least one complete v2 vault token. */
 export function containsVaultArmored(text: unknown): boolean {
   return typeof text === 'string' && VAULT_TOKEN_TEST_RE.test(text);
@@ -410,6 +422,16 @@ export async function encryptVaultText(plaintext: string, keyring?: VaultKeyring
   } finally {
     bytes.fill(0);
   }
+}
+
+/**
+ * Byte form of encryptVaultText for binary content (html-bundle ZIPs): seals the bytes
+ * exactly, without text encoding, so decryptVaultBytes returns them byte-identical.
+ * The caller keeps ownership of `plaintext`.
+ */
+export async function encryptVaultBytes(plaintext: Uint8Array, keyring?: VaultKeyring | null): Promise<string> {
+  const kr = requireKeyring(keyring);
+  return sealVaultEnvelope(plaintext, currentKey(kr), kr.vaultId, kr.currentEpoch);
 }
 
 // ── File write v3 (finding N4 + P4 root binding) ──────────────────────────────

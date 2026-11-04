@@ -7,8 +7,8 @@ import dbt "odin_test:hub/platform/dbtelemetry"
 import metrics "odin_test:lib/metrics"
 
 // Per-request DB accounting (DB telemetry plan §2.3.4, §3). Flips the global
-// telemetry mode, so these run only with -define:DBT_TESTS=true (single
-// threaded, verify-db-telemetry.sh); a plain package run skips them.
+// telemetry mode, so these run only with -define:DBT_TESTS=true (with
+// -define:ODIN_TEST_THREADS=1); a plain package run skips them.
 DBT_TESTS :: #config(DBT_TESTS, false)
 
 @(test)
@@ -73,6 +73,13 @@ test_slow_request_log_sanitized :: proc(t: ^testing.T) {
 	}
 	testing.expect(t, !strings.contains(line, "SELECT *"), "no SQL text")
 	testing.expect(t, !strings.contains(line, "token=secret"), "no query string")
+	testing.expect(t, !strings.contains(line, " phase_"), "no phase fields when after_chain_change did not run")
+	totals.phase[.Refold] = dbt.Phase_Totals{ns = 120_000_000, statements = 840, calls = 2}
+	totals.phase[.Match] = dbt.Phase_Totals{ns = 9_000_000, statements = 31, calls = 1}
+	phased := format_db_slow_request("/api/v1/tasks/{id}", "POST", "2xx", 300_000_000, "r1", totals, d, context.temp_allocator)
+	testing.expect(t, strings.contains(phased, " phase_refold=ns=120000000/statements=840/calls=2"), phased)
+	testing.expect(t, strings.contains(phased, " phase_match=ns=9000000/statements=31/calls=1"), phased)
+	testing.expect(t, !strings.contains(phased, "phase_summary"), "phases that did not run are omitted")
 
 	// Token bucket: bursts beyond 10/s are dropped and counted.
 	dbt.set_mode(.Basic)

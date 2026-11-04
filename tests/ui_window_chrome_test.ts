@@ -175,7 +175,9 @@ test('top-left cluster clears the traffic lights and gate screens get a drag sur
   assert.match(appShellSource, /const controlsInset = isMobile \? 0 : rawControlsInset/);
   assert.match(appShellSource, /paddingLeft: controlsInset \? controlsInset \+ 8 : undefined/);
   assert.match(appShellSource, /data-debug-id="shell-top-left-cluster"\s+className="window-drag /);
-  assert.match(appShellSource, /data-debug-id="shell-top-bar"\s+className="window-drag /);
+  // The content column's drag strip is an invisible spacer (no bar, no border).
+  assert.match(appShellSource, /data-debug-id="shell-top-spacer"\s+className="window-drag shrink-0"/);
+  assert.doesNotMatch(appShellSource, /shell-top-bar/);
   // Auth/device-vault gates render the strip; standalone device pages pad below it.
   const authGate = appShellSource.slice(appShellSource.indexOf('function AuthGate()'), appShellSource.indexOf('function AuthStatusScreen'));
   assert.match(authGate, /useWindowChrome\(\)/);
@@ -297,9 +299,12 @@ test('Windows hook tracks geometry, viewport resize, fullscreen replay and unsub
   }
 });
 
-test('right safe area reaches the top bar, workspace cluster and pane/dock reservations', () => {
+test('right safe area reaches the top spacer, workspace cluster and pane/dock reservations', () => {
   const workspace = read('src/ui/components/mainWorkspace/Workspace.tsx');
-  assert.match(appShellSource, /paddingRight: controlsInsetRight \? controlsInsetRight \+ 12 : undefined/);
+  // Every non-workspace page keeps the chrome-height spacer (in every window
+  // style and sidebar state), so pages stay clear of the overlay window controls.
+  assert.match(appShellSource, /const \{ insetLeft: rawControlsInset \} = useWindowChrome\(\)/);
+  assert.match(appShellSource, /\{!isWorkspaceRoute \? \(\s*<div\s+aria-hidden="true"\s+data-debug-id="shell-top-spacer"/);
   assert.match(workspace, /const reservedTopRightWidth = topRightWidth \+ windowControlsInset/);
   assert.match(workspace, /reserveRight=\{reservedTopRightWidth\}/);
   assert.match(workspace, /right: windowControlsInset \|\| undefined/);

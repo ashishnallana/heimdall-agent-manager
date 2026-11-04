@@ -158,7 +158,7 @@ bridge_tray_enabled :: proc(s: bridgesvc.Status) -> (e: Bridge_Tray_Enabled) {
 // by the loop so no zombie is left behind.
 bridge_tray_spawn :: proc(argv: []string, children: ^[dynamic]os.Process) -> bool {
 	if len(argv) == 0 do return false
-	p, err := os.process_start(os.Process_Desc{command = argv})
+	p, err := bridge_os_start_hidden(os.Process_Desc{command = argv})
 	if err != nil do return false
 	// The setup / uninstall callers exit right away; the tray loop reaps its own.
 	if children != nil do append(children, p)

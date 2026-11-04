@@ -1,7 +1,7 @@
 /**
  * DEV-ONLY composer demo (REQ-DEMO-1..5), served by Vite at `composer-demo.html`.
  * ---------------------------------------------------------------------------
- * Lets a reviewer judge the floating gradient-frost mobile composer in the Heimdall
+ * Lets a reviewer judge the floating gradient-frost morphing composer in the Heimdall
  * preview, where the full app cannot run: the vault refuses non-UI origins by design.
  * Nothing here talks to the network, the vault or auth. The redux store below only
  * exists because `ChatMessageList` / `Markdown` read it with `useSelector`; it holds
@@ -9,25 +9,31 @@
  * from this page.
  *
  * What is real and what is stubbed:
- * - REAL: `ChatMessageList` (bottom inset, auto-scroll, jump-to-latest),
- *   `MessageComposerInput`, `MessageComposerActions` (+ upload, terminal, model
- *   switcher, send), the `StatusDot` runtime indicator, `Icon`, `Menu`, and
- *   the `ui-float-dock` / `ui-frost-*` / `ui-liquid-glass` classes from styles.css.
- * - MIRRORED: the dock + card markup from the mobile branch of
- *   `AgentChatPane.renderComposer` (AgentChatPane itself needs the API and vault).
- *   Keep the two in sync when the mobile composer markup changes.
+ * - REAL: `ChatMessageList` (bottom inset, auto-scroll, jump-to-latest), the morphing
+ *   composer from MessageComposer.tsx (`useComposerExpanded`, `MessageComposerMorphShell`,
+ *   `MessageComposerInput morph`, `MessageComposerActions morph`, `useComposerDockInset`,
+ *   `MessageComposerStatus`), `Icon`, `Menu`, and the `ui-float-dock` / `ui-frost-*` /
+ *   `ui-liquid-glass` classes from styles.css.
+ * - MIRRORED: the dock, context row (bridge · project, runtime status menu) and attachment
+ *   tray markup from `AgentChatPane.renderComposer` (AgentChatPane itself needs the API and
+ *   vault). Keep the two in sync when the composer markup changes.
  * - MIRRORED: the floating header (menu, title/subtitle, "…") from the reference
  *   screenshots.
  * - STUBBED: composer callbacks; "sending" appends locally and fakes an agent reply;
- *   the runtime status is local state (tap the indicator at the top right of the
- *   composer card to toggle it); the terminal and tasks buttons only show a toast (see
- *   `ComposerDemo` for the real handlers).
+ *   the runtime status is local state (its menu in the composer's context row starts or
+ *   stops it); upload adds a fake local attachment (no file chooser, no upload); the
+ *   terminal, tasks and model buttons only show a toast (see `ComposerDemo`).
  *
  * URL presets, so a state can be linked or screenshotted without interaction:
  *   ?theme=light|dark   start in that appearance
  *   ?draft=<text>       prefill the composer (use %0A for extra lines)
  *   ?scroll=top         start scrolled to the top, which shows jump-to-latest
  *   ?status=running|stopped  runtime indicator state (default running)
+ *   ?state=empty|focused|draft|menu|attachments  composer open condition to start in:
+ *                       collapsed pill, focused field, a draft, the owned runtime status
+ *                       menu open, or two queued attachments (default empty)
+ *   ?layout=phone|desktop  phone column (default) or a desktop-width conversation
+ * The header "…" menu applies the same presets in place (`composer-demo-preset-*`).
  *
  * Not shipped: vite.config.js has no `rollupOptions.input`, so `vite build` emits only
  * index.html (REQ-DEMO-5).
@@ -36,9 +42,16 @@ import { StrictMode, useCallback, useEffect, useMemo, useRef, useState, type For
 import ReactDOM from 'react-dom/client';
 import { Provider } from 'react-redux';
 import { combineReducers, configureStore } from '@reduxjs/toolkit';
-import { Icon, Menu, StatusDot, runtimeStatusToTone } from '@ui';
+import { Icon, Menu, runtimeStatusToTone } from '@ui';
 import ChatMessageList from '../components/chat/ChatMessageList';
-import { MessageComposerActions, MessageComposerInput } from '../components/chat/MessageComposer';
+import {
+  MessageComposerActions,
+  MessageComposerInput,
+  MessageComposerMorphShell,
+  MessageComposerStatus,
+  useComposerDockInset,
+  useComposerExpanded,
+} from '../components/chat/MessageComposer';
 import type { ChatMessage, ChatTimestamp } from '../components/chat/types';
 import vaultReducer from '../store/vaultSlice';
 import { applyThemeToDocument } from '../store/themeSlice';
@@ -152,6 +165,28 @@ function currentAppearance(): 'dark' | 'light' {
 
 type DemoRuntimeStatus = 'running' | 'stopped';
 
+const DEMO_COMPOSER_STATES = ['empty', 'focused', 'draft', 'menu', 'attachments'] as const;
+type DemoComposerState = (typeof DEMO_COMPOSER_STATES)[number];
+const DEMO_COMPOSER_STATE_LABELS: Record<DemoComposerState, string> = {
+  empty: 'Empty (collapsed)',
+  focused: 'Focused, empty',
+  draft: 'Draft',
+  menu: 'Owned menu open',
+  attachments: 'Attachments queued',
+};
+const DEMO_DRAFT = 'Can you check why the bridge install enrolls before the service starts?';
+
+function presetState(): DemoComposerState {
+  const value = PRESETS.get('state');
+  return (DEMO_COMPOSER_STATES as readonly string[]).includes(value ?? '') ? (value as DemoComposerState) : 'empty';
+}
+
+type DemoAttachment = { localId: string; name: string };
+const DEMO_ATTACHMENTS: DemoAttachment[] = [
+  { localId: 'demo-a1', name: 'reconnect-trace.log' },
+  { localId: 'demo-a2', name: 'sleep-resume.png' },
+];
+
 // Solid canvas tint behind the title and subtitle, fading out below the header, so
 // transcript text never bleeds through the title. A plain gradient rather than the
 // `.ui-frost-tail` blur + mask recipe: with mask-image the layer let text show through
@@ -171,9 +206,11 @@ const HEADER_WASH_STYLE = {
 function DemoHeader({
   status,
   onToggleStatus,
+  onPreset,
 }: {
   status: DemoRuntimeStatus;
   onToggleStatus: () => void;
+  onPreset: (state: DemoComposerState) => void;
 }) {
   const [appearance, setAppearance] = useState(currentAppearance);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -228,6 +265,16 @@ function DemoHeader({
           <Icon name={running ? 'stop' : 'play'} size={16} />
           <span>{running ? 'Stop agent (demo)' : 'Start agent (demo)'}</span>
         </Menu.Item>
+        <Menu.Label>Composer preset</Menu.Label>
+        {DEMO_COMPOSER_STATES.map((state) => (
+          <Menu.Item
+            key={state}
+            data-debug-id={`composer-demo-preset-${state}`}
+            onClick={() => { setMenuOpen(false); onPreset(state); }}
+          >
+            <span>{DEMO_COMPOSER_STATE_LABELS[state]}</span>
+          </Menu.Item>
+        ))}
       </Menu>
     </header>
   );
@@ -272,12 +319,15 @@ function KeyboardReadout() {
 }
 
 function ComposerDemo() {
+  const initialState = presetState();
+  const desktop = PRESETS.get('layout') === 'desktop';
   const [messages, setMessages] = useState<ChatMessage[]>(SAMPLE_MESSAGES);
-  const [draft, setDraft] = useState(() => PRESETS.get('draft') ?? '');
+  const [draft, setDraft] = useState(() => PRESETS.get('draft') ?? (initialState === 'draft' ? DEMO_DRAFT : ''));
+  const [attachments, setAttachments] = useState<DemoAttachment[]>(() => (initialState === 'attachments' ? DEMO_ATTACHMENTS : []));
+  const [statusMenuOpen, setStatusMenuOpen] = useState(initialState === 'menu');
   const [agentIsWorking, setAgentIsWorking] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const composerDockRef = useRef<HTMLDivElement | null>(null);
-  const [composerDockHeight, setComposerDockHeight] = useState(0);
   const replyTimerRef = useRef(0);
   const [runtimeStatus, setRuntimeStatus] = useState<DemoRuntimeStatus>(() =>
     PRESETS.get('status') === 'stopped' ? 'stopped' : 'running',
@@ -297,16 +347,36 @@ function ComposerDemo() {
   const running = runtimeStatus === 'running';
   const statusLabel = running ? 'Running' : 'Stopped';
 
-  // Same measurement as AgentChatPane (REQ-FROST-1): the dock's height is the list's inset.
-  useEffect(() => {
-    const el = composerDockRef.current;
-    if (!el || typeof ResizeObserver === 'undefined') return;
-    const measure = () => setComposerDockHeight(Math.ceil(el.getBoundingClientRect().height));
-    measure();
-    const observer = new ResizeObserver(measure);
-    observer.observe(el);
-    return () => observer.disconnect();
+  // The same dock/transcript synchronisation as AgentChatPane (REQ-FROST-1).
+  const composerDockHeight = useComposerDockInset(composerDockRef, {
+    insetDebugId: 'composer-demo-bottom-inset',
+    jumpDebugId: 'composer-demo-jump-latest-btn',
+  });
+
+  // The same open conditions as AgentChatPane, minus the ones this page has no source for
+  // (quotes, borrowed tray modes, uploads, pending reconfiguration, read-only).
+  const expansion = useComposerExpanded({
+    draft,
+    hasAttachments: attachments.length > 0,
+    menuOpen: statusMenuOpen,
+  });
+
+  const applyPreset = useCallback((state: DemoComposerState) => {
+    setDraft(state === 'draft' ? DEMO_DRAFT : '');
+    setAttachments(state === 'attachments' ? DEMO_ATTACHMENTS : []);
+    setStatusMenuOpen(state === 'menu');
+    // After the menu that picked the preset has returned focus to its trigger.
+    window.setTimeout(() => {
+      if (state === 'focused' || state === 'draft') textareaRef.current?.focus();
+      else if (state === 'empty' || state === 'attachments') textareaRef.current?.blur();
+    }, 0);
   }, []);
+
+  useEffect(() => {
+    if (initialState !== 'focused') return;
+    const frame = requestAnimationFrame(() => textareaRef.current?.focus());
+    return () => cancelAnimationFrame(frame);
+  }, [initialState]);
 
   useEffect(
     () => () => {
@@ -330,6 +400,7 @@ function ComposerDemo() {
     if (!text) return;
     setMessages((prev) => [...prev, message(prev.length, true, text)]);
     setDraft('');
+    setAttachments([]);
     setAgentIsWorking(true);
     window.clearTimeout(replyTimerRef.current);
     replyTimerRef.current = window.setTimeout(() => {
@@ -347,40 +418,29 @@ function ComposerDemo() {
   const composerActions = useMemo(
     () => ({
       debugPrefix: 'composer-demo',
-      // The non-mobile toolbar is the variant that shows upload and the model switcher
-      // directly; the mobile variant folds both into a "…" menu.
-      mobile: false,
+      mobile: !desktop,
       // Empty on purpose: ProviderIcon fetches /api/v1/providers/<id>/icon for a named
       // provider, and this page must issue no API requests. It shows its fallback glyph.
       provider: '',
       model: 'Opus 5.5 Medium',
-      onSettings: () => undefined,
-      onUpload: () => undefined,
-      // Terminal button (MessageComposer renders it from onPaneToggle). In the app,
-      // AgentChatPane passes `handleOpenPtyTab`, i.e. openAux({ type: 'agentPty', agentInstanceId }).
+      // In the app the chip opens the "Agent settings" modal (bridge, provider, model).
+      onSettings: () => showStubToast('Would open Agent settings'),
+      // In the app this opens the native file chooser and uploads; here it queues a fake file.
+      onUpload: () =>
+        setAttachments((prev) => [...prev, { localId: `demo-a${prev.length + 1}-${Date.now()}`, name: `notes-${prev.length + 1}.md` }]),
+      // Terminal button. In the app, AgentChatPane passes `handleOpenPtyTab`, i.e.
+      // openAux({ type: 'agentPty', agentInstanceId }).
       onPaneToggle: () => showStubToast('Would open Terminal tab'),
-      extraActions: (
-        // Tasks button. In the app this maps to AgentChatPane's `openAux({ type: 'tasks' })`
-        // -> `onOpenAuxTab` -> `Workspace.openAuxFromPane`, which opens the chain's Tasks
-        // aux tab (`TASKS_TAB_ID`); `workspace.toggle-aux-tasks` is the toggling variant.
-        // Icon name matches AUX_TAB_ICONS.tasks, the glyph the aux tab strip uses.
-        <button
-          type="button"
-          data-debug-id="composer-demo-tasks-btn"
-          aria-label="Open tickets"
-          onClick={() => showStubToast('Would open Tickets tab')}
-          className="grid h-9 w-9 place-items-center rounded-xl text-muted hover:bg-neutral-soft"
-        >
-          <Icon name="tasks" size={18} />
-        </button>
-      ),
+      // Tasks button. In the app: openAux({ type: 'tasks' }) -> the chain's Tasks aux tab.
+      onOpenTasks: () => showStubToast('Would open Tickets tab'),
     }),
-    [showStubToast],
+    [desktop, showStubToast],
   );
 
   return (
     <div
       data-debug-id="composer-demo-root"
+      data-layout={desktop ? 'desktop' : 'phone'}
       className={
         // `?shell=fixed` mirrors AppShell's mobile shell (`fixed inset-x-0 top-0 app-viewport-height`)
         // so the keyboard behaviour of the real app can be compared with the in-flow default.
@@ -390,13 +450,14 @@ function ComposerDemo() {
       }
     >
       {PRESETS.get('kbd') === '1' ? <KeyboardReadout /> : null}
-      {/* Phone-width column so the demo reads the same on a desktop preview. */}
-      <div className="flex h-full w-full max-w-[440px] flex-col sm:border-x sm:border-subtle">
+      {/* Phone-width column so the demo reads the same on a desktop preview; `?layout=desktop`
+          widens it to the conversation page's max width. */}
+      <div className={`flex h-full w-full flex-col sm:border-x sm:border-subtle ${desktop ? 'max-w-[calc(56rem+3.5rem)]' : 'max-w-[440px]'}`}>
         <div
           data-debug-id="composer-demo-transcript"
           className="relative flex w-full min-h-0 min-w-0 max-w-full flex-1 flex-col overflow-x-hidden p-0"
         >
-          <DemoHeader status={runtimeStatus} onToggleStatus={toggleRuntimeStatus} />
+          <DemoHeader status={runtimeStatus} onToggleStatus={toggleRuntimeStatus} onPreset={applyPreset} />
           {toast ? (
             <div
               role="status"
@@ -417,71 +478,149 @@ function ComposerDemo() {
             wrapperClassName="relative min-h-0 min-w-0 max-w-full flex-1 overflow-hidden overflow-x-hidden"
             scrollClassName="chat-scrollbar h-full min-h-0 max-w-full space-y-3 overflow-y-auto overflow-x-hidden rounded-none bg-canvas px-1 py-3 pt-16"
           />
-          {/* Mirrors the mobile dock in AgentChatPane (REQ-FROST-1/2). */}
+          {/* Mirrors the composer dock in AgentChatPane (REQ-FROST-1/2). */}
           <div
             ref={composerDockRef}
             data-debug-id="composer-demo-composer-dock"
             data-floating="true"
-            className="ui-float-dock absolute inset-x-0 bottom-0 z-20 mx-auto w-full max-w-4xl"
+            className="ui-float-dock absolute inset-x-0 bottom-0 z-20 mx-auto w-full max-w-[calc(56rem+1.5rem)]"
           >
             <div aria-hidden="true" className="ui-frost-tail" />
             <form
               onSubmit={submit}
               data-debug-id="composer-demo-composer-shell"
-              className="w-full max-w-4xl mx-auto px-3 pt-2 ui-float-dock-pad"
+              className={`mx-auto w-full max-w-[calc(56rem+1.5rem)] px-3 pt-2 ${desktop ? 'pb-4' : 'ui-float-dock-pad'}`}
             >
               <div className="mx-auto w-full max-w-4xl">
-                <div
-                  data-debug-id="composer-demo-composer-card"
-                  className="ui-frost-card relative isolate rounded-[26px] border px-3 py-2.5 focus-within:border-accent"
-                >
-                  <div data-debug-id="composer-demo-composer-frost" aria-hidden="true" className="ui-frost-gradient -z-10">
-                    <span />
-                    <span />
-                    <span />
+                {attachments.length > 0 ? (
+                  <div
+                    data-debug-id="composer-demo-attachment-tray"
+                    className="mb-2 space-y-2 rounded-2xl border border-subtle bg-surface-raised p-2 text-xs text-primary"
+                  >
+                    {attachments.map((a) => (
+                      <div
+                        key={a.localId}
+                        data-debug-id={`composer-demo-attachment-${a.localId}`}
+                        className="flex min-w-0 items-center gap-2 rounded-xl border border-subtle bg-surface px-2.5 py-2"
+                      >
+                        <span className="text-success">✓</span>
+                        <span className="min-w-0 flex-1 truncate" title={a.name}>{a.name}</span>
+                        <span className="text-success">Uploaded</span>
+                        <button
+                          type="button"
+                          data-debug-id={`composer-demo-attachment-remove-${a.localId}`}
+                          onClick={() => setAttachments((prev) => prev.filter((item) => item.localId !== a.localId))}
+                          className={`rounded-full border border-subtle text-muted hover:bg-neutral-soft hover:text-primary ${desktop ? 'px-2 py-0.5' : 'min-h-11 px-4'}`}
+                        >
+                          Remove
+                        </button>
+                      </div>
+                    ))}
                   </div>
-                  {/* Two rows like the reference: the input on top with the runtime status at
-                      the top right, the REAL toolbar below (+ upload, terminal, tasks, model
-                      switcher, send). */}
-                  <div className="flex items-start gap-2 pl-1 pt-1">
-                    <div className="min-w-0 flex-1">
-                    <MessageComposerInput
-                      mobile
-                      debugId="composer-demo-composer-input"
-                      ref={textareaRef}
-                      value={draft}
-                      onChange={(e) => setDraft(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
-                          e.preventDefault();
-                          send(draft);
-                        }
-                      }}
-                      // The app's mobile placeholder (AgentChatPane renderComposer).
-                      placeholder="Message the agent…"
-                    />
+                ) : null}
+                <MessageComposerMorphShell
+                  expansion={expansion}
+                  debugPrefix="composer-demo"
+                  debugId="composer-demo-composer-card"
+                  className="ui-frost-card isolate rounded-[28px] border px-5"
+                  leading={
+                    <div data-debug-id="composer-demo-composer-frost" aria-hidden="true" className="ui-frost-gradient -z-10">
+                      <span />
+                      <span />
+                      <span />
                     </div>
-                    {/* Real StatusDot with the canonical runtime tone, as in AgentChatPane's top
-                        bar. Dot only, no text or spinner (user feedback). Tap toggles (demo). */}
-                    <button
-                      type="button"
-                      data-debug-id="composer-demo-runtime-status-btn"
-                      data-status={runtimeStatus}
-                      aria-label={running ? 'Agent running, tap to stop (demo)' : 'Agent stopped, tap to start (demo)'}
-                      title={statusLabel}
-                      onClick={toggleRuntimeStatus}
-                      className="-mr-1.5 -mt-1.5 grid h-9 w-9 shrink-0 place-items-center rounded-full hover:bg-neutral-soft"
+                  }
+                  context={
+                    <div
+                      data-debug-id="composer-demo-composer-context"
+                      className="flex min-w-0 items-center gap-x-2 text-[13px] font-semibold leading-5 text-muted"
                     >
-                      <StatusDot
-                        size="sm"
-                        tone={runtimeStatusToTone(runtimeStatus)}
-                        label={statusLabel}
-                        data-debug-id="composer-demo-status-dot"
-                      />
-                    </button>
-                  </div>
-                  <MessageComposerActions {...composerActions} sendDisabled={!draft.trim()} />
-                </div>
+                      <div className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden">
+                        <button
+                          type="button"
+                          data-debug-id="composer-demo-composer-bridge-chip"
+                          onClick={() => showStubToast('Would open Agent settings')}
+                          className="inline-flex min-w-0 max-w-[50%] shrink items-center gap-1.5 rounded-md hover:text-primary"
+                        >
+                          <Icon name="device" size={16} className="shrink-0" />
+                          <span className="min-w-0 truncate">riverwood</span>
+                        </button>
+                        <span aria-hidden="true" className="shrink-0 text-faint">·</span>
+                        <button
+                          type="button"
+                          data-debug-id="composer-demo-composer-project-chip"
+                          onClick={() => showStubToast('Would open project files')}
+                          className="inline-flex min-w-0 max-w-[50%] shrink items-center gap-1.5 rounded-md hover:text-primary"
+                        >
+                          <Icon name="folder" size={16} className="shrink-0" />
+                          <span className="min-w-0 truncate">heimdall-agent-manager</span>
+                        </button>
+                      </div>
+                      {/* The app's runtime status menu (a portal the composer owns). */}
+                      <div className="ml-auto flex shrink-0">
+                        <Menu
+                          side="top"
+                          align="end"
+                          label="Runtime status"
+                          open={statusMenuOpen}
+                          onOpenChange={setStatusMenuOpen}
+                          trigger={
+                            <button
+                              type="button"
+                              data-debug-id="composer-demo-runtime-status-btn"
+                              data-status={runtimeStatus}
+                              aria-label={running ? 'Agent running. Start or stop the agent' : 'Agent stopped. Start or stop the agent'}
+                              title={`${statusLabel} — start/stop the agent (demo)`}
+                              className={`group grid shrink-0 place-items-center rounded-full ${desktop ? '-my-2 -mr-2 h-9 w-9' : '-my-2.5 -mr-2.5 h-10 w-10'}`}
+                            >
+                              <span data-debug-id="composer-demo-status-dot" className="grid h-6 w-6 place-items-center rounded-full group-hover:bg-neutral-soft">
+                                <MessageComposerStatus
+                                  debugPrefix="composer-demo"
+                                  tone={runtimeStatusToTone(runtimeStatus)}
+                                  label={statusLabel}
+                                />
+                              </span>
+                            </button>
+                          }
+                        >
+                          <Menu.Label>Runtime: {statusLabel}</Menu.Label>
+                          <Menu.Item
+                            data-debug-id="composer-demo-runtime-status-toggle-btn"
+                            onClick={() => { setStatusMenuOpen(false); toggleRuntimeStatus(); }}
+                            className={running ? 'text-danger' : 'text-success'}
+                          >
+                            <Icon name={running ? 'stop' : 'play'} size={15} />
+                            <span>{running ? 'Stop agent (demo)' : 'Start agent (demo)'}</span>
+                          </Menu.Item>
+                        </Menu>
+                      </div>
+                    </div>
+                  }
+                  actions={
+                    <MessageComposerActions
+                      {...composerActions}
+                      sendDisabled={!draft.trim() && attachments.length === 0}
+                      morph={expansion}
+                    />
+                  }
+                >
+                  <MessageComposerInput
+                    mobile={!desktop}
+                    morph
+                    debugId="composer-demo-composer-input"
+                    ref={textareaRef}
+                    value={draft}
+                    onChange={(e) => setDraft(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+                        e.preventDefault();
+                        send(draft);
+                      }
+                    }}
+                    // The app's placeholders (AgentChatPane renderComposer).
+                    placeholder={desktop ? 'Message the agent… (Cmd/Ctrl+Enter to send)' : 'Message the agent…'}
+                  />
+                </MessageComposerMorphShell>
               </div>
             </form>
           </div>

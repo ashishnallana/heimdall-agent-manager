@@ -2,6 +2,7 @@ package main
 
 import os_random "odin_test:lib/os_random"
 import "core:fmt"
+import contracts "odin_test:contracts"
 import "core:net"
 import "core:os"
 import "core:strconv"
@@ -763,6 +764,14 @@ ctl_agent_artifact_call_and_decrypt :: proc(endpoint, token, method, params_json
 	if strings.contains(response, `"ok":false`) do os.exit(1)
 }
 
+// ctl_artifact_content_size_error checks the PLAINTEXT artifact size before sealing:
+// the Hub only sees the armored envelope, so the exact 15 MiB decoded limit
+// (contracts.ARTIFACT_MAX_CONTENT_BYTES) can only be enforced here.
+ctl_artifact_content_size_error :: proc(n: int) -> string {
+	if n <= contracts.ARTIFACT_MAX_CONTENT_BYTES do return ""
+	return fmt.tprintf("artifact content is too large: %d bytes, maximum is %s", n, contracts.ARTIFACT_MAX_CONTENT_LABEL)
+}
+
 ctl_agentmode_artifact_create_params :: proc(args: []string) -> string {
 	name := option_value(args, "--name", "")
 	kind := option_value(args, "--kind", "markdown")
@@ -786,11 +795,29 @@ ctl_agentmode_artifact_create_params :: proc(args: []string) -> string {
 		content_type = HTML_BUNDLE_CONTENT_TYPE
 	} else if file_path := option_value(args, "--file", ""); file_path != "" {
 		data, err := os.read_entire_file(file_path, context.allocator)
-		if err == nil do content_base64 = base64.encode(data)
+		if err != nil {
+			fmt.println(ctl_error_json(fmt.tprintf("cannot read --file %q: %v", file_path, err)))
+			os.exit(1)
+		}
+		if size_err := ctl_artifact_content_size_error(len(data)); size_err != "" {
+			fmt.println(ctl_error_json(size_err))
+			os.exit(1)
+		}
+		content_base64 = base64.encode(data)
 	}
 	if has_flag(args, "--stdin") {
 		data, err := os.read_entire_file("/dev/stdin", context.allocator)
-		if err == nil do content_base64 = base64.encode(data)
+		if err == nil {
+			if size_err := ctl_artifact_content_size_error(len(data)); size_err != "" {
+				fmt.println(ctl_error_json(size_err))
+				os.exit(1)
+			}
+			content_base64 = base64.encode(data)
+		}
+	}
+	if size_err := ctl_artifact_content_size_error(len(content)); content_base64 == "" && size_err != "" && !is_vault_armored(content) {
+		fmt.println(ctl_error_json(size_err))
+		os.exit(1)
 	}
 	desc := option_value(args, "--description", "")
 

@@ -3,6 +3,7 @@ import { applyAgentRuntimeEvent, loadKnownAgents, mapAgent, mergeKnownAndLiveAge
 import { apiErrorText, cookieMutation, cookieJsonFetch, cookieJsonFetchEnvelope, customQueryError } from '../cookieFetch';
 import { announcePaneVaultLocked } from '../../utils/vaultLockedError';
 import { heimdallApi, withSessionQuery } from '../heimdallApi';
+import { readBridgeRows } from './bridgeSupport';
 import { openPaneReplyOutput } from '../../components/shells/ptyWire';
 
 /**
@@ -209,8 +210,7 @@ export const agentsApi = heimdallApi.injectEndpoints({
         try {
           let rows = bridges || [];
           if (!rows.length) {
-            const bridgesData = await cookieJsonFetch('/bridges');
-            rows = (bridgesData?.bridges || bridgesData || []).map((b: any) => ({ bridgeId: b.bridge_id, enabled: true }));
+            rows = (await readBridgeRows()).map((b: any) => ({ bridgeId: b.bridge_id, enabled: true }));
           }
           const payload = {
             bridges: rows.map((b: any) => ({

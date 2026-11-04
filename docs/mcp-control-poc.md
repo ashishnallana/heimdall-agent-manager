@@ -6,7 +6,7 @@ This development-checkout POC exposes exactly four tools over local MCP stdio:
 | --- | --- | --- |
 | `chains.list` | optional `limit` (1–100), `cursor` | Readable owned chains and pagination |
 | `chains.get` | `chain_id` | Chain plus task states and current review verdicts |
-| `chains.create` | `title`, optional `description` | New empty `mixed_work` chain |
+| `chains.create` | `title`, `coordinator_agent_id`, `bridge_id`; optional `description`, `project_id` and provider settings | Draft `mixed_work` chain with fresh coordinator launch; requires instance-control consent |
 | `events.wait` | `chain_id`, optional `timeout_ms` (1–30000) | Live change hint or timeout, plus refreshed chain/task state |
 
 The client acts as the authenticated **user**. It never becomes an agent instance,
@@ -65,7 +65,7 @@ configuration file format. Client UI installation and OAuth polish are deferred.
 3. The first call returns `pairing_pending` with a pairing code. The server also
    prints the code and fingerprint to **stderr**. On the existing Ninjy device,
    use the normal **Add device** flow and approve **Ninjy MCP POC (ephemeral)**.
-4. Retry `chains.list`. Then call `chains.create` with a test title and description,
+4. Retry `chains.list`. Then call `chains.create` with a test title, description, accessible durable coordinator agent ID and online bridge ID (using instance-control consent),
    followed by `chains.get` for the returned `chain_id`.
 5. Call `events.wait` for an existing chain with tasks. Change a task or its review
    through Ninjy while the tool is waiting. It returns a scoped change notice and

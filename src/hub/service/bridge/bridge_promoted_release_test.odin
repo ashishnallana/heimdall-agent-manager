@@ -45,6 +45,14 @@ catalog_test_manifest :: proc(t: ^testing.T) -> string {
 	return path
 }
 
+// catalog_test_resolve refreshes a fresh snapshot from the fake source, then
+// resolves, so a test can change the source between steps and see the result.
+catalog_test_resolve :: proc(cat: ^Bridge_Update_Catalog, bridge: domain.Bridge) -> Bridge_Update_Info {
+	bridge_update_catalog_destroy(cat)
+	_, _ = bridge_catalog_refresh(cat)
+	return resolve_bridge_update_info(cat, bridge)
+}
+
 @(test)
 test_catalog_promoted_beats_manifest_ignores_prerelease_and_draft :: proc(t: ^testing.T) {
 	path := catalog_test_manifest(t)
@@ -56,7 +64,8 @@ test_catalog_promoted_beats_manifest_ignores_prerelease_and_draft :: proc(t: ^te
 	}
 	context.user_ptr = &source
 	cat := Bridge_Update_Catalog{manifest_path = path, release_get = catalog_test_get}
-	info := resolve_bridge_update_info(&cat, {version = "1.0.0", machine_os = "linux", machine_arch = "amd64"})
+	defer bridge_update_catalog_destroy(&cat)
+	info := catalog_test_resolve(&cat, {version = "1.0.0", machine_os = "linux", machine_arch = "amd64"})
 	testing.expect_value(t, info.latest_version, "2.0.0")
 	testing.expect_value(t, info.latest_source, "promoted")
 	testing.expect_value(t, info.latest_commit_sha, "")
@@ -77,20 +86,21 @@ test_catalog_override_pin_warns_and_never_mixes_manifest_artifact :: proc(t: ^te
 	}
 	context.user_ptr = &source
 	cat := Bridge_Update_Catalog{manifest_path = path, release_get = catalog_test_get, override_version = "1.5.0"}
-	info := resolve_bridge_update_info(&cat, {version = "1.0.0"})
+	defer bridge_update_catalog_destroy(&cat)
+	info := catalog_test_resolve(&cat, {version = "1.0.0"})
 	testing.expect_value(t, info.latest_source, "override")
 	testing.expect_value(t, info.latest_version, "1.5.0")
 	testing.expect(t, strings.contains(info.warning, "older than promoted release 2.0.0"))
 	testing.expect(t, strings.contains(info.download_url, "/v1.5.0/"))
 	testing.expect_value(t, info.latest_commit_sha, "")
 	cat.override_download_url, cat.override_sha256 = "/operator-v1.5.tar.gz", "operator-sha"
-	info = resolve_bridge_update_info(&cat, {version = "1.0.0"})
+	info = catalog_test_resolve(&cat, {version = "1.0.0"})
 	testing.expect_value(t, info.download_url, "/operator-v1.5.tar.gz")
 	testing.expect_value(t, info.sha256, "operator-sha")
 	// During an outage a different-version manifest must never fill a pin's URL.
 	source.fail = true
 	cat.override_download_url, cat.override_sha256 = "", ""
-	info = resolve_bridge_update_info(&cat, {version = "1.0.0"})
+	info = catalog_test_resolve(&cat, {version = "1.0.0"})
 	testing.expect_value(t, info.latest_version, "1.5.0")
 	testing.expect(t, !info.artifact_available)
 	testing.expect_value(t, info.download_url, "")
@@ -103,7 +113,8 @@ test_catalog_unreachable_source_falls_back_with_reason :: proc(t: ^testing.T) {
 	source := Catalog_Test_Source{fail = true}
 	context.user_ptr = &source
 	cat := Bridge_Update_Catalog{manifest_path = path, release_get = catalog_test_get}
-	info := resolve_bridge_update_info(&cat, {version = "0.9.0"})
+	defer bridge_update_catalog_destroy(&cat)
+	info := catalog_test_resolve(&cat, {version = "0.9.0"})
 	testing.expect_value(t, info.latest_source, "manifest")
 	testing.expect_value(t, info.latest_version, "1.0.0")
 	testing.expect_value(t, info.download_url, "/manifest-v1.tar.gz")
@@ -111,12 +122,12 @@ test_catalog_unreachable_source_falls_back_with_reason :: proc(t: ^testing.T) {
 	testing.expect(t, info.artifact_available)
 	source.fail = false
 	source.doc = "not JSON"
-	info = resolve_bridge_update_info(&cat, {version = "0.9.0"})
+	info = catalog_test_resolve(&cat, {version = "0.9.0"})
 	testing.expect_value(t, info.latest_source, "manifest")
 	testing.expect(t, strings.contains(info.fallback_reason, "invalid release list"))
 	source.doc = fmt.tprintf("[%s]", catalog_test_release("v2.0.0", "linux-amd64"))
 	source.fail_sums = true
-	info = resolve_bridge_update_info(&cat, {version = "0.9.0"})
+	info = catalog_test_resolve(&cat, {version = "0.9.0"})
 	testing.expect_value(t, info.latest_source, "manifest")
 	testing.expect(t, strings.contains(info.fallback_reason, "cannot fetch SHA256SUMS for v2.0.0: HTTP 503"))
 }
@@ -129,50 +140,155 @@ test_catalog_requires_exact_target_and_unique_sha256sum :: proc(t: ^testing.T) {
 	}
 	context.user_ptr = &source
 	cat := Bridge_Update_Catalog{release_get = catalog_test_get}
-	info := resolve_bridge_update_info(&cat, {machine_os = "termux", machine_arch = "arm64"})
+	defer bridge_update_catalog_destroy(&cat)
+	info := catalog_test_resolve(&cat, {machine_os = "termux", machine_arch = "arm64"})
 	testing.expect_value(t, info.latest_source, "promoted")
 	testing.expect_value(t, info.latest_version, "")
 	testing.expect(t, !info.artifact_available)
-	info = resolve_bridge_update_info(&cat, {version = "1.0.0"})
+	info = catalog_test_resolve(&cat, {version = "1.0.0"})
 	testing.expect(t, info.artifact_available, "binary marker and CRLF accepted")
 	source.sums = fmt.tprintf("%s%s", source.sums, source.sums)
-	info = resolve_bridge_update_info(&cat, {version = "1.0.0"})
+	info = catalog_test_resolve(&cat, {version = "1.0.0"})
 	testing.expect(t, !info.artifact_available, "duplicate checksum fails closed")
 	source.sums = "not-a-hash  heimdall-local-linux-amd64-v2.0.0.tar.gz"
-	info = resolve_bridge_update_info(&cat, {version = "1.0.0"})
+	info = catalog_test_resolve(&cat, {version = "1.0.0"})
 	testing.expect(t, !info.artifact_available, "malformed checksum fails closed")
 	// A newer release with an unlisted bundle cannot displace an older verified one.
 	source.doc = fmt.tprintf("[%s,%s]", catalog_test_release("v3.0.0", "linux-amd64"), catalog_test_release("v2.0.0", "linux-amd64"))
 	source.sums = fmt.tprintf("%s  heimdall-local-linux-amd64-v2.0.0.tar.gz\n", CATALOG_TEST_SHA)
-	info = resolve_bridge_update_info(&cat, {version = "1.0.0"})
+	info = catalog_test_resolve(&cat, {version = "1.0.0"})
 	testing.expect_value(t, info.latest_version, "2.0.0")
 	testing.expect(t, info.artifact_available)
 }
 
 @(test)
-test_catalog_cache_refresh_and_windows_asset :: proc(t: ^testing.T) {
+test_catalog_request_path_reads_snapshot_only :: proc(t: ^testing.T) {
+	path := catalog_test_manifest(t)
+	defer os.remove(path)
 	source := Catalog_Test_Source{
 		doc = fmt.tprintf("[%s]", catalog_test_release("v2.0.0", "windows-amd64")),
-		sums = fmt.tprintf("%s  heimdall-local-windows-amd64-v2.0.0.zip\n", CATALOG_TEST_SHA),
+		pin_doc = catalog_test_release("v1.5.0", "windows-amd64"),
+		sums = fmt.tprintf("%s  heimdall-local-windows-amd64-v2.0.0.zip\n%s  heimdall-local-windows-amd64-v1.5.0.zip\n", CATALOG_TEST_SHA, CATALOG_TEST_SHA),
 	}
 	context.user_ptr = &source
-	cat := Bridge_Update_Catalog{release_get = catalog_test_get, cache_enabled = true}
+	cat := Bridge_Update_Catalog{manifest_path = path, release_get = catalog_test_get}
 	defer bridge_update_catalog_destroy(&cat)
 	br := domain.Bridge{version = "1.0.0", machine_os = "windows", machine_arch = "amd64"}
-	first := resolve_bridge_update_info(&cat, br)
-	testing.expect(t, strings.has_suffix(first.download_url, ".zip"))
-	second := resolve_bridge_update_info(&cat, br)
-	testing.expect_value(t, second.latest_version, "2.0.0")
+	// Before the first refresh: manifest fallback, no fetch, no wait.
+	cold := resolve_bridge_update_info(&cat, {version = "0.9.0"})
+	testing.expect_value(t, source.calls, 0)
+	testing.expect_value(t, cold.latest_source, "manifest")
+	testing.expect_value(t, cold.latest_version, "1.0.0")
+	testing.expect(t, strings.contains(cold.fallback_reason, "not been loaded yet"))
+	reachable, total := bridge_catalog_refresh(&cat)
+	testing.expect_value(t, reachable, 7)
+	testing.expect_value(t, total, 7)
+	// Seven targets share one release list and one SHA256SUMS fetch.
 	testing.expect_value(t, source.calls, 2)
-	// Expiry also caches failures briefly; an outage must fall back, not serve stale promotion metadata.
-	cat.cache[10].at = {}
+	for _ in 0..<5 {
+		info := resolve_bridge_update_info(&cat, br)
+		testing.expect_value(t, info.latest_version, "2.0.0")
+		testing.expect(t, strings.has_suffix(info.download_url, ".zip"))
+		_ = resolve_bridge_update_info(&cat, {version = "1.0.0", machine_os = "termux", machine_arch = "arm64"})
+	}
+	// Unknown targets and an unrefreshed pin are misses, never fetches.
+	unknown := resolve_bridge_update_info(&cat, {version = "1.0.0", machine_os = "plan9", machine_arch = "amd64"})
+	testing.expect(t, strings.contains(unknown.fallback_reason, "plan9-amd64"))
+	cat.override_version = "1.5.0"
+	pinned := resolve_bridge_update_info(&cat, br)
+	testing.expect_value(t, pinned.latest_source, "override")
+	testing.expect(t, !pinned.artifact_available)
+	testing.expect_value(t, source.calls, 2)
+	// The next refresh picks the pin up; serving it still fetches nothing.
+	_, _ = bridge_catalog_refresh(&cat)
+	calls := source.calls
+	pinned = resolve_bridge_update_info(&cat, br)
+	testing.expect_value(t, pinned.latest_version, "1.5.0")
+	testing.expect(t, pinned.artifact_available && strings.contains(pinned.download_url, "/v1.5.0/"))
+	testing.expect_value(t, source.calls, calls)
+}
+
+@(test)
+test_catalog_refresh_updates_and_failure_keeps_last_good :: proc(t: ^testing.T) {
+	source := Catalog_Test_Source{
+		doc = fmt.tprintf("[%s]", catalog_test_release("v2.0.0", "linux-amd64")),
+		sums = fmt.tprintf("%s  heimdall-local-linux-amd64-v2.0.0.tar.gz\n%s  heimdall-local-linux-amd64-v2.1.0.tar.gz\n", CATALOG_TEST_SHA, CATALOG_TEST_SHA),
+	}
+	context.user_ptr = &source
+	cat := Bridge_Update_Catalog{release_get = catalog_test_get}
+	defer bridge_update_catalog_destroy(&cat)
+	_, _ = bridge_catalog_refresh(&cat)
+	testing.expect_value(t, resolve_bridge_update_info(&cat, {version = "1.0.0"}).latest_version, "2.0.0")
+	source.doc = fmt.tprintf("[%s,%s]", catalog_test_release("v2.1.0", "linux-amd64"), catalog_test_release("v2.0.0", "linux-amd64"))
+	_, _ = bridge_catalog_refresh(&cat)
+	testing.expect_value(t, resolve_bridge_update_info(&cat, {version = "1.0.0"}).latest_version, "2.1.0")
+	// An outage, then a bad document: both keep serving the last good promotion.
 	source.fail = true
-	third := resolve_bridge_update_info(&cat, br)
-	testing.expect_value(t, third.latest_source, "manifest")
-	testing.expect_value(t, source.calls, 3)
-	_ = resolve_bridge_update_info(&cat, br)
-	testing.expect_value(t, source.calls, 3)
-	testing.expect_value(t, first.latest_version, "2.0.0")
+	reachable, total := bridge_catalog_refresh(&cat)
+	testing.expect_value(t, reachable, 0)
+	testing.expect_value(t, total, 7)
+	info := resolve_bridge_update_info(&cat, {version = "1.0.0"})
+	testing.expect_value(t, info.latest_version, "2.1.0")
+	testing.expect_value(t, info.latest_source, "promoted")
+	testing.expect_value(t, info.fallback_reason, "")
+	testing.expect(t, info.artifact_available && info.update_available)
+	source.fail = false
+	source.doc = "not JSON"
+	_, _ = bridge_catalog_refresh(&cat)
+	testing.expect_value(t, resolve_bridge_update_info(&cat, {version = "1.0.0"}).latest_version, "2.1.0")
+}
+
+@(test)
+test_catalog_failed_first_refresh_reports_reason_then_recovers :: proc(t: ^testing.T) {
+	source := Catalog_Test_Source{fail = true,
+		doc = fmt.tprintf("[%s]", catalog_test_release("v2.0.0", "linux-amd64")),
+		sums = fmt.tprintf("%s  heimdall-local-linux-amd64-v2.0.0.tar.gz\n", CATALOG_TEST_SHA),
+	}
+	context.user_ptr = &source
+	cat := Bridge_Update_Catalog{release_get = catalog_test_get}
+	defer bridge_update_catalog_destroy(&cat)
+	_, _ = bridge_catalog_refresh(&cat)
+	info := resolve_bridge_update_info(&cat, {version = "1.0.0"})
+	testing.expect_value(t, info.latest_source, "manifest")
+	testing.expect(t, strings.contains(info.fallback_reason, "connection timed out"))
+	source.fail = false
+	_, _ = bridge_catalog_refresh(&cat)
+	info = resolve_bridge_update_info(&cat, {version = "1.0.0"})
+	testing.expect_value(t, info.latest_source, "promoted")
+	testing.expect_value(t, info.latest_version, "2.0.0")
+}
+
+@(test)
+test_catalog_refresher_thread_refreshes_and_stops :: proc(t: ^testing.T) {
+	source := Catalog_Test_Source{
+		doc = fmt.tprintf("[%s]", catalog_test_release("v2.0.0", "linux-amd64")),
+		sums = fmt.tprintf("%s  heimdall-local-linux-amd64-v2.0.0.tar.gz\n", CATALOG_TEST_SHA),
+	}
+	context.user_ptr = &source
+	cat := Bridge_Update_Catalog{release_get = catalog_test_get, refresh_interval = 10 * time.Millisecond}
+	defer bridge_update_catalog_destroy(&cat)
+	bridge_catalog_refresher_start(&cat)
+	loaded := false
+	for _ in 0..<200 {
+		if _, ok := bridge_catalog_release(&cat, "linux-amd64", ""); ok {
+			loaded = true
+			break
+		}
+		time.sleep(10 * time.Millisecond)
+	}
+	testing.expect(t, loaded, "startup refresh fills the snapshot")
+	time.sleep(100 * time.Millisecond)
+	stop_started := time.tick_now()
+	bridge_catalog_refresher_stop(&cat)
+	testing.expect(t, cat.refresher == nil)
+	testing.expect(t, time.tick_since(stop_started) < time.Second, "stop wakes the interval wait")
+	// Read only after join: the fake source is not synchronized.
+	testing.expect(t, source.calls >= 4, "the interval refresh runs again")
+	calls := source.calls
+	time.sleep(50 * time.Millisecond)
+	testing.expect_value(t, source.calls, calls)
+	// The default interval is the documented 30 minutes.
+	testing.expect_value(t, BRIDGE_CATALOG_REFRESH_INTERVAL, 30 * time.Minute)
 }
 
 @(test)
@@ -186,7 +302,8 @@ test_catalog_pin_preserves_matching_manifest_artifact :: proc(t: ^testing.T) {
 	}
 	context.user_ptr = &source
 	cat := Bridge_Update_Catalog{manifest_path = path, release_get = catalog_test_get, override_version = "v1.0.0"}
-	info := resolve_bridge_update_info(&cat, {version = "0.9.0"})
+	defer bridge_update_catalog_destroy(&cat)
+	info := catalog_test_resolve(&cat, {version = "0.9.0"})
 	testing.expect_value(t, info.latest_source, "override")
 	testing.expect_value(t, info.latest_version, "v1.0.0")
 	testing.expect_value(t, info.latest_commit_sha, "manifest-commit")
@@ -194,7 +311,9 @@ test_catalog_pin_preserves_matching_manifest_artifact :: proc(t: ^testing.T) {
 	testing.expect_value(t, info.sha256, "manifest-sha")
 	testing.expect(t, info.artifact_available && info.update_available)
 	testing.expect(t, strings.contains(info.warning, "older than promoted release 2.0.0"))
-	testing.expect(t, source.calls == 2, "matching manifest pin does not require a tag lookup")
+	calls := source.calls
+	_ = resolve_bridge_update_info(&cat, {version = "0.9.0"})
+	testing.expect_value(t, source.calls, calls)
 }
 
 @(test)
@@ -207,12 +326,13 @@ test_catalog_pin_lookup_failure_explained_alongside_age_warning :: proc(t: ^test
 	}
 	context.user_ptr = &source
 	cat := Bridge_Update_Catalog{release_get = catalog_test_get, override_version = "1.5.0"}
-	info := resolve_bridge_update_info(&cat, {})
+	defer bridge_update_catalog_destroy(&cat)
+	info := catalog_test_resolve(&cat, {})
 	testing.expect(t, !info.artifact_available)
 	testing.expect(t, strings.contains(info.fallback_reason, "HTTP 404"))
 	testing.expect(t, strings.contains(info.warning, "older than promoted"))
 	source.fail_pin = false
-	info = resolve_bridge_update_info(&cat, {})
+	info = catalog_test_resolve(&cat, {})
 	testing.expect(t, !info.artifact_available)
 	testing.expect(t, strings.contains(info.warning, "Pinned release 1.5.0 has no verified artifact for linux-amd64"))
 	testing.expect(t, strings.contains(info.warning, "older than promoted"))
@@ -227,12 +347,13 @@ test_catalog_explicit_prerelease_pin_requires_verified_artifact :: proc(t: ^test
 	}
 	context.user_ptr = &source
 	cat := Bridge_Update_Catalog{release_get = catalog_test_get, override_version = "1.5.0"}
-	info := resolve_bridge_update_info(&cat, {})
+	defer bridge_update_catalog_destroy(&cat)
+	info := catalog_test_resolve(&cat, {})
 	testing.expect(t, info.artifact_available)
 	testing.expect_value(t, info.latest_source, "override")
 	testing.expect(t, strings.contains(info.download_url, "/v1.5.0/"))
 	source.pin_doc = catalog_test_release("v1.5.0", "linux-amd64", draft = true)
-	info = resolve_bridge_update_info(&cat, {})
+	info = catalog_test_resolve(&cat, {})
 	testing.expect(t, !info.artifact_available, "explicit pins still reject drafts")
 }
 
@@ -247,7 +368,8 @@ test_catalog_matching_manifest_pin_fetches_missing_target :: proc(t: ^testing.T)
 	}
 	context.user_ptr = &source
 	cat := Bridge_Update_Catalog{manifest_path = path, release_get = catalog_test_get, override_version = "v1.0.0"}
-	info := resolve_bridge_update_info(&cat, {version = "0.9.0", machine_os = "linux", machine_arch = "arm64"})
+	defer bridge_update_catalog_destroy(&cat)
+	info := catalog_test_resolve(&cat, {version = "0.9.0", machine_os = "linux", machine_arch = "arm64"})
 	testing.expect_value(t, info.latest_source, "override")
 	testing.expect_value(t, info.latest_version, "v1.0.0")
 	testing.expect_value(t, info.target, "linux-arm64")
