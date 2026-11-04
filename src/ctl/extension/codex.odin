@@ -16,7 +16,8 @@ CODEX_EXT_VERSION :: "0.1.0"
 // Native view_image PostToolUse includes a base64 image, often several MiB.
 // Match the bounded CLI stdin reader; output remains capped independently below.
 CODEX_HOOK_INPUT_MAX :: HOOK_INPUT_MAX
-CODEX_CAPABILITIES :: [?]string{"activity", "subagents", "permissions", "file_edits", "session_id"}
+// "usage" = this provider emits usage.context_tokens (ham.ext.v1).
+CODEX_CAPABILITIES :: [?]string{"activity", "subagents", "permissions", "file_edits", "session_id", "usage"}
 
 Codex_Error :: enum { None, Too_Large, Malformed_Json }
 Codex_Mapped :: struct {
@@ -35,6 +36,8 @@ codex_map_hook :: proc(raw, ts: string, permission_timeout_ms := 0, permission_b
 	p := pb_make()
 	pb_str_nonempty(&p, "turn_id", json_get_string(root, "turn_id"))
 	tool_input, tool_response: json.Value
+	has_metrics, has_usage := false, false
+	metrics: Tool_Metrics
 	switch name {
 	case "SessionStart":
 		hello := pb_make()
@@ -65,6 +68,7 @@ codex_map_hook :: proc(raw, ts: string, permission_timeout_ms := 0, permission_b
 		event = "activity"
 		pb_str(&p, "state", "idle")
 		pb_str(&p, "reason", "interrupt" if name == "Interrupt" else "stop")
+		has_usage = true
 		// No background_running:0: a main turn ending does not end its children.
 	case "SubagentStart", "SubagentStop":
 		if json_get_string(root, "agent_id") == "" do return out, .Malformed_Json
@@ -75,6 +79,9 @@ codex_map_hook :: proc(raw, ts: string, permission_timeout_ms := 0, permission_b
 		// Never forward prompts or encrypted child instructions.
 		tool_input = json_clip(root["tool_input"], 4096, {"message", "prompt"})
 		if name == "PostToolUse" {
+			// Native sizes, before clipping and before the image is dropped.
+			metrics = tool_metrics(root["tool_input"], root["tool_response"])
+			has_metrics, has_usage = true, true
 			// Image bytes are not activity metadata. Do not clone, clip, or forward
 			// the native data URL; the paired tool identity is sufficient.
 			if json_get_string(root, "tool_name") != "view_image" {
@@ -92,8 +99,11 @@ codex_map_hook :: proc(raw, ts: string, permission_timeout_ms := 0, permission_b
 		if permission_timeout_ms > 0 do pb_int(&p, "timeout_ms", permission_timeout_ms)
 		pb_str_nonempty(&p, "blocker_id", permission_blocker_id)
 		pb_str_nonempty(&p, "permission_mode", json_get_string(root, "permission_mode"))
+	case "PreCompact", "PostCompact":
+		// No activity transition; the bridge resets context accounting on it.
+		append(&out.events, ext_compaction_event(ts, root, CODEX_PROVIDER, CODEX_EXT_VERSION, "pre" if name == "PreCompact" else "post"))
+		return out, .None
 	case:
-		// Compact callbacks do not imply an activity transition.
 		return out, .None
 	}
 	eb := ext_event_begin(event, ts, root, CODEX_PROVIDER, CODEX_EXT_VERSION)
@@ -101,6 +111,8 @@ codex_map_hook :: proc(raw, ts: string, permission_timeout_ms := 0, permission_b
 		// Identity must survive even when no input/response metadata is retained.
 		ext_event_tool(&eb, root, tool_input, tool_response)
 	}
+	if has_metrics do ext_event_metrics(&eb, metrics)
+	ext_event_finish_usage(&eb, CODEX_PROVIDER, root, has_usage)
 	append(&out.events, ext_event_end(&eb, pb_done(&p)))
 	if name == "PostToolUse" && json_get_string(root, "tool_name") == "apply_patch" {
 		for edit in codex_patch_events(root, ts) do append(&out.events, edit)

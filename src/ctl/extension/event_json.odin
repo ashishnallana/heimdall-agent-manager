@@ -130,3 +130,16 @@ event_params :: proc(events: []string) -> string {
 	strings.write_string(&b, "]}")
 	return strings.to_string(b)
 }
+
+// ext_compaction_event builds compaction {phase, trigger?, model?} from a
+// provider's PreCompact / PostCompact hook. phase is "pre" or "post". Free-form
+// fields such as Claude's custom_instructions are user prompt text and are
+// never forwarded.
+ext_compaction_event :: proc(ts: string, root: json.Object, provider, version, phase: string) -> string {
+	p := pb_make()
+	pb_str(&p, "phase", phase)
+	pb_str_nonempty(&p, "trigger", json_get_string(root, "trigger"))
+	pb_str_nonempty(&p, "model", json_get_string(root, "model"))
+	eb := ext_event_begin(contracts.ext_event_kind_name(.Compaction), ts, root, provider, version)
+	return ext_event_end(&eb, pb_done(&p))
+}

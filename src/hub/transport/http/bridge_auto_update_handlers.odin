@@ -1,5 +1,6 @@
 package http
 
+import "base:runtime"
 import "core:encoding/json"
 import "core:fmt"
 import "core:strings"
@@ -48,7 +49,7 @@ bridge_auto_update_config_handler :: proc(ctx: rawptr, req: Request) -> Response
 	command, _ := json.marshal(struct {type, command_id: string, write, enabled: bool}{"auto_update_config", command_id, write, enabled}, allocator = context.temp_allocator)
 	reply, received, relay_err := bridge_runtime_service.send_runtime_command_wait(h.bridge_runtime_registry, project_service.Runtime_Command{bridge_id = id, command_id = command_id, body_json = string(command)}, 10000)
 	if !received do return respond_error(relay_err, req.request_id)
-	defer delete(reply)
+	defer delete(reply, runtime.default_allocator()) // the runtime registry allocates command results there
 	result: struct {type, command_id: string, ok, enabled: bool}
 	if json.unmarshal_string(reply, &result, allocator = context.temp_allocator) != nil || result.command_id != command_id || result.type != "auto_update_config_result" || !result.ok do return respond_error(domain.domain_error(.Internal_Error, "bridge could not read or save automatic update settings"), req.request_id)
 	return respond_success(reply, req.request_id, auth_ctx_server_time(req))

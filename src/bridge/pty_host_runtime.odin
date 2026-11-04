@@ -223,6 +223,9 @@ bridge_pty_host_ensure_daemon :: proc() -> (string, bool) {
 		pty_host_daemon_socket = pty_host_socket_path()
 	}
 	socket := pty_host_daemon_socket
+	// Under ODIN_TEST never ping, retire or spawn a daemon at a path outside the
+	// test scratch root (a live bridge's socket); see pty_host_test_socket_allowed.
+	if !pty_host_test_socket_allowed(socket) do return "", false
 	breaker_key := strings.concatenate({"pty-host:", socket})
 	defer delete(breaker_key)
 	if !bridge_dependency_breaker_allow(breaker_key) do return "", false

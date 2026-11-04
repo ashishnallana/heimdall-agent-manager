@@ -757,6 +757,8 @@ bridge_hub_runtime_loop :: proc(conn: ^ws.Connection) {
 		// Flush any status transitions applied on background threads (e.g. a
 		// pty-host ChildExited) so "stopped"/"unreachable" reaches the hub now,
 		// not on the next heartbeat.
+		// Token snapshots held back by the 10 s interval go out once it passes.
+		_ = bridge_ext_token_enqueue_due(bridge_runtime_now_ms())
 		bridge_runtime_drain_status_pushes(conn)
 		bridge_blockers_drain_outgoing(conn)
 		bridge_credential_reauth_drain(conn)
@@ -971,6 +973,10 @@ bridge_hub_handle_command :: proc(conn: ^ws.Connection, text: string) {
 		bridge_task_chain_search_handle_command(conn, text)
 		return
 	}
+	if type == "context_window_op" {
+		bridge_hub_handle_context_window_op(conn, text)
+		return
+	}
 	if type == "mcp_transform" {bridge_mcp_transform(conn,text);return}
 	if type == "set_telemetry" {
 		command_id := extract_json_string(text, "command_id", "")
@@ -1061,6 +1067,8 @@ bridge_hub_handle_command :: proc(conn: ^ws.Connection, text: string) {
 		defer delete(instance_id)
 		ok, restored := bridge_runtime_stop_or_restore(instance_id, extract_json_bool(text, "force", false))
 		defer delete(restored)
+		// The run's final token usage rides on the status report below (T3r).
+		if ok do _ = bridge_ext_token_capture_final(instance_id, bridge_agent_instance_run_count(instance_id))
 		st_json := bridge_instance_status_json(instance_id)
 		defer delete(st_json)
 		_ = bridge_hub_send(conn, st_json)
@@ -1083,7 +1091,9 @@ bridge_hub_handle_command :: proc(conn: ^ws.Connection, text: string) {
 		sender_id := extract_json_string(text, "sender_agent_instance_id", sender_user)
 		defer delete(sender_id)
 		sender := sender_dn if sender_dn != "" else sender_id
-		ok := bridge_pty_host_deliver_to_agent(instance_id, "message", sender, "", "")
+		// T6: during a context rollover the notice (which presses ESC) would
+		// interrupt the handoff; it is queued and delivered after the restart.
+		ok := bridge_rollover_queue_notice(instance_id, sender) || bridge_pty_host_deliver_to_agent(instance_id, "message", sender, "", "")
 		if !ok do fmt.println("bridge notification pending/no-agent-subscription", instance_id, command_id)
 		if command_id != "" {
 			res := bridge_command_result_json(command_id, "succeeded" if ok else "accepted", "")
@@ -2266,7 +2276,9 @@ bridge_hub_handle_pane_capture_command :: proc(conn: ^ws.Connection, text: strin
 //   {"type":"wake_agent","chain_id":"..","payload":{"run":[{"agent_instance_id":"..",
 //    "task_id":"..","role":".."}],"stop":["..",..]}}
 // run[] names the non-coordinator agents that SHOULD be running for the chain right
-// now — started fresh (full bootstrap) when we hold no launch record, or restarted
+// now — nudged to run `lease next` when the entry says deliver="nudge" and the
+// child of that generation is confirmed live (T8), started fresh (full bootstrap)
+// when we hold no launch record, or restarted
 // (process re-fork from the saved spec, reusing run_dir + token) when a record
 // exists but the process is not registered with the daemon; an already-running agent
 // is left alone. stop[] names the instances whose task is no longer actionable and
@@ -2327,6 +2339,17 @@ bridge_hub_handle_wake_agent :: proc(conn: ^ws.Connection, text: string) {
 			pack_json, _ := bridge_provider_json_extract_object(entry, "pack")
 			defer delete(pack_json)
 
+			// T8: a lease for an instance that is already running is delivered as
+			// a nudge (keep the process; refresh TASK.md; "run lease next"). When
+			// the child is not confirmed live, fall through to the launch paths.
+			deliver := extract_json_string(entry, "deliver", "")
+			defer delete(deliver)
+			if deliver == "nudge" && bridge_wake_nudge_live_child(instance_id, task_id, role, lease_id, run_count, pack_json) {
+				bridge_runtime_set_launch_role(instance_id, role)
+				fmt.println("bridge wake_agent: nudged live instance", instance_id, "to run lease next")
+				continue
+			}
+
 			if _, has := bridge_runtime_get_launch(instance_id); has {
 				// A launch record exists, but restart via the pty-host's remembered
 				// spec would reuse the ORIGINAL run_dir contents — including a stale
@@ -2377,12 +2400,62 @@ bridge_hub_handle_wake_agent :: proc(conn: ^ws.Connection, text: string) {
 			if strings.trim_space(id) == "" do continue
 			if coordinator_ids[id] do continue
 			if launch, has := bridge_runtime_get_launch(id); has && launch.role == "coordinator" do continue
-			bridge_runtime_stop_agent(id)
+			if bridge_runtime_stop_agent(id) do _ = bridge_ext_token_capture_final(id, bridge_agent_instance_run_count(id))
 			fmt.println("bridge wake_agent: stopped instance", id)
 		}
 	}
 
 	if command_id != "" do _ = bridge_hub_send(conn, bridge_command_result_json(command_id, "succeeded", ""))
+}
+
+// bridge_wake_nudge_live_child delivers a wake run[] entry to a child that is
+// already running (T8: an agent is not re-bootstrapped per attempt or review
+// round). It requires a launch record, no stop intent, and a live child of
+// exactly this generation (`run_count`, confirmed with the PTY host). Then it
+// rewrites <run_dir>/TASK.md from the pack and types one line telling the agent
+// to run `ham-ctl lease next`. Returns false — the caller then launches — when
+// any precondition fails. A failed keystroke delivery still returns true: the
+// child is live, so a launch would no-op; the hub re-sends an unconfirmed
+// wake once and then parks the task (grant_unconfirmed).
+bridge_wake_nudge_live_child :: proc(instance_id, task_id, role, lease_id: string, run_count: int, pack_json: string) -> bool {
+	if run_count <= 0 || strings.trim_space(instance_id) == "" do return false
+	launch, has := bridge_runtime_get_launch(instance_id)
+	if !has do return false
+	sync.mutex_lock(&bridge_runtime_mutex)
+	stopped := bridge_runtime_stop_intent_active_locked(instance_id, bridge_runtime_now_ms())
+	sync.mutex_unlock(&bridge_runtime_mutex)
+	if stopped do return false
+	socket, daemon_ok := bridge_pty_host_ensure_daemon()
+	if !daemon_ok do return false
+	confirmed, _ := bridge_startup_confirm_spawned(socket, instance_id, run_count)
+	if !confirmed do return false
+	if strings.has_prefix(strings.trim_space(pack_json), "{") {
+		bridge_taskv2_ensure_pack_worktree(pack_json)
+		run_dir := launch.run_dir
+		default_dir := ""
+		if strings.trim_space(run_dir) == "" {
+			default_dir = bridge_runtime_default_run_dir(instance_id)
+			run_dir = default_dir
+		}
+		defer if default_dir != "" do delete(default_dir)
+		if !bridge_taskv2_materialize_task_md(run_dir, pack_json) {
+			fmt.eprintln("bridge wake_agent: could not refresh TASK.md for nudged instance", instance_id, "(lease next rewrites it)")
+		}
+	}
+	line := bridge_wake_nudge_line(lease_id, task_id, role)
+	defer delete(line)
+	if !bridge_pty_host_deliver_line(socket, instance_id, line) {
+		fmt.eprintln("bridge wake_agent: nudge delivery failed for live instance", instance_id)
+	}
+	bridge_task_wake_note_launched(instance_id)
+	return true
+}
+
+// bridge_wake_nudge_line is the one line typed into a live agent that was
+// granted a lease. Pure; caller owns the result.
+bridge_wake_nudge_line :: proc(lease_id, task_id, role: string) -> string {
+	what := "review" if role == "reviewer" else "work"
+	return fmt.aprintf("[taskv2] New %s lease %s on task %s: run `ham-ctl lease next`, then read TASK.md and follow it.", what, lease_id, task_id)
 }
 
 // bridge_wake_report_failed_status sends a woken instance's failed status, with its
@@ -2514,6 +2587,10 @@ bridge_runtime_launch_agent :: proc(command_id, command_json: string, deadline_n
 	}
 	// A genuine (re)launch supersedes any prior stop intent for this instance id.
 	bridge_runtime_clear_stop_intent(instance_id)
+	// A hub restart arrives as a launch with a newer run_count (no stop_agent):
+	// freeze the previous run's token usage as its final and start the new run
+	// from zero (T3r). The local token record still carries the old generation.
+	_ = bridge_ext_token_capture_final(instance_id, bridge_agent_instance_run_count(instance_id), reset_live = true, now = bridge_runtime_now_ms())
 	// Agents always run in their own managed run dir (never the project path).
 	// The project path/description is provided to the agent via AGENTS.md instead,
 	// so the agent decides when/how to work against the project checkout.
@@ -2561,6 +2638,8 @@ bridge_runtime_launch_agent :: proc(command_id, command_json: string, deadline_n
 	defer delete(permission_mode)
 	provider_profile := extract_json_string(command_json, "provider_profile", "")
 	defer delete(provider_profile)
+	// T6: the chain coordinator is alerted when a context rollover stalls.
+	bridge_rollover_note_launch(instance_id, descriptor.coordinator_id)
 	return bridge_runtime_launch_agent_pty_host(command_id, instance_id, run_dir, endpoint, provider, model, agent_issue.plaintext_token, descriptor.display_name, 0, descriptor.project_path, permission_mode, provider_profile)
 }
 
@@ -2602,6 +2681,9 @@ bridge_runtime_launch_provider_test :: proc(command_id, command_json: string) ->
 // registered) the agent under the daemon PTY. Retry/backoff on spawn preserves
 // AC-5 launch resilience.
 bridge_runtime_launch_agent_pty_host :: proc(command_id, instance_id, run_dir, endpoint, provider, model, agent_token, display_name: string, timeout_seconds: u64, project_path: string = "", permission_mode: string = "", provider_profile: string = "") -> (ok: bool, detail: string, err: Bridge_Error) {
+	// T2b: the context window is resolved per launch from provider + model
+	// (override > shipped config > default); never detected from the provider.
+	bridge_ext_note_launch(instance_id, provider, model, provider_profile)
 	// REQ-PROF-4: an unknown or disabled profile fails the launch; it never falls
 	// back to the default profile, which could run under the wrong account.
 	pp, pp_err := profile_lookup(provider, provider_profile)
@@ -2943,7 +3025,12 @@ bridge_runtime_note_agent_activity :: proc(instance_id, activity_status, activit
 	if source == "" do source = "agent_extension"
 	// Screen detection drives the terminal_prompt blocker fallback (REQ-EXT-BLK-5).
 	if source == "pane_diff" do bridge_blockers_note_pane_activity(instance_id, activity_status)
-	bridge_runtime_note_activity_signal(instance_id, bridge_runtime_normalize_activity_status(activity_status), source)
+	// T6: idle is withheld (reported active) while a context rollover is in
+	// progress, so the hub's idle grace cannot expire the lease mid-handoff.
+	// Advance the rollover first so an idle that starts one is already withheld.
+	bridge_rollover_on_activity(instance_id, activity_status, source, bridge_runtime_now_ms())
+	activity := bridge_rollover_filter_activity(instance_id, bridge_runtime_normalize_activity_status(activity_status), source)
+	bridge_runtime_note_activity_signal(instance_id, activity, source)
 }
 
 bridge_runtime_note_activity_signal :: proc(instance_id, activity_status, activity_source: string) {
@@ -3277,6 +3364,10 @@ bridge_instance_status_json :: proc(instance_id: string) -> string {
 	bridge_runtime_write_json_string(&b, inst.activity_source)
 	strings.write_string(&b, "\"")
 	bridge_runtime_write_instance_error(&b, inst)
+	// Optional small snapshot (extension_token_usage.odin); hubs that predate it
+	// ignore the unknown members. Every caller sends the frame it builds, so a
+	// pending token change piggybacks here instead of costing its own frame.
+	bridge_ext_token_usage_field(&b, inst.agent_instance_id, bridge_agent_instance_run_count(inst.agent_instance_id), bridge_runtime_now_ms())
 	strings.write_string(&b, "}")
 	return strings.to_string(b)
 }

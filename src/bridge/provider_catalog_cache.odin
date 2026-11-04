@@ -6,6 +6,7 @@ import "core:fmt"
 import "core:os"
 import "core:strings"
 import "core:sync"
+import "core:thread"
 import cfg_lib "odin_test:lib/config"
 import ws "odin_test:lib/ws"
 
@@ -159,8 +160,39 @@ bridge_provider_catalog_apply :: proc(etag, catalog_json: string) -> bool {
 	snapshot, ok := bridge_provider_catalog_build_snapshot(etag, catalog_json)
 	if !ok do return false
 	if !bridge_provider_catalog_save(etag, catalog_json) do return false
-	bridge_provider_catalog_publish(snapshot)
+	bridge_provider_catalog_publish_and_probe(snapshot)
 	return true
+}
+
+bridge_provider_catalog_publish_and_probe :: proc(snapshot: ^Bridge_Provider_Catalog_Snapshot) {
+	had_providers := bridge_provider_catalog_provider_count() > 0
+	bridge_provider_catalog_publish(snapshot)
+	// A fresh bridge starts with no catalog, so startup probing finds nothing
+	// ("catalog=0 present=0"). The first sync that brings providers in must probe
+	// them, or the bridge only sees installed CLIs after a restart.
+	if !had_providers && snapshot != nil && len(snapshot.providers) > 0 do bridge_provider_reprobe_hook()
+}
+
+bridge_provider_catalog_provider_count :: proc() -> int {
+	bridge_provider_catalog_init()
+	sync.rw_mutex_shared_lock(&bridge_provider_catalog_mutex)
+	defer sync.rw_mutex_shared_unlock(&bridge_provider_catalog_mutex)
+	if bridge_provider_catalog_snapshot == nil do return 0
+	return len(bridge_provider_catalog_snapshot.providers)
+}
+
+// Test seam: replaced by a counter in tests so no thread or real PATH probe runs.
+bridge_provider_reprobe_hook: proc() = bridge_provider_reprobe_async
+
+bridge_provider_reprobe_async :: proc() {
+	// Tests that apply catalogs must not probe the host PATH or write the real store.
+	when ODIN_TEST do return
+	thread.run(proc() {
+		results := bridge_provider_discover(nil)
+		for &result in results do bridge_provider_path_destroy(&result)
+		delete(results)
+		free_all(context.temp_allocator)
+	})
 }
 
 bridge_provider_catalog_init :: proc() {
@@ -208,6 +240,20 @@ bridge_provider_catalog_profile :: proc(name: string) -> (Bridge_Provider_Profil
 		return bridge_provider_profile_from_catalog(provider), true
 	}
 	return {}, false
+}
+
+// The catalog's executable name for an active provider; the string is cloned.
+bridge_provider_catalog_binary :: proc(name: string, allocator := context.temp_allocator) -> (string, bool) {
+	if strings.trim_space(name) == "" do return "", false
+	bridge_provider_catalog_init()
+	sync.rw_mutex_shared_lock(&bridge_provider_catalog_mutex)
+	defer sync.rw_mutex_shared_unlock(&bridge_provider_catalog_mutex)
+	if bridge_provider_catalog_snapshot == nil do return "", false
+	for provider in bridge_provider_catalog_snapshot.providers {
+		if provider.provider != name || provider.state != "active" || provider.binary == "" do continue
+		return strings.clone(provider.binary, allocator), true
+	}
+	return "", false
 }
 
 // Projects one catalog entry onto the launch profile. The result aliases the

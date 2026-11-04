@@ -46,6 +46,11 @@ bridge_provider_discovery_current: ^Bridge_Provider_Discovery_Group
 bridge_provider_discovery_scan_count: u64
 // Deterministic test seam; production leaves this at zero.
 bridge_provider_discovery_test_delay: time.Duration
+// Test seam: scans started for exactly this key are counted separately, so a test
+// can assert coalescing without picking up scans that unrelated, concurrently running
+// tests start. Production leaves the key empty and never counts.
+bridge_provider_discovery_test_key: string
+bridge_provider_discovery_test_key_scans: u64
 
 bridge_provider_paths_path :: proc() -> string {
 	data_dir := strings.trim_space(bridge_config.data_dir)
@@ -342,6 +347,7 @@ bridge_provider_discover :: proc(filter: []string, profile_id: string = "") -> [
 			group.results = make([dynamic]Bridge_Provider_Path, alloc)
 			bridge_provider_discovery_current = group
 			bridge_provider_discovery_scan_count += 1
+			if bridge_provider_discovery_test_key != "" && group.key == bridge_provider_discovery_test_key do bridge_provider_discovery_test_key_scans += 1
 			sync.mutex_unlock(&bridge_provider_discovery_mutex)
 
 			results := bridge_provider_discover_execute_profile(filter,profile_id)

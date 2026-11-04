@@ -309,6 +309,8 @@ ctl_v2_task_chain :: proc(endpoint, token: string, tokens, args: []string) {
 		ctl_task_chains_command(tokens, args)
 	case "fleet", "fleets":
 		ctl_v2_task_chain_fleet(endpoint, token, tokens[1:], args)
+	case "token-usage", "usage":
+		ctl_task_chain_token_usage(Ctl_Transport{kind = .Agent, agent_endpoint = endpoint, agent_token = token}, tokens[1:], args)
 	case "summary", "set-summary":
 		ctl_v2_task_chain_summary(endpoint, token, tokens[1:], args)
 	case "propose":
@@ -1926,7 +1928,7 @@ print_help_agents :: proc() {
 	fmt.println("  template list                       List agent templates (personas).")
 	fmt.println("  template create --name <n>          Create a template.")
 	fmt.println("      [--description <d>] [--persona <t>] [--instructions <t>]")
-	fmt.println("  instance list [--agent <id>] [--live]   List instances (durable, or --live).")
+	fmt.println("  instance list [--agent <id>] [--live]   List instances (durable, with token_usage/token_totals when known; or --live).")
 	fmt.println("  new-instance <agent-id>             Launch a NEW instance of a durable agent.")
 	fmt.println("      [--project <id>] [--bridge <id>] [--provider <p>] [--model <t>] [--chain <id>]")
 	fmt.println("  start   <agent-instance-id>          Start a STOPPED instance (409 if already running).")
@@ -1968,6 +1970,7 @@ print_help_task_chain :: proc() {
 	fmt.println("                                      chain is scheduled.")
 	fmt.println("  directory <add|update|remove|list>  Manage task chain relevant directories.")
 	fmt.println("  fleet <list|set|pause|resume>       Manage chain fleet capacities, roles, placement, and dispatch pause.")
+	fmt.println("  token-usage [<chain-id>]            Per-agent (and per-instance) + chain total token usage, JSON.")
 	fmt.println("")
 	fmt.println("MIXED-WORK GRAPH (every chain is mixed_work: tickets and workflow runs share one graph)")
 	fmt.println("  Refs are typed: task:<task-id> (an ordinary ticket) or workflow_run:<run-id> (a whole run;")

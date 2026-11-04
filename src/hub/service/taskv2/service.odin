@@ -1023,5 +1023,9 @@ after_chain_change :: proc(svc: ^Service, u: ^Uow, chain_id: domain.Task_Chain_I
 	mok, merr := match_chain_in_uow(svc, u, chain, trigger)
 	dbt.phase_record(&phases, .Match, mark)
 	when FOLD_VERIFY { if mok do fold_verify_full_refold_is_noop(svc, chain_id, owner) }
-	return mok, merr
+	if !mok do return false, merr
+	// After the matcher (a re-granted instance holds a lease): stop instances
+	// whose tasks are all done or cancelled (T8: stop on completion only).
+	stop_finished_instances_in_uow(svc, u, chain)
+	return true, domain.Domain_Error{}
 }

@@ -42,6 +42,7 @@ import {
   type Tone,
 } from '@ui';
 import AgentRow from './AgentRow';
+import { ContextUsageBadge } from '../extension/TokenUsage';
 import {
   AgentDetailActions,
   AgentDetailBody,
@@ -728,6 +729,7 @@ export default function AgentListPage({ selectedId = '' }: { selectedId?: string
                         <StatusPill tone={rTone} data-debug-id={`live-instance-status-${instId}`}>
                           {status}
                         </StatusPill>
+                        <ContextUsageBadge instance={inst} instanceId={instId} />
                       </div>
                       <div className="flex shrink-0 items-center gap-1.5" onClick={(e) => e.stopPropagation()}>
                         <Button

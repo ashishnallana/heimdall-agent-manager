@@ -276,6 +276,9 @@ bridge_command_spec :: proc(command_type: string) -> (Bridge_Command_Spec, bool)
 	// REQ-PROF-3: sealed provider profile edit/read from the user's browser.
 	case "provider_profile_op":
 		return Bridge_Command_Spec{class = .Interactive, priority = .Interactive, key_kind = .Bridge, queued = true, requires_id = true, timeout_ms = 10_000, cost_units = 2}, true
+	// T2b: list/set/clear bridge-persisted context-window overrides (small JSON file).
+	case "context_window_op":
+		return Bridge_Command_Spec{class = .Interactive, priority = .Interactive, key_kind = .Bridge, queued = true, requires_id = true, timeout_ms = 5000, cost_units = 2}, true
 	case "task_chain_search":
 		return Bridge_Command_Spec{class = .Interactive, priority = .Interactive, key_kind = .Bridge, queued = true, requires_id = true, timeout_ms = 5000, cost_units = 2, retry_safe = true}, true
 	case "mcp_transform":
@@ -360,6 +363,7 @@ bridge_command_ordering_key :: proc(command_type, text: string) -> string {
 	case "bridge_update", "bridge_uninstall": return strings.clone("bridge-update")
 	case "bridge_unseal", "set_telemetry", "auto_update_config": return strings.clone("bridge-control")
 	case "provider_profile_op": return strings.clone("provider-profiles")
+	case "context_window_op": return strings.clone("context-windows")
 	case "fs_make_dir", "fs_create_file", "fs_write_file", "fs_batch_write", "fs_move", "fs_delete":
 		// Batch operations can touch several paths. A single filesystem mutation key
 		// is conservative but correct until canonical roots are part of the contract.

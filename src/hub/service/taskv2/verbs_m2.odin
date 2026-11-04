@@ -155,7 +155,9 @@ lease_handoff :: proc(svc: ^Service, auth: contracts.Auth_Context, input: Handof
 	p := json_begin()
 	json_str(&p, "lease_id", c.lease.lease_id)
 	json_int(&p, "attempt_no", i64(c.lease.attempt_no))
-	task, rok, rerr := release_in_uow(svc, &u, c.lease, Actor{kind = ACTOR_AGENT, id = c.inst.agent_instance_id}, EV_HANDOFF, json_end(&p), "handoff")
+	// The agent asked for a fresh context window: the only voluntary release
+	// that stops the holder.
+	task, rok, rerr := release_in_uow(svc, &u, c.lease, Actor{kind = ACTOR_AGENT, id = c.inst.agent_instance_id}, EV_HANDOFF, json_end(&p), "handoff", stop_holder = true)
 	if rok do rok, rerr = after_chain_change(svc, &u, c.task.chain_id, c.task.owner_user_id, .Lease_Released)
 	_, cerr := end_uow(svc, &u, rok)
 	if !rok do return {}, false, rerr
@@ -192,8 +194,9 @@ review_checkpoint_handoff :: proc(svc: ^Service, u: ^Uow, auth: contracts.Auth_C
 	if !rok do return {}, true, false, rerr
 	now := platform.clock_now(svc.clock)
 	mark_instance_idle(svc, u, inst.agent_instance_id, now)
+	// The reviewer keeps its process across a checkpoint (no restart per
+	// review round); it is stopped when its tasks finish.
 	if !holder_is_coordinator(svc, current.chain_id, inst.agent_instance_id) {
-		effect_stop(u, inst.bridge_id, string(current.chain_id), inst.agent_instance_id)
 		arm_idle_ttl(svc, inst.agent_instance_id, fleet_idle_ttl(svc, current.chain_id, current.owner_user_id, inst.agent_id), now)
 	}
 	if aok, aerr := after_chain_change(svc, u, current.chain_id, current.owner_user_id, .Lease_Released); !aok do return {}, true, false, aerr
@@ -471,15 +474,12 @@ review_post :: proc(svc: ^Service, auth: contracts.Auth_Context, input: Review_I
 	gate, gok, gerr := evaluate_gate_in_uow(svc, &u, chain, refolded, actor)
 	if gok && gate == .Rejected do gok, gerr = gate_replan_in_uow(svc, &u, chain, refolded, actor)
 	if gok do gok, gerr = after_chain_change(svc, &u, task.chain_id, task.owner_user_id, .Review_Posted)
-	// Reviewer lifecycle invariant (REQ-TV2-3a): decide the stop only AFTER the
-	// gate and the matcher ran. Re-granted → keep it running. Still owing a
-	// review pair anywhere in the chain (e.g. its bridge was offline for the
-	// matcher) → keep it alive under the idle TTL instead of stopping it now.
+	// Reviewer lifecycle (REQ-TV2-3a): posting a verdict never stops the
+	// reviewer (no restart per review round). Re-granted → keeps running. Not
+	// re-granted → stays alive under the idle TTL; after_chain_change above has
+	// already stopped it if every task it worked on is done or cancelled.
 	if gok {
 		if _, regranted, _ := iface.taskchain_get_lease_by_holder(svc.repo, inst.agent_instance_id); !regranted {
-			if !agent_owes_review_in_chain(svc, task.chain_id, task.owner_user_id, inst.agent_id) {
-				effect_stop(&u, inst.bridge_id, string(task.chain_id), inst.agent_instance_id)
-			}
 			arm_idle_ttl(svc, inst.agent_instance_id, fleet_idle_ttl(svc, task.chain_id, task.owner_user_id, inst.agent_id), now)
 		}
 	}

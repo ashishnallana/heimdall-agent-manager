@@ -664,3 +664,208 @@ test_session_projects_authorized_roundtrip :: proc(t: ^testing.T) {
 	testing.expect(t, strings.contains(response.body, `"sessions":2`))
 	testing.expect(t, strings.contains(response.body, `"description":"App is a calendar service."`))
 }
+
+
+// --- Context-window settings relay (T9) -------------------------------------
+
+@(test)
+test_context_window_request_parse_rules :: proc(t: ^testing.T) {
+	r, _, ok := context_window_request_parse("GET", "", "")
+	testing.expect(t, ok)
+	testing.expect_value(t, r.op, "list")
+
+	r, _, ok = context_window_request_parse("PUT", "", `{"provider":"claude","model":"opus","context_window":500000}`)
+	testing.expect(t, ok)
+	testing.expect_value(t, r.op, "set")
+	testing.expect_value(t, r.provider, "claude")
+	testing.expect_value(t, r.model, "opus")
+	testing.expect_value(t, r.context_window, i64(500000))
+
+	r, _, ok = context_window_request_parse("PUT", "", `{"provider":"claude","model":"opus","context_window":100000}`)
+	testing.expect(t, ok, "exactly the minimum is accepted")
+
+	err: domain.Domain_Error
+	r, err, ok = context_window_request_parse("PUT", "", `{"provider":"claude","model":"opus","context_window":99999}`)
+	testing.expect(t, !ok, "below 100K is rejected server-side")
+	testing.expect_value(t, err.code, domain.Error_Code.Validation_Failed)
+	testing.expect(t, strings.contains(err.details_json, "below_minimum"))
+
+	r, err, ok = context_window_request_parse("PUT", "", `{"provider":"claude","model":"opus","context_window":100000001}`)
+	testing.expect(t, !ok)
+	testing.expect(t, strings.contains(err.details_json, "above_maximum"))
+
+	_, _, ok = context_window_request_parse("PUT", "", `{"provider":"claude","model":"opus","context_window":"500000"}`)
+	testing.expect(t, !ok, "a string value is rejected")
+	_, _, ok = context_window_request_parse("PUT", "", `{"provider":"claude","model":"opus","context_window":150000.5}`)
+	testing.expect(t, !ok, "a fractional value is rejected")
+	_, _, ok = context_window_request_parse("PUT", "", `{"provider":"claude","model":"opus"}`)
+	testing.expect(t, !ok, "a missing value is rejected")
+	r, err, ok = context_window_request_parse("PUT", "", `{"provider":" ","model":"opus","context_window":500000}`)
+	testing.expect(t, !ok)
+	testing.expect(t, strings.contains(err.details_json, "invalid_provider"))
+	r, err, ok = context_window_request_parse("PUT", "", `{"provider":"claude","context_window":500000}`)
+	testing.expect(t, !ok)
+	testing.expect(t, strings.contains(err.details_json, "invalid_model"))
+
+	r, _, ok = context_window_request_parse("DELETE", "provider=claude&model=claude-opus-4%5B1m%5D", "")
+	testing.expect(t, ok)
+	testing.expect_value(t, r.op, "clear")
+	testing.expect_value(t, r.model, "claude-opus-4[1m]")
+	r, _, ok = context_window_request_parse("DELETE", "", `{"provider":"codex","model":"gpt-5"}`)
+	testing.expect(t, ok, "clear also accepts a JSON body")
+	testing.expect_value(t, r.provider, "codex")
+	_, _, ok = context_window_request_parse("DELETE", "provider=codex", "")
+	testing.expect(t, !ok, "clear needs a model")
+	_, _, ok = context_window_request_parse("POST", "", "")
+	testing.expect(t, !ok)
+}
+
+@(test)
+test_context_window_bridge_error_mapping :: proc(t: ^testing.T) {
+	e := context_window_bridge_error("too_many_overrides")
+	testing.expect_value(t, e.code, domain.Error_Code.Validation_Failed)
+	testing.expect_value(t, e.details_json, `{"bridge_error":"too_many_overrides"}`)
+	e = context_window_bridge_error("persist_failed")
+	testing.expect_value(t, e.code, domain.Error_Code.Internal_Error)
+	e = context_window_bridge_error(`evil"code`)
+	testing.expect_value(t, e.details_json, `{"bridge_error":"unknown"}`, )
+}
+
+@(test)
+test_context_window_relay_authorization :: proc(t: ^testing.T) {
+	f := setup_update_test_fixture(t, "ctxwin-auth")
+	defer teardown_update_test_fixture(f)
+	path := fmt.tprintf("/api/v1/bridges/%s/context-windows", f.bridge_id)
+	req := Request{method = "GET", path = path, request_id = "ctxwin-anon", remote_addr = "192.0.2.1:1234"}
+	testing.expect_value(t, bridge_context_windows_handler(rawptr(&f.bh), req).status, 401)
+	req.headers = f.user_headers
+	req.method = "PUT"
+	req.body = `{"provider":"claude","model":"opus","context_window":50000}`
+	testing.expect_value(t, bridge_context_windows_handler(rawptr(&f.bh), req).status, 400)
+	testing.expect(t, !f.sink_rec.sent, "an invalid value never reaches the bridge")
+	req.method = "GET"
+	req.body = ""
+	response := bridge_context_windows_handler(rawptr(&f.bh), req)
+	testing.expect(t, response.status >= 400, "an offline bridge never reports a list")
+	other := http_test_login(t, &f.auth_svc, "ctxwin_other_owner")
+	req.headers = other
+	response = bridge_context_windows_handler(rawptr(&f.bh), req)
+	testing.expect(t, response.status == 403 || response.status == 404, "another account cannot read or edit the windows")
+}
+
+@(private = "file")
+Context_Window_Peer :: struct {
+	f:          ^update_handler_wire_fixture,
+	socket:     net.TCP_Socket,
+	generation: int,
+	reply_fmt:  string, // %s receives the command id
+	command:    string, // the frame the hub sent (temp-cloned)
+	correlated: bool,
+}
+
+@(private = "file")
+context_window_peer :: proc(data: rawptr) {
+	peer := (^Context_Window_Peer)(data)
+	reader: ws.Frame_Reader
+	defer ws.reader_destroy(&reader)
+	_, command, ok := ws.read_frame(peer.socket, &reader, time.Second)
+	if !ok do return
+	defer delete(command)
+	peer.command = strings.clone(command)
+	id := json_string(command, "command_id", context.temp_allocator)
+	reply := fmt.aprintf(peer.reply_fmt, id)
+	chunks: [dynamic]Bridge_Chunk_Reassembly
+	defer bridge_chunk_reassemblies_free(&chunks)
+	peer.correlated = bridge_ws_process_frame(&peer.f.bh, peer.f.bridge_id, peer.generation, peer.socket, &chunks, reply)
+}
+
+// context_window_roundtrip runs one request against a live loopback bridge that
+// answers with reply_fmt, and returns the response plus the frame the hub sent.
+@(private = "file")
+context_window_roundtrip :: proc(t: ^testing.T, tag: string, req_in: Request, reply_fmt: string) -> (response: Response, command: string, correlated: bool) {
+	f := setup_update_test_fixture(t, tag)
+	defer teardown_update_test_fixture(f)
+	bridge, ok, _ := iface.bridge_get_bridge(&f.br_repo, f.bridge_id)
+	if !testing.expect(t, ok) do return
+	defer domain.bridge_destroy(&bridge)
+	bridge.status = .Online
+	_, saved, _ := iface.bridge_save_bridge(&f.br_repo, bridge)
+	testing.expect(t, saved)
+	_, generation, live := project_service.bridge_runtime_registry_accept_live(&f.registry, f.bridge_id, false, "", f.owner_user_id)
+	if !testing.expect(t, live) do return
+	defer project_service.bridge_runtime_registry_destroy(&f.registry)
+	listener, listen_err := net.listen_tcp({address = net.IP4_Loopback, port = 0})
+	if listen_err != nil do testing.fail_now(t, "loopback listen")
+	defer net.close(listener)
+	bound, _ := net.bound_endpoint(listener)
+	socket, dial_err := net.dial_tcp(net.Endpoint{address = net.IP4_Loopback, port = bound.port})
+	if dial_err != nil do testing.fail_now(t, "loopback dial")
+	defer net.close(socket)
+	hub, _, accept_err := net.accept_tcp(listener)
+	if accept_err != nil do testing.fail_now(t, "loopback accept")
+	defer net.close(hub)
+	project_service.bridge_runtime_registry_set_command_socket(&f.registry, f.bridge_id, hub, generation)
+	peer := Context_Window_Peer{f = f, socket = socket, generation = generation, reply_fmt = reply_fmt}
+	worker := thread.create_and_start_with_data(&peer, context_window_peer, init_context = context) // share the tracking allocator: the hub frees what the peer allocates
+	req := req_in
+	req.path = fmt.tprintf("/api/v1/bridges/%s/context-windows", f.bridge_id)
+	req.remote_addr = "127.0.0.1:4444"
+	req.headers = f.user_headers
+	response = bridge_context_windows_handler(rawptr(&f.bh), req)
+	thread.join(worker)
+	thread.destroy(worker)
+	command = strings.clone(peer.command, context.temp_allocator)
+	delete(peer.command)
+	return response, command, peer.correlated
+}
+
+CTXWIN_TEST_STATE :: `"default_window":200000,"min_window":100000,"max_window":100000000,"warn_pct":40,"rollover_pct":70,"entries":[],"overrides":[{{"provider":"claude","model":"opus","context_window":500000}}],"windows":[{{"provider":"claude","model":"opus","context_window":500000,"source":"override"}},{{"provider":"codex","model":"gpt-5","context_window":200000,"source":"default"}}]`
+
+@(test)
+test_context_window_relay_set_roundtrip :: proc(t: ^testing.T) {
+	reply := `{{"type":"context_window_op_result","command_id":"%s","op":"set","ok":true,` + CTXWIN_TEST_STATE + `}}`
+	response, command, correlated := context_window_roundtrip(t, "ctxwin-set", Request{method = "PUT", request_id = "ctxwin-set", body = `{"provider":"claude","model":"opus","context_window":500000}`}, reply)
+	defer delete(response.body)
+	testing.expectf(t, response.status == 200, "set relays and succeeds, got %d (%s)", response.status, response.body)
+	testing.expect(t, correlated)
+	testing.expect_value(t, json_string(command, "type", context.temp_allocator), "context_window_op")
+	testing.expect_value(t, json_string(command, "op", context.temp_allocator), "set")
+	testing.expect_value(t, json_string(command, "provider", context.temp_allocator), "claude")
+	testing.expect_value(t, json_string(command, "model", context.temp_allocator), "opus")
+	testing.expect_value(t, json_int(command, "context_window", 0), 500000)
+	testing.expect(t, strings.contains(response.body, `"source":"override"`), "bridge state is returned verbatim")
+	testing.expect(t, strings.contains(response.body, `"source":"default"`))
+}
+
+@(test)
+test_context_window_relay_list_and_clear_roundtrip :: proc(t: ^testing.T) {
+	reply := `{{"type":"context_window_op_result","command_id":"%s","op":"list","ok":true,` + CTXWIN_TEST_STATE + `}}`
+	response, command, correlated := context_window_roundtrip(t, "ctxwin-list", Request{method = "GET", request_id = "ctxwin-list"}, reply)
+	defer delete(response.body)
+	testing.expect_value(t, response.status, 200)
+	testing.expect(t, correlated)
+	testing.expect_value(t, json_string(command, "op", context.temp_allocator), "list")
+	testing.expect(t, strings.contains(response.body, `"min_window":100000`))
+
+	reply = `{{"type":"context_window_op_result","command_id":"%s","op":"clear","ok":true,` + CTXWIN_TEST_STATE + `}}`
+	clear_resp, clear_cmd, _ := context_window_roundtrip(t, "ctxwin-clear", Request{method = "DELETE", request_id = "ctxwin-clear", query = "provider=claude&model=opus"}, reply)
+	defer delete(clear_resp.body)
+	testing.expect_value(t, clear_resp.status, 200)
+	testing.expect_value(t, json_string(clear_cmd, "op", context.temp_allocator), "clear")
+	testing.expect_value(t, json_string(clear_cmd, "model", context.temp_allocator), "opus")
+}
+
+@(test)
+test_context_window_relay_surfaces_bridge_errors :: proc(t: ^testing.T) {
+	reply := `{{"type":"context_window_op_result","command_id":"%s","op":"set","ok":false,"error":"too_many_overrides",` + CTXWIN_TEST_STATE + `}}`
+	response, _, _ := context_window_roundtrip(t, "ctxwin-err", Request{method = "PUT", request_id = "ctxwin-err", body = `{"provider":"claude","model":"sonnet","context_window":1000000}`}, reply)
+	testing.expect_value(t, response.status, 400)
+	testing.expect(t, strings.contains(response.body, "too_many_overrides"), "the bridge error code reaches the caller")
+	delete(response.body)
+
+	reply = `{{"type":"context_window_op_result","command_id":"%s","op":"set","ok":false,"error":"persist_failed",` + CTXWIN_TEST_STATE + `}}`
+	response, _, _ = context_window_roundtrip(t, "ctxwin-persist", Request{method = "PUT", request_id = "ctxwin-persist", body = `{"provider":"claude","model":"sonnet","context_window":1000000}`}, reply)
+	testing.expect_value(t, response.status, 500)
+	testing.expect(t, strings.contains(response.body, "persist_failed"))
+	delete(response.body)
+}

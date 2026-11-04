@@ -1,0 +1,24 @@
+{
+	"default_window": 200000,
+	"warn_pct": 40,
+	"rollover_pct": 70,
+	"entries": [
+		{"provider": "claude", "model_regex": ".*\\[1m\\].*", "context_window": 1000000},
+		{"provider": "claude", "model_regex": ".*haiku-4-5.*", "context_window": 200000},
+		{"provider": "claude", "model_regex": ".*(opus|sonnet)-4-6.*", "context_window": 200000},
+		{"provider": "claude", "model_regex": "(default|opus|sonnet|haiku|fable)", "context_window": 200000},
+		{"provider": "claude", "model_regex": "claude-(opus|sonnet|haiku|fable)-(5|4-7|4-8).*", "context_window": 1000000},
+		{"provider": "codex", "model_regex": "gpt-6\\.1-(sol|terra).*", "context_window": 475000},
+		{"provider": "codex", "model_regex": "gpt-.*", "context_window": 258400},
+		{"provider": "pi", "model_regex": "anthropic/claude-(opus|sonnet|haiku)-4-5.*", "context_window": 200000},
+		{"provider": "pi", "model_regex": "anthropic/.*", "context_window": 200000},
+		{"provider": "pi", "model_regex": "openai-codex/gpt-5\\.3-codex-spark.*", "context_window": 128000},
+		{"provider": "pi", "model_regex": "openai-codex/.*", "context_window": 272000},
+		{"provider": "pi", "model_regex": "zai/glm-4\\.7.*", "context_window": 204800},
+		{"provider": "pi", "model_regex": "zai/glm-5-turbo.*", "context_window": 200000},
+		{"provider": "pi", "model_regex": "zai/glm-5\\..*", "context_window": 1000000},
+		{"provider": "antigravity", "model_regex": "gemini-.*", "context_window": 256000},
+		{"provider": "antigravity", "model_regex": "claude-.*", "context_window": 200000},
+		{"provider": "antigravity", "model_regex": "gpt-oss-120b.*", "context_window": 131072}
+	]
+}

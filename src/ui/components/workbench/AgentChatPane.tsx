@@ -85,6 +85,7 @@ import { ArtifactAttachmentPreview } from '../ArtifactAttachmentPreview';
 import Icon from '../Icon';
 import Markdown from '../Markdown';
 import type { MarkdownTextSelection } from '../MarkdownBody';
+import { PREVIOUS_CONTEXT_MESSAGE_TYPE, PreviousContextBlock } from '../chat/PreviousContextBlock';
 import QuoteSelectionPopover from '../chat/QuoteSelectionPopover';
 import ComposerContextChips from '../chat/ComposerContextChips';
 import { addComposerQuote, removeComposerQuote, consumeComposerQuotes, selectComposerQuotes } from '../../store/composerContextSlice';
@@ -638,7 +639,6 @@ function normalizeConversationMessages(rows: Message[], agentLabel: string): Cha
     .map((message, index) => {
       const id = msgId(message, index);
       const direction = msgDir(message);
-      const isUser = direction === 'user_to_agent';
       const createdUnixMs = messageCreatedUnixMs(message);
       const sender = String(
         message.sender_agent_instance_id || message.senderAgentInstanceId || '',
@@ -646,6 +646,9 @@ function normalizeConversationMessages(rows: Message[], agentLabel: string): Cha
       const messageType = String(
         (message as any).message_type || (message as any).messageType || 'text',
       );
+      // previous_context is stored inbound (user_to_agent) so the restarted
+      // agent reads it, but the agent wrote it: never show it as a user bubble.
+      const isUser = direction === 'user_to_agent' && messageType !== PREVIOUS_CONTEXT_MESSAGE_TYPE;
       const authorLabel = isUser
         ? 'you'
         : messageType === 'system'
@@ -2056,6 +2059,13 @@ export function AgentChatPane({
           </span>
           <div className="flex-1 border-t border-subtle/40" />
         </div>
+      );
+    }
+    if (message.messageType === PREVIOUS_CONTEXT_MESSAGE_TYPE) {
+      return (
+        <PreviousContextBlock messageId={message.messageId} metadata={message.metadata}>
+          <ThreadMessageBody body={message.body} />
+        </PreviousContextBlock>
       );
     }
     if (message.messageType === 'system') {

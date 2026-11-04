@@ -458,6 +458,10 @@ fire_idle_ttl :: proc(svc: ^Service, u: ^Uow, t: Timer) -> Fire_Result {
 	if inst.chain_id != "" {
 		if chain, cok, _ := iface.taskchain_get_chain(svc.repo, domain.Task_Chain_ID(inst.chain_id)); cok {
 			if is_coordinator(svc, chain, inst.agent_instance_id) do return .Noop
+			// Idle TTL stops only an instance whose tasks are all done or
+			// cancelled — never one waiting for review or blocked (T8). Its
+			// task's completion stops it later (stop_finished_instances_in_uow).
+			if instance_has_open_work(svc, chain, inst.agent_instance_id) do return .Noop
 		}
 	}
 	effect_stop(u, inst.bridge_id, inst.chain_id, inst.agent_instance_id)

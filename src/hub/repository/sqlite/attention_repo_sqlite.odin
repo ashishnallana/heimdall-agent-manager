@@ -53,7 +53,8 @@ ACTIONABLE_MESSAGE_WHERE :: ` m.direction = 'agent_to_user' AND m.read_at = ''
 	AND NOT EXISTS (
 		SELECT 1 FROM chat_messages r
 		WHERE r.conversation_id = m.conversation_id AND r.owner_user_id = m.owner_user_id
-		  AND r.direction = 'user_to_agent' AND r.created_at > m.created_at
+		  AND r.direction = 'user_to_agent' AND COALESCE(r.message_type, 'text') != 'previous_context'
+		  AND r.created_at > m.created_at
 	)`
 
 attention_card_insert_if_absent_sqlite :: proc(ctx: rawptr, card: domain.Card) -> (bool, domain.Domain_Error) {

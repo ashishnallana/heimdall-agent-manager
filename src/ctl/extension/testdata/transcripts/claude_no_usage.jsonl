@@ -1,0 +1,3 @@
+{"type":"summary","summary":"session"}
+{"type":"user","isSidechain":false,"message":{"role":"user","content":"hello"}}
+{"type":"assistant","isSidechain":false,"message":{"id":"msg_01","model":"claude-opus-5-5","role":"assistant","content":[{"type":"text","text":"no usage block here"}]}}

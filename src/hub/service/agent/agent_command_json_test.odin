@@ -137,7 +137,21 @@ test_wake_agent_command_json_carries_lease_and_pack :: proc(t: ^testing.T) {
 	}
 	got := wake_agent_command_json("cmd_l", "chain_l", run, nil)
 	defer delete(got)
-	testing.expect(t, strings.contains(got, "\"lease_id\":\"lease_9\",\"pack\":{\"version\":1,\"lease\":{\"lease_id\":\"lease_9\"}}}"), "lease_id + verbatim pack")
+	testing.expect(t, strings.contains(got, "\"lease_id\":\"lease_9\",") && strings.contains(got, "\"pack\":{\"version\":1,\"lease\":{\"lease_id\":\"lease_9\"}}}"), "lease_id + verbatim pack")
 	testing.expect(t, strings.count(got, "\"lease_id\"") == 2, "pack is spliced raw (its own lease_id key) and the second entry has none")
 	testing.expect(t, strings.count(got, "\"pack\"") == 1)
+}
+
+// T8: a run entry for a live child carries deliver="nudge"; a launch entry
+// omits the key so an older bridge keeps its launch behavior.
+@(test)
+test_wake_agent_command_json_deliver_nudge_only_when_set :: proc(t: ^testing.T) {
+	run := []Wake_Agent_Run_Entry{
+		{agent_instance_id = "inst_1", task_id = "task_1", role = "worker", run_count = 3, deliver = "nudge"},
+		{agent_instance_id = "inst_2", task_id = "task_2", role = "reviewer", run_count = 5},
+	}
+	got := wake_agent_command_json("cmd_d", "chain_d", run, nil)
+	defer delete(got)
+	testing.expect(t, strings.contains(got, "\"run_count\":3,\"deliver\":\"nudge\""), got)
+	testing.expect_value(t, strings.count(got, "\"deliver\""), 1)
 }

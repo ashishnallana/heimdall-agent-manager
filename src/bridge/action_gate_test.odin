@@ -63,6 +63,7 @@ gate_fresh_state :: proc(now: i64) {
 
 @(test)
 test_action_gate_prelaunch_denial_suspends_without_launch :: proc(t: ^testing.T) {
+    sync.mutex_lock(&bridge_test_config_mutex); defer sync.mutex_unlock(&bridge_test_config_mutex)
     context.allocator = runtime.heap_allocator()
     sync.mutex_lock(&action_sched_test_mutex)
     defer sync.mutex_unlock(&action_sched_test_mutex)
@@ -86,6 +87,7 @@ test_action_gate_prelaunch_denial_suspends_without_launch :: proc(t: ^testing.T)
 
 @(test)
 test_action_gate_prelaunch_revalidation_passes_enabled_owner :: proc(t: ^testing.T) {
+    sync.mutex_lock(&bridge_test_config_mutex); defer sync.mutex_unlock(&bridge_test_config_mutex)
     context.allocator = runtime.heap_allocator()
     sync.mutex_lock(&action_sched_test_mutex)
     defer sync.mutex_unlock(&action_sched_test_mutex)
@@ -101,6 +103,7 @@ test_action_gate_prelaunch_revalidation_passes_enabled_owner :: proc(t: ^testing
 
 @(test)
 test_action_gate_changed_or_failed_revalidation_fails_closed :: proc(t: ^testing.T) {
+    sync.mutex_lock(&bridge_test_config_mutex); defer sync.mutex_unlock(&bridge_test_config_mutex)
     context.allocator = runtime.heap_allocator()
     sync.mutex_lock(&action_sched_test_mutex)
     defer sync.mutex_unlock(&action_sched_test_mutex)
@@ -116,6 +119,7 @@ test_action_gate_changed_or_failed_revalidation_fails_closed :: proc(t: ^testing
 
 @(test)
 test_action_gate_execute_denial_suspends_cached_queue :: proc(t: ^testing.T) {
+    sync.mutex_lock(&bridge_test_config_mutex); defer sync.mutex_unlock(&bridge_test_config_mutex)
     context.allocator = runtime.heap_allocator()
     sync.mutex_lock(&action_sched_test_mutex)
     defer sync.mutex_unlock(&action_sched_test_mutex)
@@ -131,6 +135,7 @@ test_action_gate_execute_denial_suspends_cached_queue :: proc(t: ^testing.T) {
 
 @(test)
 test_action_gate_heartbeat_token_change_stops_cached_fires :: proc(t: ^testing.T) {
+    sync.mutex_lock(&bridge_test_config_mutex); defer sync.mutex_unlock(&bridge_test_config_mutex)
     context.allocator = runtime.heap_allocator()
     sync.mutex_lock(&action_sched_test_mutex)
     defer sync.mutex_unlock(&action_sched_test_mutex)
@@ -149,6 +154,7 @@ test_action_gate_heartbeat_token_change_stops_cached_fires :: proc(t: ^testing.T
 
 @(test)
 test_action_gate_reenable_restores_without_replaying_missed_fires :: proc(t: ^testing.T) {
+    sync.mutex_lock(&bridge_test_config_mutex); defer sync.mutex_unlock(&bridge_test_config_mutex)
     context.allocator = runtime.heap_allocator()
     sync.mutex_lock(&action_sched_test_mutex)
     defer sync.mutex_unlock(&action_sched_test_mutex)
@@ -188,6 +194,7 @@ test_action_gate_reenable_restores_without_replaying_missed_fires :: proc(t: ^te
 // fire and must roll forward, not stay due for the next tick.
 @(test)
 test_action_gate_reenable_skips_fire_missed_within_eligible_second :: proc(t: ^testing.T) {
+    sync.mutex_lock(&bridge_test_config_mutex); defer sync.mutex_unlock(&bridge_test_config_mutex)
     context.allocator = runtime.heap_allocator()
     sync.mutex_lock(&action_sched_test_mutex)
     defer sync.mutex_unlock(&action_sched_test_mutex)
@@ -250,6 +257,7 @@ gate_reconnect :: proc(epoch: string, revision: i64, now: i64) {
 
 @(test)
 test_action_gate_suspend_survives_reconnects :: proc(t: ^testing.T) {
+    sync.mutex_lock(&bridge_test_config_mutex); defer sync.mutex_unlock(&bridge_test_config_mutex)
     context.allocator = runtime.heap_allocator()
     sync.mutex_lock(&action_sched_test_mutex)
     defer sync.mutex_unlock(&action_sched_test_mutex)
@@ -272,6 +280,7 @@ test_action_gate_suspend_survives_reconnects :: proc(t: ^testing.T) {
 // whose GET is refused whatever the revision, so it must not re-poll the 403.
 @(test)
 test_action_gate_suspend_ignores_revision_only_bumps :: proc(t: ^testing.T) {
+    sync.mutex_lock(&bridge_test_config_mutex); defer sync.mutex_unlock(&bridge_test_config_mutex)
     context.allocator = runtime.heap_allocator()
     sync.mutex_lock(&action_sched_test_mutex)
     defer sync.mutex_unlock(&action_sched_test_mutex)
@@ -292,6 +301,7 @@ test_action_gate_suspend_ignores_revision_only_bumps :: proc(t: ^testing.T) {
 // another day: it must not turn into a 1 Hz poll once the last install is 24h old.
 @(test)
 test_action_gate_suspend_backstop_polls_once_per_day :: proc(t: ^testing.T) {
+    sync.mutex_lock(&bridge_test_config_mutex); defer sync.mutex_unlock(&bridge_test_config_mutex)
     context.allocator = runtime.heap_allocator()
     sync.mutex_lock(&action_sched_test_mutex)
     defer sync.mutex_unlock(&action_sched_test_mutex)
@@ -316,6 +326,7 @@ test_action_gate_suspend_backstop_polls_once_per_day :: proc(t: ^testing.T) {
 // Re-enable still resyncs promptly after reconnects: the `.on<ts>` epoch is new.
 @(test)
 test_action_gate_reenable_after_reconnect_syncs_once :: proc(t: ^testing.T) {
+    sync.mutex_lock(&bridge_test_config_mutex); defer sync.mutex_unlock(&bridge_test_config_mutex)
     context.allocator = runtime.heap_allocator()
     sync.mutex_lock(&action_sched_test_mutex)
     defer sync.mutex_unlock(&action_sched_test_mutex)
@@ -342,6 +353,7 @@ test_action_gate_reenable_after_reconnect_syncs_once :: proc(t: ^testing.T) {
 // budget (Backoff, attempt 1 of BRIDGE_OPERATION_ATTEMPTS) and the token stays unsynced.
 @(test)
 test_action_gate_suspended_resync_failure_uses_retry_budget :: proc(t: ^testing.T) {
+    sync.mutex_lock(&bridge_test_config_mutex); defer sync.mutex_unlock(&bridge_test_config_mutex)
     context.allocator = runtime.heap_allocator()
     sync.mutex_lock(&action_sched_test_mutex)
     defer sync.mutex_unlock(&action_sched_test_mutex)

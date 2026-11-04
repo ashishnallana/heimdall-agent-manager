@@ -33,6 +33,7 @@ import { upsertChainTitle, upsertConversationTitle } from '../store/searchTitleS
 import { isVaultArmored, decryptVaultText, getActiveVaultKey } from '../utils/vaultContent';
 import { handleVaultDirectoryEvent } from '../services/deviceVaultEvents';
 import { clearDirtyMarks, deferIfHidden } from './paneDeferral';
+import { requestChainTokenUsageRefresh } from './chainTokenUsageRefresh';
 
 // Focus context read at WS-event time (populated by the shell from the live
 // route). Only focusedChainId is consumed — it lets a resource/chat/agent event
@@ -888,6 +889,35 @@ function patchInstanceCachesFromSummary(dispatch: any, instanceId: string, summa
   return true;
 }
 
+/**
+ * Copies token_usage / token_usage_updated_at / token_totals from an instance
+ * event summary into the cached instance and instance-list rows (T14). A
+ * snapshot older than the cached one is ignored. Returns false when the summary
+ * carries no token data.
+ */
+export function patchInstanceTokenCaches(dispatch: any, instanceId: string, summary: any): boolean {
+  const hasUsage = summary?.token_usage && typeof summary.token_usage === 'object';
+  const hasTotals = summary?.token_totals && typeof summary.token_totals === 'object';
+  if (!hasUsage && !hasTotals) return false;
+  const apply = (row: any, checkId = true) => {
+    if (!row || (checkId && row.agent_instance_id !== instanceId)) return;
+    if (hasUsage && isNewerOrEqual(summary.token_usage_updated_at, row.token_usage_updated_at)) {
+      row.token_usage = summary.token_usage;
+      if (summary.token_usage_updated_at) row.token_usage_updated_at = summary.token_usage_updated_at;
+    }
+    if (hasTotals) row.token_totals = summary.token_totals;
+  };
+  dispatch(agentsApi.util.updateQueryData('fetchAgentInstance', { instanceId }, (draft: any) => apply(draft?.instance, false)));
+  dispatch((d: any, getState: () => any) => {
+    for (const arg of agentsApi.util.selectCachedArgsForQuery(getState(), 'listAgentInstances') as any[]) {
+      d(agentsApi.util.updateQueryData('listAgentInstances', arg, (draft: any) => {
+        for (const row of Array.isArray(draft?.instances) ? draft.instances : []) apply(row);
+      }));
+    }
+  });
+  return true;
+}
+
 function handleInstanceChanged(dispatch: any, payload: any, ctx: WsCtx, instanceId: string, change: string, summary: any): void {
   if (instanceId && !patchInstanceCachesFromSummary(dispatch, instanceId, summary)) return;
   // Membership/placement of the live tree changes on create, current task (is_live,
@@ -897,6 +927,19 @@ function handleInstanceChanged(dispatch: any, payload: any, ctx: WsCtx, instance
   }
   if (change === 'created') {
     queueInvalidation(dispatch, [{ type: 'AgentInstances', id: 'LIST' }, { type: 'SidebarConversations', id: 'ALL' }]);
+  }
+  // Token data (T3r) rides in the summary (T14): patch the instance and list caches
+  // in place. Only a hub that predates that falls back to refetching the instance.
+  const tokenChanged = change === 'token_usage_changed' || summary?.token_changed === true;
+  if (instanceId && !patchInstanceTokenCaches(dispatch, instanceId, summary) && change === 'token_usage_changed') {
+    queueInvalidation(dispatch, [{ type: 'AgentInstances', id: instanceId }]);
+  }
+  // The chain overview's per-agent token usage (T10) is a hub aggregate: refresh it
+  // on its instances' token changes and when one joins the chain, but only while
+  // the chain's card is shown and at most once per window (chainTokenUsageRefresh).
+  const tokenChainId = String(summary?.chain_id || '');
+  if (tokenChainId && (tokenChanged || change === 'created')) {
+    requestChainTokenUsageRefresh(tokenChainId, (id) => queueInvalidation(dispatch, [{ type: 'ChainTokenUsage', id }]));
   }
   // Legacy caches + the "identity missing from the catalogue" check (agents.ts).
   handleAgentEvent(dispatch, { ...payload, type: 'agent_update', agent_instance_id: instanceId, summary }, ctx);

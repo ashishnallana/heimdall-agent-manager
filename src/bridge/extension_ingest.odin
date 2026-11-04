@@ -21,6 +21,20 @@ Bridge_Ext_Instance_State :: struct {
 	last_event_at_ms:  i64,
 	events_accepted:   int,
 	events_dropped:    int,
+	token_usage:       Bridge_Ext_Token_Usage, // extension_token_usage.odin
+	// Frozen usage of the last run the hub stopped or restarted (T3r), sent as
+	// agent_instance_status.token_usage_final; token_final_run = 0 means none.
+	token_final:       Bridge_Ext_Token_Usage,
+	token_final_run:   int,
+	// From the launch command (context_window.odin resolves the window from
+	// these). Empty when the bridge has no launch record for the instance.
+	launch_provider:   string,
+	model:             string,
+	provider_profile:  string,
+	resolved_model:    string,
+	// session_id whose usage_unavailable was already logged (once per session;
+	// only logged when the provider hello advertised the usage capability).
+	usage_dark_logged_session: string,
 }
 
 Bridge_Ext_Ingest_Result :: struct {
@@ -97,15 +111,22 @@ bridge_ext_ingest :: proc(rec: Bridge_Local_Agent_Token_Record, params: string, 
 		}
 		defer contracts.ext_event_destroy(&ev)
 		bridge_tool_live_event(rec, ev, raw)
-		if bridge_startup_event(ev) do bridge_startup_accept(rec, now)
+		if bridge_startup_event(ev) {
+			// A launch's first readiness completes a context rollover restart (T6).
+			if _, newly_ready := bridge_startup_accept(rec, now); newly_ready do bridge_rollover_on_start_success(instance_id)
+		}
 
 		// A later event proves a permission prompt was answered in the terminal.
 		tool_input := ""
 		if ev.kind == .Tool_Start || ev.kind == .Tool_End do tool_input = bridge_ext_raw_tool_input(raw)
 		_ = bridge_blockers_on_extension_event(instance_id, ev, now, tool_input)
-		if status, ok := contracts.ext_activity_for_event(ev); ok {
-			bridge_runtime_note_agent_activity(instance_id, status, bridge_ext_activity_source(ev.provider))
-		}
+		activity, has_activity := contracts.ext_activity_for_event(ev)
+		// Activity is reported after the accumulator and the context rollover
+		// (context_rollover.odin) saw the event: a Stop that starts a rollover
+		// must already be withheld as active, never reported idle.
+		main_agent := ev.agent_id == "" && (ev.agent_type == "" || ev.agent_type == "main")
+		defer if has_activity do bridge_runtime_note_agent_activity(instance_id, activity, bridge_ext_activity_source(ev.provider))
+		defer if main_agent do bridge_rollover_on_ext_event(instance_id, has_activity && activity == "idle", now)
 
 		sync.mutex_lock(&bridge_ext_mutex)
 		s := bridge_ext_state_locked(instance_id)
@@ -127,7 +148,15 @@ bridge_ext_ingest :: proc(rec: Bridge_Local_Agent_Token_Record, params: string, 
 		}
 		s.last_event_at_ms = now
 		s.events_accepted += 1
+		token_changed := bridge_ext_token_usage_apply(&s.token_usage, ev, now)
+		if ev.usage_unavailable && s.token_usage.usage_supported && ev.session_id != "" && s.usage_dark_logged_session != ev.session_id {
+			delete(s.usage_dark_logged_session)
+			s.usage_dark_logged_session = strings.clone(ev.session_id)
+			fmt.eprintfln("extension: %s transcript usage unavailable for instance %s session %s; context usage will not be reported (logged once per session)", ev.provider, instance_id, ev.session_id)
+		}
 		sync.mutex_unlock(&bridge_ext_mutex)
+		// Only the throttled snapshot goes upstream (agent_instance_status.token_usage).
+		if token_changed do bridge_ext_token_enqueue_due(now, instance_id)
 		res.accepted += 1
 	}
 	return
@@ -160,6 +189,7 @@ bridge_ext_status_json :: proc(instance_id: string) -> string {
 	last: i64
 	accepted, dropped, queued: int
 	caps := make([dynamic]string, context.temp_allocator)
+	tokens_json, session_id: string
 	for s in bridge_ext_states {
 		if s.agent_instance_id != instance_id do continue
 		provider = strings.clone(s.provider, context.temp_allocator)
@@ -168,6 +198,10 @@ bridge_ext_status_json :: proc(instance_id: string) -> string {
 		accepted = s.events_accepted
 		dropped = s.events_dropped
 		for c in s.capabilities do append(&caps, strings.clone(c, context.temp_allocator))
+		tb := strings.builder_make(context.temp_allocator)
+		bridge_ext_token_usage_write_json(&tb, s.token_usage)
+		tokens_json = strings.to_string(tb)
+		session_id = strings.clone(s.token_usage.session_id, context.temp_allocator)
 		break
 	}
 	sync.mutex_unlock(&bridge_ext_mutex)
@@ -186,7 +220,12 @@ bridge_ext_status_json :: proc(instance_id: string) -> string {
 	}
 	strings.write_string(&b, ",\"activity_status\":\""); bridge_local_write_json_string(&b, activity)
 	strings.write_string(&b, "\",\"activity_source\":\""); bridge_local_write_json_string(&b, source)
-	strings.write_string(&b, "\"}")
+	// token_usage is null until the instance sent any event; session_id is the
+	// provider session its counters belong to (local only, never sent upstream).
+	strings.write_string(&b, "\",\"session_id\":\""); bridge_local_write_json_string(&b, session_id)
+	strings.write_string(&b, "\",\"token_usage\":")
+	strings.write_string(&b, tokens_json if tokens_json != "" else "null")
+	strings.write_string(&b, "}")
 	return strings.to_string(b)
 }
 
@@ -204,4 +243,145 @@ bridge_ext_handle_rpc :: proc(request_id, method, params: string, rec: Bridge_Lo
 		return bridge_local_response_error(request_id, "bad_request", contracts.ext_error_message(res.fatal))
 	}
 	return bridge_local_response_data(request_id, bridge_ext_ingest_result_json(res))
+}
+
+Bridge_Ext_Context_Window_Instance :: struct {
+	agent_instance_id, provider, model, provider_profile, resolved_model: string,
+	// Provider-reported window and mismatch flag (0 / false when never reported
+	// or when an override is in force).
+	reported_window: i64,
+	window_mismatch: bool,
+}
+
+// bridge_ext_token_capture_final freezes instance_id's current token snapshot
+// as the final usage of run run_count, at a hub-requested stop (stop_agent,
+// wake_agent stop list) or restart (a genuine relaunch). reset_live also zeroes
+// the live counters (keeping the resolved window) so the finished run's figures
+// never leak into the next run; the zeroed snapshot still goes upstream so the
+// hub's latest snapshot restarts too. A status push is queued when a final was
+// captured. Returns whether one was. run_count <= 0 (no hub generation known)
+// captures nothing: the hub could not de-duplicate it.
+bridge_ext_token_capture_final :: proc(instance_id: string, run_count: int, reset_live := false, now: i64 = 0) -> bool {
+	context.allocator = bridge_ext_allocator()
+	if strings.trim_space(instance_id) == "" || run_count <= 0 do return false
+	captured := false
+	sync.mutex_lock(&bridge_ext_mutex)
+	for &s in bridge_ext_states {
+		if s.agent_instance_id != instance_id do continue
+		if s.token_usage.updated_at_ms == 0 do break
+		// A later run's final is never overwritten by an older generation.
+		if run_count >= s.token_final_run {
+			bridge_ext_token_usage_destroy(&s.token_final)
+			s.token_final = bridge_ext_token_usage_clone(s.token_usage)
+			s.token_final_run = run_count
+			captured = true
+		}
+		if reset_live {
+			bridge_ext_token_usage_reset(&s.token_usage, "")
+			s.token_usage.updated_at_ms = now if now > 0 else max(s.token_final.updated_at_ms, 1)
+			s.token_usage.dirty = true
+		}
+		break
+	}
+	sync.mutex_unlock(&bridge_ext_mutex)
+	if captured {
+		sync.mutex_lock(&bridge_runtime_mutex)
+		bridge_runtime_enqueue_status_push_locked(instance_id)
+		sync.mutex_unlock(&bridge_runtime_mutex)
+	}
+	return captured
+}
+
+// bridge_ext_note_launch records an instance's provider/model/profile at launch
+// and resolves its context window. Resolution runs before bridge_ext_mutex is
+// taken: it reads the discovery cache and the window config under their own locks.
+bridge_ext_note_launch :: proc(instance_id, provider, model, provider_profile: string) {
+	context.allocator = bridge_ext_allocator()
+	if strings.trim_space(instance_id) == "" do return
+	resolved := bridge_context_window_resolved_model(provider, model, provider_profile)
+	r := bridge_context_window_resolve(provider, model, resolved)
+	sync.mutex_lock(&bridge_ext_mutex)
+	s := bridge_ext_state_locked(instance_id)
+	if s != nil {
+		delete(s.usage_dark_logged_session); s.usage_dark_logged_session = ""
+		delete(s.launch_provider); delete(s.model); delete(s.provider_profile); delete(s.resolved_model)
+		s.launch_provider = strings.clone(provider)
+		s.model = strings.clone(model)
+		s.provider_profile = strings.clone(provider_profile)
+		s.resolved_model = strings.clone(resolved)
+		_ = bridge_ext_token_usage_set_window(&s.token_usage, r)
+	}
+	sync.mutex_unlock(&bridge_ext_mutex)
+}
+
+// bridge_ext_context_window_instances lists instances with a launch record
+// (temp allocator).
+bridge_ext_context_window_instances :: proc() -> [dynamic]Bridge_Ext_Context_Window_Instance {
+	out := make([dynamic]Bridge_Ext_Context_Window_Instance, context.temp_allocator)
+	sync.mutex_lock(&bridge_ext_mutex)
+	defer sync.mutex_unlock(&bridge_ext_mutex)
+	for s in bridge_ext_states {
+		if s.launch_provider == "" do continue
+		append(&out, Bridge_Ext_Context_Window_Instance{
+			strings.clone(s.agent_instance_id, context.temp_allocator),
+			strings.clone(s.launch_provider, context.temp_allocator),
+			strings.clone(s.model, context.temp_allocator),
+			strings.clone(s.provider_profile, context.temp_allocator),
+			strings.clone(s.resolved_model, context.temp_allocator),
+			s.token_usage.reported_window,
+			s.token_usage.window_mismatch,
+		})
+	}
+	return out
+}
+
+// bridge_ext_context_windows_refresh re-resolves every launched instance after
+// an override changed; a changed window is pushed upstream with the next due
+// token snapshot.
+bridge_ext_context_windows_refresh :: proc() {
+	insts := bridge_ext_context_window_instances()
+	if len(insts) == 0 do return
+	resolutions := make([]Bridge_Context_Window_Resolution, len(insts), context.temp_allocator)
+	for inst, i in insts do resolutions[i] = bridge_context_window_resolve(inst.provider, inst.model, inst.resolved_model)
+	sync.mutex_lock(&bridge_ext_mutex)
+	for inst, i in insts {
+		for &s in bridge_ext_states {
+			if s.agent_instance_id != inst.agent_instance_id do continue
+			_ = bridge_ext_token_usage_set_window(&s.token_usage, resolutions[i])
+			break
+		}
+	}
+	sync.mutex_unlock(&bridge_ext_mutex)
+	_ = bridge_ext_token_enqueue_due(bridge_runtime_now_ms())
+}
+
+// bridge_ext_context_window_for reports an instance's resolved window, its
+// source and the current context percentage (-1 when unknown). An instance
+// without a launch record gets the default.
+bridge_ext_context_window_for :: proc(instance_id: string) -> (window: i64, source: Bridge_Context_Window_Source, context_pct: i64) {
+	sync.mutex_lock(&bridge_ext_mutex)
+	defer sync.mutex_unlock(&bridge_ext_mutex)
+	for s in bridge_ext_states {
+		if s.agent_instance_id != instance_id do continue
+		return bridge_ext_token_usage_window(s.token_usage), s.token_usage.window_source, bridge_ext_token_usage_context_pct(s.token_usage)
+	}
+	return BRIDGE_EXT_TOKEN_DEFAULT_WINDOW, .Default, -1
+}
+
+// bridge_ext_token_usage_reset_instance zeroes an instance's token counters (a
+// context rollover restart starts a fresh context) and queues the snapshot.
+bridge_ext_token_usage_reset_instance :: proc(instance_id: string) {
+	context.allocator = bridge_ext_allocator()
+	sync.mutex_lock(&bridge_ext_mutex)
+	found := false
+	for &s in bridge_ext_states {
+		if s.agent_instance_id != instance_id do continue
+		bridge_ext_token_usage_reset(&s.token_usage, "")
+		s.token_usage.updated_at_ms = bridge_runtime_now_ms()
+		s.token_usage.dirty = true
+		found = true
+		break
+	}
+	sync.mutex_unlock(&bridge_ext_mutex)
+	if found do bridge_ext_token_enqueue_due(bridge_runtime_now_ms(), instance_id)
 }

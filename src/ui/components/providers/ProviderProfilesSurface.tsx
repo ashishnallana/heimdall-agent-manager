@@ -23,6 +23,9 @@ import {
   type ProfileEnv,
 } from './providerProfiles';
 import ProviderExtensionInstallAction from '../extension/ProviderExtensionInstallAction';
+import BridgeContextWindows from '../settings/BridgeContextWindows';
+import ProviderBinaryPath from './ProviderBinaryPath';
+import { providerEnabledView } from './providerEnabledState';
 import ProviderTestRunModal, { type ProviderTestTarget } from './ProviderTestRunModal';
 
 const fieldClass =
@@ -617,6 +620,24 @@ export default function ProviderProfilesSurface({ bridge, onHeadingChange }: {
   const currentStatus = statuses.find(
     (s) => s.provider === draft?.provider && (s.profile_id || s.provider) === draft?.profile_id,
   );
+  // Single fix for "profile enabled, disabled on this bridge": set the bridge flag only.
+  async function enableOnBridge() {
+    if (!draft) return;
+    setBusy(true);
+    setError('');
+    try {
+      await cookieMutation(
+        '/bridges/' + encodeURIComponent(bridgeId) + '/providers/' + encodeURIComponent(draft.provider),
+        'PUT',
+        { enabled: true, profile_id: draft.profile_id },
+      );
+      refresh();
+    } catch (e) {
+      setError('Could not enable on this bridge: ' + apiErrorText(e));
+    } finally {
+      setBusy(false);
+    }
+  }
   const testModels = (currentStatus?.models || []).filter((m) => m.state === 'active');
   const testModel = testModels.find((m) => m.model_id === testModelId) || testModels[0];
   const draftChanged = Boolean(
@@ -713,10 +734,11 @@ export default function ProviderProfilesSurface({ bridge, onHeadingChange }: {
                         <span className="min-w-0 break-words">
                         <Text as="span" role="title" className="block">{labels[p.profile_id] || p.profile_id}</Text>
                         <span className="block text-xs text-muted">
-                        {p.enabled && s?.enabled ? 'Enabled' : 'Disabled'} ·{' '}
+                        {(() => { const ev = providerEnabledView(p.enabled, s?.enabled); return ev.label + (ev.reason ? ' (' + ev.reason + ')' : ''); })()} ·{' '}
                         {p.state && p.state !== 'ok' ? p.state : s?.state || 'Not checked'}
                         {s?.version_text ? ' · ' + s.version_text : ''}
                         </span>
+                        <ProviderBinaryPath provider={p.profile_id} status={s} hasOverride={!!p.has_binary} />
                         </span>
                       </span>
                       {p.profile_id === p.provider ? <Badge>Default</Badge> : <Text role="code" tone="muted" className="break-all">{p.profile_id}</Text>}
@@ -762,7 +784,20 @@ export default function ProviderProfilesSurface({ bridge, onHeadingChange }: {
                   </div>
                   <div className="flex flex-wrap items-center gap-3">
                     <Text role="caption" tone="muted" data-debug-id="profile-runtime-availability">Runtime availability: {currentStatus ? currentStatus.enabled ? 'Enabled' : 'Disabled' : 'Not reported'}</Text>
-                    <StatusPill tone={draft.enabled ? 'success' : 'neutral'}>{draft.enabled ? 'Enabled' : 'Disabled'}</StatusPill>
+                    {(() => {
+                      // Same effective state as the list row, from the saved profile flag.
+                      const ev = providerEnabledView(draft.enabled, currentStatus?.enabled);
+                      return (
+                        <>
+                          <StatusPill tone={ev.enabled ? 'success' : 'neutral'}>{ev.label}</StatusPill>
+                          {ev.reason ? <Text role="caption" tone="muted" data-debug-id="profile-enabled-reason">{ev.reason}</Text> : null}
+                          {ev.fix === 'enable_on_bridge' && savedDraft?.enabled === draft.enabled ? (
+                            <Button variant="secondary" data-debug-id="profile-enable-on-bridge" disabled={busy || !editable}
+                              onClick={() => void enableOnBridge()}>{ev.fixLabel}</Button>
+                          ) : null}
+                        </>
+                      );
+                    })()}
                     {step !== null || savedDraft?.enabled !== draft.enabled
                       ? <Text role="caption" tone="muted">Pending save</Text> : null}
                     <Button variant="secondary" data-debug-id="profile-enabled" aria-pressed={draft.enabled}
@@ -850,6 +885,7 @@ export default function ProviderProfilesSurface({ bridge, onHeadingChange }: {
                         {currentStatus?.state || 'Not checked'} ·{' '}
                         {currentStatus?.version_text || 'No version reported'}
                       </p>
+                      <ProviderBinaryPath provider={draft.profile_id} status={currentStatus} overridePath={draft.config.binary_path || ''} />
                       <p className="text-xs text-muted">
                         Sign in with the provider CLI using this profile’s runtime directory. Then
                         scan again.
@@ -937,6 +973,9 @@ export default function ProviderProfilesSurface({ bridge, onHeadingChange }: {
                         onComplete={refresh}
                         onRetryDiscovery={() => discover('providers')}
                       />
+                      <div className="border-t border-subtle pt-3" data-debug-id="profile-context-windows">
+                        <BridgeContextWindows bridgeId={bridgeId} online={bridge?.status === 'online'} provider={draft.provider} />
+                      </div>
                     </section>
                   ) : null}
                 </>

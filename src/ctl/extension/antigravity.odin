@@ -30,6 +30,8 @@ ANTIGRAVITY_EXT_VERSION :: "0.1.0"
 ANTIGRAVITY_HOOK_INPUT_MAX :: 16 * 1024 * 1024
 ANTIGRAVITY_TOOL_STRING_MAX :: 4 * 1024
 ANTIGRAVITY_MESSAGE_MAX :: 2 * 1024
+// No "usage": Antigravity reports metrics only, never usage.context_tokens, so its
+// hello omits the capability and the bridge reports usage_supported=false.
 ANTIGRAVITY_CAPABILITIES :: [?]string{"activity", "subagents", "permissions", "file_edits", "session_id"}
 ANTIGRAVITY_DENY_DEFAULT_MESSAGE :: "Denied in Ninjy"
 
@@ -332,6 +334,7 @@ antigravity_map_hook :: proc(raw: string, ts: string, permission_timeout_ms := 0
 		if tool_resp == nil do tool_resp = root["tool_response"]
 		if tool_resp == nil do tool_resp = root["tool_result"]
 
+		metrics := tool_metrics(tool_args, tool_resp) // native sizes, pre-clip
 		input := json_clip(tool_args, ANTIGRAVITY_TOOL_STRING_MAX)
 		response := json_clip(tool_resp, ANTIGRAVITY_TOOL_STRING_MAX)
 
@@ -365,6 +368,7 @@ antigravity_map_hook :: proc(raw: string, ts: string, permission_timeout_ms := 0
 		else if d, ok := json_get_int(root, "duration_ms"); ok do pb_int(&p, "duration_ms", d)
 		eb := ext_event_begin("tool.end", ts, root, ANTIGRAVITY_PROVIDER, ANTIGRAVITY_EXT_VERSION)
 		ext_event_tool(&eb, root, input, response)
+		ext_event_metrics(&eb, metrics)
 		append(&out.events, ext_event_end(&eb, pb_done(&p)))
 
 		if status_str != "error" {
@@ -392,6 +396,7 @@ antigravity_map_hook :: proc(raw: string, ts: string, permission_timeout_ms := 0
 			pb_str(&a, "reason", term_reason)
 			if fully_idle, ok := root["fullyIdle"].(json.Boolean); ok do pb_bool(&a, "fully_idle", bool(fully_idle))
 			eb := ext_event_begin("activity", ts, root, ANTIGRAVITY_PROVIDER, ANTIGRAVITY_EXT_VERSION)
+			ext_event_finish_usage(&eb, ANTIGRAVITY_PROVIDER, root, true) // no reader: no usage
 			append(&out.events, ext_event_end(&eb, pb_done(&a)))
 		}
 	}

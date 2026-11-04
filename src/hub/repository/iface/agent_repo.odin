@@ -25,7 +25,17 @@ Agent_List_Active_Runtime_Instances_Proc :: proc(ctx: rawptr) -> ([]domain.Agent
 // used to mint default per-run titles "<agent-name> #<n>".
 Agent_Next_Title_Counter_Proc :: proc(ctx: rawptr, agent_id: string, owner_user_id: domain.User_ID, now: string) -> (int, bool, domain.Domain_Error)
 
+// Token usage (T3r). update_token_usage replaces an instance's latest snapshot
+// (only when the instance is pinned to bridge_id). add_token_totals adds one
+// finished run's final usage to the lifetime totals exactly once: it applies
+// only when run_count is newer than the last counted run and not beyond the
+// instance's current run_count; added=false means it was a duplicate/stale.
+Agent_Update_Token_Usage_Proc :: proc(ctx: rawptr, instance_id, bridge_id, usage_json, updated_at: string) -> (bool, domain.Domain_Error)
+Agent_Add_Token_Totals_Proc :: proc(ctx: rawptr, instance_id, bridge_id: string, run_count: int, context_tokens, est_tool_tokens, output_tokens: i64) -> (added: bool, err: domain.Domain_Error)
+
 Agent_Repository :: struct {
+	update_token_usage: Agent_Update_Token_Usage_Proc,
+	add_token_totals: Agent_Add_Token_Totals_Proc,
 	runtime_busy:Agent_Runtime_Busy_Proc,
 	ctx: rawptr,
 	reconfiguration_begin: Instance_Reconfiguration_Begin_Proc,
@@ -126,4 +136,14 @@ agent_list_instances_by_bridge :: proc(repo: ^Agent_Repository, bridge_id: strin
 agent_list_instances_by_chain :: proc(repo: ^Agent_Repository, owner_user_id: domain.User_ID, chain_id: string) -> ([]domain.Agent_Instance, domain.Domain_Error) {
 	if repo == nil || repo.list_instances_by_chain == nil do return nil, domain.domain_error(.Internal_Error, "agent repository is not configured")
 	return repo.list_instances_by_chain(repo.ctx, owner_user_id, chain_id)
+}
+
+agent_update_token_usage :: proc(repo: ^Agent_Repository, instance_id, bridge_id, usage_json, updated_at: string) -> (bool, domain.Domain_Error) {
+	if repo == nil || repo.update_token_usage == nil do return false, {}
+	return repo.update_token_usage(repo.ctx, instance_id, bridge_id, usage_json, updated_at)
+}
+
+agent_add_token_totals :: proc(repo: ^Agent_Repository, instance_id, bridge_id: string, run_count: int, context_tokens, est_tool_tokens, output_tokens: i64) -> (bool, domain.Domain_Error) {
+	if repo == nil || repo.add_token_totals == nil do return false, {}
+	return repo.add_token_totals(repo.ctx, instance_id, bridge_id, run_count, context_tokens, est_tool_tokens, output_tokens)
 }
