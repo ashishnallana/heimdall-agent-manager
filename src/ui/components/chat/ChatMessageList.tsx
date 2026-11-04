@@ -84,6 +84,12 @@ export const PIN_HISTORY_LAG_MS = 100;
 export const PIN_HISTORY_TRAVEL_MS = 250;
 export const PIN_SETTLE_MS = Math.max(PIN_TRAVEL_MS, PIN_HISTORY_LAG_MS + PIN_HISTORY_TRAVEL_MS);
 export const PIN_ACTIVITY_DELAY_MS = 200;
+// A scroller whose top padding clears a floating header (e.g. pt-16) needs a deeper slot,
+// or the bubble would sit under that header: keep PIN_TAIL_PX of tail below the padding.
+export const PIN_TAIL_PX = 40;
+export function pinOffsetFor(paddingTop: number): number {
+  return Math.max(PIN_OFFSET_PX, Math.round(paddingTop) + PIN_TAIL_PX);
+}
 // How far the pinned bubble may drift from its slot before a scroll counts as the
 // reader's own and leaves the pin (REQ-PIN-5).
 const PIN_DRIFT_PX = 4;
@@ -294,6 +300,9 @@ export default function ChatMessageList({
   const pinFrameRef = useRef(0);
   const activityTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const turnSpacerRef = useRef<HTMLDivElement | null>(null);
+  // The resolved slot (pinOffsetFor), measured from the scroller's padding at each send.
+  const [pinOffset, setPinOffset] = useState(PIN_OFFSET_PX);
+  const pinOffsetRef = useRef(PIN_OFFSET_PX);
   const setPin = useCallback((phase: PinPhase, index = pinIndexRef.current) => {
     pinPhaseRef.current = phase;
     pinIndexRef.current = phase === 'idle' ? -1 : index;
@@ -332,8 +341,8 @@ export default function ChatMessageList({
     }
   }, [clearPinMotion, setPin]);
 
-  // Sizes the latest turn so the pinned bubble can sit PIN_OFFSET_PX under the top:
-  // turn (pinned row .. end of tail) + spacer >= viewport - PIN_OFFSET_PX (REQ-PIN-2).
+  // Sizes the latest turn so the pinned bubble can sit pinOffset under the top:
+  // turn (pinned row .. end of tail) + spacer >= viewport - pinOffset (REQ-PIN-2).
   // The bottom inset is not subtracted, so a collapsing composer cannot clamp scrollTop.
   const sizeTurnSpacer = useCallback(() => {
     const node = scrollRef.current;
@@ -341,7 +350,7 @@ export default function ChatMessageList({
     const row = contentRef.current?.querySelector<HTMLElement>('[data-chat-pin-row="true"]');
     if (!node || !spacer || !row || pinPhaseRef.current === 'idle') return;
     const turn = spacer.offsetTop - row.offsetTop;
-    const height = `${Math.max(0, Math.round(node.clientHeight - PIN_OFFSET_PX - turn))}px`;
+    const height = `${Math.max(0, Math.round(node.clientHeight - pinOffsetRef.current - turn))}px`;
     if (spacer.style.height !== height) spacer.style.height = height;
   }, []);
 
@@ -349,7 +358,7 @@ export default function ChatMessageList({
     const node = scrollRef.current;
     if (!node) return 0;
     const offset = row.getBoundingClientRect().top - node.getBoundingClientRect().top;
-    return Math.max(0, node.scrollTop + offset - PIN_OFFSET_PX);
+    return Math.max(0, node.scrollTop + offset - pinOffsetRef.current);
   }, []);
 
   // REQ-PIN-1/1b/6: pin the just-sent row at `index`. Runs in a layout effect, before
@@ -369,11 +378,14 @@ export default function ChatMessageList({
     if (!row) return;
     content.querySelectorAll<HTMLElement>('[data-chat-pin-row="true"]').forEach((el) => { delete el.dataset.chatPinRow; });
     row.dataset.chatPinRow = 'true';
+    const offset = pinOffsetFor(parseFloat(node.ownerDocument.defaultView?.getComputedStyle(node).paddingTop ?? '') || 0);
+    pinOffsetRef.current = offset;
+    setPinOffset(offset);
     sizeTurnSpacer();
     const fromScroll = node.scrollTop;
     const inset = node.querySelector<HTMLElement>('[data-chat-bottom-inset]')?.offsetHeight ?? 0;
     // Where the composer text was: the bubble's bottom just above the dock.
-    const startVisual = Math.max(PIN_OFFSET_PX, node.clientHeight - inset - row.offsetHeight);
+    const startVisual = Math.max(offset, node.clientHeight - inset - row.offsetHeight);
     const target = pinTargetTop(row);
     node.scrollTop = target;
     const settle = () => {
@@ -391,7 +403,7 @@ export default function ChatMessageList({
       return;
     }
     const historyFrom = node.scrollTop - fromScroll;
-    const bubbleFrom = startVisual - PIN_OFFSET_PX;
+    const bubbleFrom = startVisual - offset;
     if (Math.abs(historyFrom) < 1 && Math.abs(bubbleFrom) < 1) { settle(); return; }
     const total = PIN_SETTLE_MS;
     const apply = (elapsed: number) => {
@@ -639,8 +651,8 @@ export default function ChatMessageList({
       // slot. Any other movement, such as wheel-down, PageDown, Space or a trackpad
       // scroll, is the reader's, so give back the normal history (REQ-PIN-3/5).
       const row = contentRef.current?.querySelector<HTMLElement>('[data-chat-pin-row="true"]');
-      const slot = row ? row.getBoundingClientRect().top - node.getBoundingClientRect().top : PIN_OFFSET_PX;
-      if (Math.abs(slot - PIN_OFFSET_PX) <= PIN_DRIFT_PX) return;
+      const slot = row ? row.getBoundingClientRect().top - node.getBoundingClientRect().top : pinOffsetRef.current;
+      if (Math.abs(slot - pinOffsetRef.current) <= PIN_DRIFT_PX) return;
       unpin();
     }
     const distance = node.scrollHeight - node.scrollTop - node.clientHeight;
@@ -680,7 +692,7 @@ export default function ChatMessageList({
         // (ui-chat-pin-tail-mask) fades it. Shown in the pinned resting state only.
         <div data-debug-id={`${debugPrefix}-pin-tail-blur`} aria-hidden="true"
           className={`ui-chat-pin-tail-blur ${pinPhase === 'pinned' ? '' : 'hidden'}`}
-          style={{ height: PIN_OFFSET_PX }} />
+          style={{ top: pinOffset - PIN_OFFSET_PX, height: PIN_OFFSET_PX }} />
       ) : null}
       {/* Polite live region for scroll-to-match: announces the jump / paging / not-found
           to screen readers without stealing focus or blocking. */}
@@ -693,7 +705,7 @@ export default function ChatMessageList({
           if (['ArrowUp', 'PageUp', 'Home'].includes(event.key) || (event.key === ' ' && event.shiftKey)) cancelTailFollow();
         }}
         className={`${scrollClassName}${pinPhase === 'pinned' ? ' ui-chat-pin-tail-mask' : ''}`}
-        style={{ overflowAnchor: 'auto', ...(pinEnabled ? { ['--chat-pin-offset' as string]: `${PIN_OFFSET_PX}px` } : {}) }}>
+        style={{ overflowAnchor: 'auto', ...(pinEnabled ? { ['--chat-pin-offset' as string]: `${pinOffset}px`, ['--chat-pin-start' as string]: `${pinOffset - PIN_OFFSET_PX}px` } : {}) }}>
         <div ref={contentRef} data-debug-id={`${debugPrefix}-messages-container`}
           className="mx-auto w-full max-w-4xl space-y-3 sm:space-y-4 [--live-tools-tail-gap:12px] sm:[--live-tools-tail-gap:16px]"
           style={{ overflowAnchor: 'none' }}>

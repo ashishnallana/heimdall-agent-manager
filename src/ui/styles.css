@@ -1158,10 +1158,11 @@ html[data-window-chrome="win-overlay"][data-window-fullscreen] .window-gate-drag
 /* REQ-PIN-3: send pin-to-top resting state (ChatMessageList pinOnSend). Only the strip
    above the pinned bubble (--chat-pin-offset tall) is de-emphasised: the scroller's mask
    fades it from ~30% opacity next to the bubble to 0 at the header, and a light blur sits
-   over that strip alone. Removed as soon as the reader scrolls back into history. */
+   over that strip alone. Removed as soon as the reader scrolls back into history.
+   --chat-pin-start moves the strip below a floating header (pinOffsetFor). */
 .ui-chat-pin-tail-mask {
-  -webkit-mask-image: linear-gradient(to bottom, transparent 0, rgb(0 0 0 / 0.3) calc(var(--chat-pin-offset, 52px) - 8px), #000 var(--chat-pin-offset, 52px));
-  mask-image: linear-gradient(to bottom, transparent 0, rgb(0 0 0 / 0.3) calc(var(--chat-pin-offset, 52px) - 8px), #000 var(--chat-pin-offset, 52px));
+  -webkit-mask-image: linear-gradient(to bottom, transparent var(--chat-pin-start, 0px), rgb(0 0 0 / 0.3) calc(var(--chat-pin-offset, 52px) - 8px), #000 var(--chat-pin-offset, 52px));
+  mask-image: linear-gradient(to bottom, transparent var(--chat-pin-start, 0px), rgb(0 0 0 / 0.3) calc(var(--chat-pin-offset, 52px) - 8px), #000 var(--chat-pin-offset, 52px));
 }
 .ui-chat-pin-tail-blur {
   position: absolute;

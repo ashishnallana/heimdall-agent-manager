@@ -6,7 +6,7 @@ import { createRoot } from 'react-dom/client';
 import { Provider } from 'react-redux';
 import { configureStore } from '@reduxjs/toolkit';
 import { JSDOM } from 'jsdom';
-import ChatMessageList, { PIN_OFFSET_PX, PIN_TRAVEL_MS, PIN_HISTORY_LAG_MS, PIN_SETTLE_MS, PIN_ACTIVITY_DELAY_MS, cubicBezierAt } from '../src/ui/components/chat/ChatMessageList.tsx';
+import ChatMessageList, { PIN_OFFSET_PX, PIN_TAIL_PX, pinOffsetFor, PIN_TRAVEL_MS, PIN_HISTORY_LAG_MS, PIN_SETTLE_MS, PIN_ACTIVITY_DELAY_MS, cubicBezierAt } from '../src/ui/components/chat/ChatMessageList.tsx';
 import { useComposerDockInset } from '../src/ui/components/chat/MessageComposer.tsx';
 
 // REQ-PIN-1..6: send pin-to-top. JSDOM has no layout, so the fixture gives the scroller a
@@ -97,6 +97,13 @@ test('pin timing mirrors the motion tokens: 300ms strong ease-out without oversh
   assert.ok(cubicBezierAt([0.2, 0.8, 0.2, 1], 0.25) > 0.6, 'fast start');
 });
 
+test('the pin slot clears a floating header: padding-top + tail strip, never above PIN_OFFSET_PX', () => {
+  assert.equal(pinOffsetFor(0), PIN_OFFSET_PX, 'unpadded scroller keeps the default slot');
+  assert.equal(pinOffsetFor(12), PIN_OFFSET_PX, 'conversation-thread py-3 keeps the default slot');
+  assert.equal(pinOffsetFor(64), 64 + PIN_TAIL_PX, 'pt-16 under a floating header: tail shows below it');
+  assert.ok(PIN_TAIL_PX >= 40 && PIN_TAIL_PX <= 60, 'visible tail is 40-60px');
+});
+
 test('own send pins the bubble under the header: translateY-only travel, bubble leads history, then fade + delayed activity', async () => {
   await withList(async ({ q, render, list, geometry, frame, settle, ...env }) => {
     await render(list(history));
@@ -125,6 +132,7 @@ test('own send pins the bubble under the header: translateY-only travel, bubble 
     assert.ok(scroll.className.includes('ui-chat-pin-tail-mask'), 'tail fade in the pinned resting state');
     assert.ok(!q('pin-pin-tail-blur')!.className.includes('hidden'), 'tail blur strip shown');
     assert.equal(q('pin-pin-tail-blur')!.style.height, PIN_OFFSET_PX + 'px', 'blur covers the tail strip only');
+    assert.equal(q('pin-pin-tail-blur')!.style.top, '0px', 'unpadded: the strip starts at the top');
     assert.equal(q('pin-pin-activity-slot')!.style.opacity, '0', 'activity line waits after settle');
     await sleep(PIN_ACTIVITY_DELAY_MS + 40);
     assert.equal(q('pin-pin-activity-slot')!.style.opacity, '', 'activity line appears after the delay');
