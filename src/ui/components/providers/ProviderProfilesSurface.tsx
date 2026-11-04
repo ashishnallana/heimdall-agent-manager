@@ -23,6 +23,7 @@ import {
   type ProfileEnv,
 } from './providerProfiles';
 import ProviderExtensionInstallAction from '../extension/ProviderExtensionInstallAction';
+import ProviderBinaryPath from './ProviderBinaryPath';
 import ProviderTestRunModal, { type ProviderTestTarget } from './ProviderTestRunModal';
 
 const fieldClass =
@@ -717,6 +718,7 @@ export default function ProviderProfilesSurface({ bridge, onHeadingChange }: {
                         {p.state && p.state !== 'ok' ? p.state : s?.state || 'Not checked'}
                         {s?.version_text ? ' · ' + s.version_text : ''}
                         </span>
+                        <ProviderBinaryPath provider={p.profile_id} status={s} overridePath={(p as { config?: { binary_path?: string } }).config?.binary_path || ''} />
                         </span>
                       </span>
                       {p.profile_id === p.provider ? <Badge>Default</Badge> : <Text role="code" tone="muted" className="break-all">{p.profile_id}</Text>}
@@ -850,6 +852,7 @@ export default function ProviderProfilesSurface({ bridge, onHeadingChange }: {
                         {currentStatus?.state || 'Not checked'} ·{' '}
                         {currentStatus?.version_text || 'No version reported'}
                       </p>
+                      <ProviderBinaryPath provider={draft.profile_id} status={currentStatus} overridePath={draft.config.binary_path || ''} />
                       <p className="text-xs text-muted">
                         Sign in with the provider CLI using this profile’s runtime directory. Then
                         scan again.

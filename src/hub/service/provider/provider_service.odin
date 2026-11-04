@@ -423,7 +423,10 @@ apply_discovery_report :: proc(
 		has_extension := entry.extension_json != ""
 		domain.provider_catalog_entry_destroy(entry)
 		stored := status
-		if status.profile_id!="" do stored.binary_path=""
+		// Only a non-default profile hides its path (it may be a private override). The
+		// bridge reports the default profile under its effective id (== provider), so a
+		// plain `!= ""` check wrongly blanked the PATH-resolved path of every default.
+		if domain.profile_effective_id(status.provider,status.profile_id)!=status.provider do stored.binary_path=""
 		if e:=validate_report_profile(service.repo,bridge_id,status.provider,status.profile_id);e.code!=.None do return e
 		// The catalog, not the Bridge, decides whether an extension exists. A report
 		// from a Bridge older than REQ-EXT-DET-1 carries no state and stays "".
