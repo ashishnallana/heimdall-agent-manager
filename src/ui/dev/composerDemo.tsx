@@ -34,6 +34,9 @@
  *                       menu open, or two queued attachments (default empty)
  *   ?layout=phone|desktop  phone column (default) or a desktop-width conversation
  *   ?sendAnim=curved|snappy  send travel: curved ~550ms (default) or snappy ~320ms
+ *   ?debug=layout       DEV QA: colour, outline and label every height/scroll element, with
+ *                       a live HUD and travel markers (composerLayoutDebug.tsx)
+ *   ?slow=10            with debug=layout, run the send travel 10x slower
  * A sent message containing "long" gets a reply taller than the viewport.
  * The header "…" menu applies the same presets in place (`composer-demo-preset-*`).
  *
@@ -46,6 +49,7 @@ import { Provider } from 'react-redux';
 import { combineReducers, configureStore } from '@reduxjs/toolkit';
 import { Icon, Menu, runtimeStatusToTone } from '@ui';
 import ChatMessageList, { type PinTravel } from '../components/chat/ChatMessageList';
+import { layoutDebugEnabled, useLayoutDebug } from './composerLayoutDebug';
 import {
   MessageComposerActions,
   MessageComposerInput,
@@ -154,6 +158,7 @@ const AGENT_REPLY = `Got it (demo reply, nothing was sent). Your message stays p
 const LONG_AGENT_REPLY = Array.from({ length: 14 }, (_, i) => `${i + 1}. A long demo reply line, so the exchange outgrows the viewport and you scroll through it normally.`).join('\n\n');
 
 const PRESETS = new URLSearchParams(window.location.search);
+const LAYOUT_DEBUG = layoutDebugEnabled();
 const SEND_ANIM: PinTravel = PRESETS.get('sendAnim') === 'snappy' ? 'snappy' : 'curved';
 
 const timeFormatter = new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' });
@@ -414,6 +419,8 @@ function ComposerDemo() {
     }, 900);
   }, []);
 
+  const layoutDebug = useLayoutDebug(LAYOUT_DEBUG, send);
+
   const submit = (event: FormEvent) => {
     event.preventDefault();
     send(draft);
@@ -455,6 +462,7 @@ function ComposerDemo() {
       }
     >
       {PRESETS.get('kbd') === '1' ? <KeyboardReadout /> : null}
+      {layoutDebug.overlay}
       {/* Phone-width column so the demo reads the same on a desktop preview; `?layout=desktop`
           widens it to the conversation page's max width. */}
       <div className={`flex h-full w-full flex-col sm:border-x sm:border-subtle ${desktop ? 'max-w-[calc(56rem+3.5rem)]' : 'max-w-[440px]'}`}>
@@ -483,6 +491,7 @@ function ComposerDemo() {
             pinOnSend
             pinOriginRef={textareaRef}
             pinTravel={SEND_ANIM}
+            pinDebug={layoutDebug.hooks}
             wrapperClassName="relative min-h-0 min-w-0 max-w-full flex-1 overflow-hidden overflow-x-hidden"
             scrollClassName="chat-scrollbar h-full min-h-0 max-w-full space-y-3 overflow-y-auto overflow-x-hidden rounded-none bg-canvas px-1 py-3 pt-16"
           />

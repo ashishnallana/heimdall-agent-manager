@@ -87,6 +87,36 @@ export const PIN_ACTIVITY_DELAY_MS = 200;
 export const PIN_EASE: [number, number, number, number] = [0.2, 0.8, 0.2, 1];
 export const PIN_EASE_X: [number, number, number, number] = [0.45, 0, 0.25, 1];
 const bezierCss = (ease: [number, number, number, number]) => `cubic-bezier(${ease.join(', ')})`;
+// DEV-ONLY (composer demo `?debug=layout`, user QA round 4): measurements of each send
+// travel and a playback-rate override, so the preview can show where the bubble starts.
+// Nothing in the app passes `pinDebug`; remove it with the demo's LayoutDebug before the PR.
+export type PinDebugPoint = { x: number; y: number };
+export type PinDebugEvent = {
+  phase: 'start' | 'settle';
+  at: number;
+  /** The composer text origin captured in the render that added the row (null: fallback). */
+  origin: PinDebugPoint | null;
+  /** Where the bubble text should appear at t=0, in viewport px (final + offsets). */
+  computedStart: PinDebugPoint;
+  /** Where the bubble text rests once settled (measured after the scrollTop jump). */
+  final: PinDebugPoint;
+  scrollBefore: number;
+  scrollAfter: number;
+  scrollHeight: number;
+  clientHeight: number;
+  pinOffset: number;
+  tail: number;
+  spacer: number;
+  inset: number;
+  history: number;
+  rowX: number;
+  rowY: number;
+  duration: number;
+  reducedMotion: boolean;
+  animations: Animation[];
+};
+export type PinDebugHooks = { playbackRate?: number; onEvent?: (event: PinDebugEvent) => void };
+
 export function pinTravelTiming(travel: PinTravel): { duration: number; easeX: [number, number, number, number] } {
   return travel === 'snappy' ? { duration: PIN_SNAPPY_TRAVEL_MS, easeX: PIN_EASE } : { duration: PIN_TRAVEL_MS, easeX: PIN_EASE_X };
 }
@@ -243,6 +273,7 @@ export default function ChatMessageList({
   pinOnSend = false,
   pinOriginRef,
   pinTravel = 'curved',
+  pinDebug,
 }: {
   conversationKey: string;
   messages: ChatMessage[];
@@ -296,6 +327,8 @@ export default function ChatMessageList({
   pinOriginRef?: RefObject<HTMLElement | null>;
   /** REQ-PIN-1 rev4: the send travel variant, curved ~550ms (default) or snappy ~320ms. */
   pinTravel?: PinTravel;
+  /** DEV-ONLY: travel measurements and a playback-rate override (composer demo). */
+  pinDebug?: PinDebugHooks;
 }) {
   const isMobile = useIsMobile();
   const isUnlocked = useSelector(selectIsVaultUnlocked);
@@ -363,6 +396,8 @@ export default function ChatMessageList({
   const pinOverflowRef = useRef(0);
   const pinTravelRef = useRef(pinTravel);
   pinTravelRef.current = pinTravel;
+  const pinDebugRef = useRef(pinDebug);
+  pinDebugRef.current = pinDebug;
   // The resolved slot (pinOffsetFor) and where the tail strip starts (the scroller's top
   // padding), measured at each send.
   const [pinOffset, setPinOffset] = useState(PIN_TAIL_PX);
@@ -469,6 +504,7 @@ export default function ChatMessageList({
     const inset = node.querySelector<HTMLElement>('[data-chat-bottom-inset]')?.offsetHeight ?? 0;
     node.scrollTop = node.scrollHeight - node.clientHeight;
     travelRef.current = true;
+    let debug: PinDebugEvent | null = null;
     applyPinFade();
     const settle = () => {
       cancelAnimationFrame(pinFrameRef.current);
@@ -482,26 +518,41 @@ export default function ChatMessageList({
       const pinned = content.querySelector<HTMLElement>('[data-chat-pin-row="true"]');
       for (const prop of ['transform', 'translate', 'position', 'z-index']) pinned?.style.removeProperty(prop);
       applyPinFade();
+      if (debug) pinDebugRef.current?.onEvent?.({ ...debug, phase: 'settle', at: performance.now(), scrollAfter: node.scrollTop, animations: [] });
       setActivityHeld(true);
       clearTimeout(activityTimerRef.current);
       activityTimerRef.current = setTimeout(() => setActivityHeld(false), PIN_ACTIVITY_DELAY_MS);
     };
-    if (reduceMotionRef.current) {
-      settle();
-      setActivityHeld(false);
-      return;
-    }
     // Offsets, in screen pixels, from the resting state back to the moment of send.
     const history = node.scrollTop - fromScroll;
     const bubble = textOrigin(row.querySelector('[data-chat-body]') ?? row);
     const fromX = start ? start.left - bubble.left : 0;
     // Without a composer origin, start just under the dock top (behind the composer).
     const fromY = (start ? start.top : node.getBoundingClientRect().top + node.clientHeight - inset) - bubble.top;
-    if (Math.abs(history) < 1 && Math.abs(fromX) < 1 && Math.abs(fromY) < 1) { settle(); return; }
+    const { duration, easeX } = pinTravelTiming(pinTravelRef.current);
+    if (pinDebugRef.current) {
+      debug = {
+        phase: 'start', at: performance.now(), origin: start ? { x: start.left, y: start.top } : null,
+        computedStart: { x: bubble.left + fromX, y: bubble.top + fromY }, final: { x: bubble.left, y: bubble.top },
+        scrollBefore: fromScroll, scrollAfter: node.scrollTop, scrollHeight: node.scrollHeight, clientHeight: node.clientHeight,
+        pinOffset: offset, tail, spacer: turnSpacerRef.current?.offsetHeight ?? 0, inset, history,
+        rowX: fromX, rowY: fromY - history, duration, reducedMotion: reduceMotionRef.current, animations: [],
+      };
+    }
+    if (reduceMotionRef.current) {
+      if (debug) pinDebugRef.current?.onEvent?.(debug);
+      settle();
+      setActivityHeld(false);
+      return;
+    }
+    if (Math.abs(history) < 1 && Math.abs(fromX) < 1 && Math.abs(fromY) < 1) {
+      if (debug) pinDebugRef.current?.onEvent?.(debug);
+      settle();
+      return;
+    }
     // The row lives inside the moving content, so its own offset excludes the history's.
     const rowX = fromX;
     const rowY = fromY - history;
-    const { duration, easeX } = pinTravelTiming(pinTravelRef.current);
     // REQ-PIN-6 safety net: the opaque bubble draws above the list while it moves.
     row.style.position = 'relative';
     row.style.zIndex = '1';
@@ -518,6 +569,9 @@ export default function ChatMessageList({
       const rows = specs.map((spec) => row.animate(spec.keyframes, spec.options));
       pinAnimationsRef.current = { content: contentAnimation, rows, rowEl: row, specs };
       contentAnimation.onfinish = settle;
+      const rate = pinDebugRef.current?.playbackRate;
+      if (rate && rate !== 1) [contentAnimation, ...rows].forEach((a) => { a.playbackRate = rate; });
+      if (debug) pinDebugRef.current?.onEvent?.({ ...debug, animations: [contentAnimation, ...rows] });
       return;
     }
     const apply = (elapsed: number) => {
@@ -554,7 +608,9 @@ export default function ChatMessageList({
     row.style.zIndex = '1';
     const rows = animations.specs.map((spec) => {
       const next = row.animate(spec.keyframes, spec.options);
+      next.playbackRate = animations.content.playbackRate;
       next.currentTime = animations.content.currentTime;
+      if (animations.content.playState === 'paused') next.pause();
       return next;
     });
     pinAnimationsRef.current = { ...animations, rows, rowEl: row };
