@@ -10,12 +10,15 @@
  *   on the first painted frame, and the final resting point, plus a line at pinOffset;
  * - a HUD with live scroll metrics and controls for slow motion (`?slow=10` starts at 0.1x),
  *   pause, frame step and resend;
- * - each send's measurements are logged to the console (`[pin-debug]`).
+ * - each send's measurements are logged to the console (`[pin-debug]`), with the bubble's
+ *   rect and scrollTop on every frame of the first 100ms of the travel;
+ * - the HUD lists the last programmatic scrollTop writes, spacer and inset changes, gesture
+ *   starts and older-page loads (ChatMessageList's `onLog`), so a write mid-gesture shows.
  * Remove this file, its import in composerDemo.tsx and ChatMessageList's `pinDebug` prop
  * before the PR.
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactElement } from 'react';
-import type { PinDebugEvent, PinDebugHooks, PinDebugPoint } from '../components/chat/ChatMessageList';
+import type { PinDebugEvent, PinDebugHooks, PinDebugLog, PinDebugPoint } from '../components/chat/ChatMessageList';
 
 const PREFIX = 'composer-demo';
 
@@ -65,7 +68,7 @@ ${TARGETS.map(([id, , bg]) => `[data-debug-layout] [data-debug-id="${PREFIX}-${i
 .pin-dbg-line { position: fixed; height: 0; border-top: 2px dashed #ff0050; pointer-events: none; z-index: 9995; }
 .pin-dbg-line > span { position: absolute; right: 0; top: -12px; font: 9px/1.2 ui-monospace, monospace; color: #fff; background: #ff0050; padding: 0 3px; }
 .pin-dbg-hud { position: fixed; top: 4px; right: 4px; z-index: 9999; max-width: min(340px, calc(100vw - 8px)); max-height: calc(100vh - 8px); overflow: auto;
-  font: 10px/1.35 ui-monospace, monospace; color: #e8e8e8; background: rgba(0,0,0,0.82); border-radius: 6px; padding: 6px 8px; white-space: pre; }
+  font: 10px/1.35 ui-monospace, monospace; color: #e8e8e8; background: rgba(0,0,0,0.82); border-radius: 6px; padding: 6px 8px; white-space: pre-wrap; word-break: break-all; }
 .pin-dbg-hud button { font: inherit; color: #fff; background: #333; border: 1px solid #666; border-radius: 4px; padding: 1px 6px; margin: 0 3px 4px 0; pointer-events: auto; }
 .pin-dbg-hud button[aria-pressed="true"] { background: #b0005a; }
 `;
@@ -164,6 +167,7 @@ export function useLayoutDebug(enabled: boolean, onResend: (text: string) => voi
   const [travel, setTravel] = useState(false);
   const [paused, setPaused] = useState(false);
   const [hudOpen, setHudOpen] = useState(true);
+  const [logs, setLogs] = useState<PinDebugLog[]>([]);
   const animationsRef = useRef<Animation[]>([]);
   const rateRef = useRef(rate);
   rateRef.current = rate;
@@ -178,6 +182,17 @@ export function useLayoutDebug(enabled: boolean, onResend: (text: string) => voi
       setMeasuredFinal(null);
       // The position actually painted at t≈0 (the transforms are live on the next frame).
       const atEvent = measureBubble();
+      // QA round 5: per-frame bubble position and scrollTop over the first 100ms, at any rate.
+      const t0 = performance.now();
+      const scroller = document.querySelector<HTMLElement>(`[data-debug-id="${PREFIX}-scroll"]`);
+      const frames: Array<{ t: number; bubble: string; scrollTop: number }> = [{ t: 0, bubble: fmt(atEvent), scrollTop: scroller?.scrollTop ?? -1 }];
+      const sample = () => {
+        const t = Math.round(performance.now() - t0);
+        frames.push({ t, bubble: fmt(measureBubble()), scrollTop: Math.round(scroller?.scrollTop ?? -1) });
+        if (t < 100) requestAnimationFrame(sample);
+        else { console.log('[pin-debug] per-frame (first 100ms):'); console.table(frames); }
+      };
+      requestAnimationFrame(sample);
       requestAnimationFrame(() => {
         const painted = measureBubble();
         setMeasuredStart(painted);
@@ -199,7 +214,12 @@ export function useLayoutDebug(enabled: boolean, onResend: (text: string) => voi
     }
   }, []);
 
-  const hooks = useMemo<PinDebugHooks | undefined>(() => (enabled ? { playbackRate: rate, onEvent } : undefined), [enabled, rate, onEvent]);
+  const onLog = useCallback((entry: PinDebugLog) => {
+    console.log(`[pin-debug] ${entry.at.toFixed(0)}ms ${entry.kind}: ${entry.detail}`);
+    setLogs((prev) => [...prev.slice(-7), entry]);
+  }, []);
+
+  const hooks = useMemo<PinDebugHooks | undefined>(() => (enabled ? { playbackRate: rate, onEvent, onLog } : undefined), [enabled, rate, onEvent, onLog]);
 
   useEffect(() => {
     if (!enabled) return;
@@ -272,6 +292,8 @@ export function useLayoutDebug(enabled: boolean, onResend: (text: string) => voi
     `scroll b→a    ${last ? `${last.scrollBefore} → ${last.scrollAfter}` : '-'}`,
     `history Δ     ${last?.history ?? '-'}   row Δ ${last ? `${Math.round(last.rowX)},${Math.round(last.rowY)}` : '-'}`,
     `tail          ${last?.tail ?? '-'}   scroller top ${view ? Math.round(view.top) : '-'}`,
+    `── layout/scroll log ──`,
+    ...(logs.length ? logs.map((l) => `${(l.at / 1000).toFixed(2)}s ${l.kind} ${l.detail}`) : ['(none yet)']),
   ].join('\n');
 
   const overlay = (
