@@ -6,7 +6,7 @@ import { createRoot } from 'react-dom/client';
 import { Provider } from 'react-redux';
 import { configureStore } from '@reduxjs/toolkit';
 import { JSDOM } from 'jsdom';
-import ChatMessageList, { PIN_TAIL_PX, PIN_TAIL_MAX_PX, pinOffsetFor, pinTailFor, pinSpacerFor, pinFadeFor, PIN_FADE_RANGE_PX, PIN_TRAVEL_MS, PIN_SNAPPY_TRAVEL_MS, PIN_SETTLE_MS, PIN_ACTIVITY_DELAY_MS, PIN_EASE, PIN_EASE_X, PIN_SCROLL_IDLE_MS, JUMP_THRESHOLD_PX, cubicBezierAt, restingInsetFor } from '../src/ui/components/chat/ChatMessageList.tsx';
+import ChatMessageList, { PIN_TAIL_PX, PIN_TAIL_MAX_PX, pinOffsetFor, pinTailFor, pinSpacerFor, pinFadeFor, PIN_FADE_RANGE_PX, PIN_TRAVEL_MS, PIN_SNAPPY_TRAVEL_MS, PIN_SETTLE_MS, PIN_ACTIVITY_DELAY_MS, PIN_EASE, PIN_EASE_X, PIN_SCROLL_IDLE_MS, JUMP_THRESHOLD_PX, cubicBezierAt, restingInsetFor, pinTravelTiming } from '../src/ui/components/chat/ChatMessageList.tsx';
 import { useComposerDockInset } from '../src/ui/components/chat/MessageComposer.tsx';
 
 // REQ-PIN-1..6: send pin-to-top. JSDOM has no layout, so the fixture models one: a 600px
@@ -143,7 +143,7 @@ test('pin timing (REQ-PIN-1 rev4): curved ~550ms by default, snappy ~320ms, no o
   assert.ok(PIN_SNAPPY_TRAVEL_MS >= 300 && PIN_SNAPPY_TRAVEL_MS <= 350, 'snappy travel ~320ms');
   assert.equal(PIN_SETTLE_MS, PIN_TRAVEL_MS, 'bubble and list settle together');
   assert.ok(PIN_ACTIVITY_DELAY_MS >= 150 && PIN_ACTIVITY_DELAY_MS <= 250);
-  assert.deepEqual(PIN_EASE, [0.2, 0.8, 0.2, 1]);
+  assert.deepEqual(PIN_EASE, [0.4, 0, 0.2, 1]);
   assert.deepEqual(PIN_EASE_X, [0.45, 0, 0.25, 1]);
   for (const ease of [PIN_EASE, PIN_EASE_X]) {
     let last = 0;
@@ -153,8 +153,20 @@ test('pin timing (REQ-PIN-1 rev4): curved ~550ms by default, snappy ~320ms, no o
       last = y;
     }
   }
-  assert.ok(cubicBezierAt(PIN_EASE, 0.25) > 0.6, 'fast start');
-  assert.ok(cubicBezierAt(PIN_EASE_X, 0.25) < cubicBezierAt(PIN_EASE, 0.25) - 0.3, 'X lags Y, so the path curves');
+  // User direction 2026-11-04 13:04: the travel starts slow, so a late first frame on a
+  // phone covers almost none of the distance (the old ease-out covered ~12% in 16ms).
+  for (const ease of [PIN_EASE, PIN_EASE_X]) assert.ok(cubicBezierAt(ease, 16 / PIN_TRAVEL_MS) < 0.01, 'slow start');
+  for (const x of [0.25, 0.5]) assert.ok(cubicBezierAt(PIN_EASE_X, x) < cubicBezierAt(PIN_EASE, x) - 0.03, 'X lags Y, so the path curves');
+});
+
+test('pinTravelTiming: the pinEase override replaces each curve; snappy stays straight', () => {
+  assert.deepEqual(pinTravelTiming('curved'), { duration: PIN_TRAVEL_MS, easeY: PIN_EASE, easeX: PIN_EASE_X });
+  assert.deepEqual(pinTravelTiming('snappy'), { duration: PIN_SNAPPY_TRAVEL_MS, easeY: PIN_EASE, easeX: PIN_EASE });
+  const y: [number, number, number, number] = [0.2, 0.8, 0.2, 1];
+  const x: [number, number, number, number] = [0.55, 0, 0.35, 1];
+  assert.deepEqual(pinTravelTiming('curved', { y, x }), { duration: PIN_TRAVEL_MS, easeY: y, easeX: x });
+  assert.deepEqual(pinTravelTiming('curved', { x }), { duration: PIN_TRAVEL_MS, easeY: PIN_EASE, easeX: x });
+  assert.deepEqual(pinTravelTiming('snappy', { y, x }), { duration: PIN_SNAPPY_TRAVEL_MS, easeY: y, easeX: y });
 });
 
 test('the tail keeps the previous last line and action row, below any floating header', () => {
@@ -253,7 +265,7 @@ for (const travel of ['curved', 'snappy'] as const) {
       assert.ok(Math.abs(mid.rowY / (start.rowY || 1) - yLeft) < 1e-6 || start.rowY === 0, 'bubble Y on the list\'s curve');
       const xLeft = mid.x / start.x;
       if (travel === 'snappy') assert.ok(Math.abs(xLeft - yLeft) < 1e-6, 'snappy: straight path');
-      else assert.ok(xLeft - yLeft > 0.2, 'curved: X lags Y, so the path bends');
+      else assert.ok(xLeft - yLeft > 0.05, 'curved: X lags Y, so the path bends');
       await settle();
       assert.equal(row.style.transform, '', 'bubble at rest in its slot');
       assert.equal(inner.style.transform, '', 'no X offset left');
@@ -278,7 +290,7 @@ test('with WAAPI the list and the bubble (Y and X on their own curves) run on th
     assert.equal(calls.length, 3, 'the list, the bubble\'s Y and the bubble\'s X');
     assert.deepEqual(calls.map((c) => c.el), [q('pin-messages-container'), row, row.firstElementChild], 'Y on the row, X on its column');
     assert.deepEqual(calls.map((c) => c.timing.duration), [PIN_TRAVEL_MS, PIN_TRAVEL_MS, PIN_TRAVEL_MS]);
-    assert.deepEqual(calls.map((c) => c.timing.easing), ['cubic-bezier(0.2, 0.8, 0.2, 1)', 'cubic-bezier(0.2, 0.8, 0.2, 1)', 'cubic-bezier(0.45, 0, 0.25, 1)']);
+    assert.deepEqual(calls.map((c) => c.timing.easing), ['cubic-bezier(0.4, 0, 0.2, 1)', 'cubic-bezier(0.4, 0, 0.2, 1)', 'cubic-bezier(0.45, 0, 0.25, 1)']);
     assert.equal(calls[1].frames[1].transform, 'translate3d(0, 0, 0)');
     assert.match(String(calls[2].frames[0].transform), /^translate3d\(-?\d+(\.\d+)?px, 0, 0\)$/, 'X is a transform too (composited), not the translate property');
     assert.equal(calls[2].frames[1].transform, 'translate3d(0, 0, 0)');

@@ -75,7 +75,7 @@ function useReducedMotion(): boolean {
 // top of the list. The strip above it keeps the faded, lightly blurred tail of the
 // previous message (its last line and action row).
 // REQ-PIN-1 rev4 (user QA round 2): the default travel is ~550ms on a visibly curved
-// path, Y on cubic-bezier(0.2, 0.8, 0.2, 1) and X on cubic-bezier(0.45, 0, 0.25, 1); the
+// path, Y on PIN_EASE and X on PIN_EASE_X (both start slow, see below); the
 // history moves with the bubble on the Y curve as ONE animation. The 'snappy' variant is
 // the earlier ~320ms straight travel on the Y curve. Transforms only (WAAPI, so it runs on
 // the compositor; rAF where WAAPI is missing).
@@ -84,9 +84,16 @@ export const PIN_TRAVEL_MS = 550;
 export const PIN_SNAPPY_TRAVEL_MS = 320;
 export const PIN_SETTLE_MS = PIN_TRAVEL_MS;
 export const PIN_ACTIVITY_DELAY_MS = 200;
-export const PIN_EASE: [number, number, number, number] = [0.2, 0.8, 0.2, 1];
-export const PIN_EASE_X: [number, number, number, number] = [0.45, 0, 0.25, 1];
-const bezierCss = (ease: [number, number, number, number]) => `cubic-bezier(${ease.join(', ')})`;
+// User direction 2026-11-04 13:04: the Y travel (and the history, on the same curve so the
+// bubble stays in its slot) STARTS SLOW. The earlier strong ease-out [0.2, 0.8, 0.2, 1] moved
+// ~12% of the distance in the first 16ms frame, so one late first frame on a phone showed
+// the bubble already well along its path; this ease-in-out moves ~0.2% there.
+export type PinEaseCurve = [number, number, number, number];
+export const PIN_EASE: PinEaseCurve = [0.4, 0, 0.2, 1];
+export const PIN_EASE_X: PinEaseCurve = [0.45, 0, 0.25, 1];
+/** Per-list easing override (the composer demo's `?ease=` / `?easeX=` tuning). */
+export type PinEase = { y?: PinEaseCurve; x?: PinEaseCurve };
+const bezierCss = (ease: PinEaseCurve) => `cubic-bezier(${ease.join(', ')})`;
 // DEV-ONLY (composer demo `?debug=layout`, user QA round 4): measurements of each send
 // travel and a playback-rate override, so the preview can show where the bubble starts.
 // Nothing in the app passes `pinDebug`; remove it with the demo's LayoutDebug before the PR.
@@ -119,8 +126,12 @@ export type PinDebugEvent = {
 export type PinDebugLog = { at: number; kind: 'scrollTop' | 'spacer' | 'inset' | 'load-older' | 'gesture'; detail: string };
 export type PinDebugHooks = { playbackRate?: number; onEvent?: (event: PinDebugEvent) => void; onLog?: (entry: PinDebugLog) => void };
 
-export function pinTravelTiming(travel: PinTravel): { duration: number; easeX: [number, number, number, number] } {
-  return travel === 'snappy' ? { duration: PIN_SNAPPY_TRAVEL_MS, easeX: PIN_EASE } : { duration: PIN_TRAVEL_MS, easeX: PIN_EASE_X };
+// Snappy is a straight path: X runs on the Y curve.
+export function pinTravelTiming(travel: PinTravel, ease?: PinEase): { duration: number; easeY: PinEaseCurve; easeX: PinEaseCurve } {
+  const easeY = ease?.y ?? PIN_EASE;
+  return travel === 'snappy'
+    ? { duration: PIN_SNAPPY_TRAVEL_MS, easeY, easeX: easeY }
+    : { duration: PIN_TRAVEL_MS, easeY, easeX: ease?.x ?? PIN_EASE_X };
 }
 // The visible tail: from the bubble up to the top of the previous message's last line,
 // so that line and its action row peek out, kept within PIN_TAIL_PX..PIN_TAIL_MAX_PX.
@@ -313,6 +324,7 @@ export default function ChatMessageList({
   pinOnSend = false,
   pinOriginRef,
   pinTravel = 'curved',
+  pinEase,
   pinDebug,
 }: {
   conversationKey: string;
@@ -367,6 +379,8 @@ export default function ChatMessageList({
   pinOriginRef?: RefObject<HTMLElement | null>;
   /** REQ-PIN-1 rev4: the send travel variant, curved ~550ms (default) or snappy ~320ms. */
   pinTravel?: PinTravel;
+  /** Overrides the send-travel curves (PIN_EASE / PIN_EASE_X); the app leaves it unset. */
+  pinEase?: PinEase;
   /** DEV-ONLY: travel measurements and a playback-rate override (composer demo). */
   pinDebug?: PinDebugHooks;
 }) {
@@ -439,6 +453,8 @@ export default function ChatMessageList({
   const pinOverflowRef = useRef(0);
   const pinTravelRef = useRef(pinTravel);
   pinTravelRef.current = pinTravel;
+  const pinEaseRef = useRef(pinEase);
+  pinEaseRef.current = pinEase;
   const pinDebugRef = useRef(pinDebug);
   pinDebugRef.current = pinDebug;
   // The resolved slot (pinOffsetFor) and where the tail strip starts (the scroller's top
@@ -633,7 +649,7 @@ export default function ChatMessageList({
     const fromX = start ? start.left - bubble.left : 0;
     // Without a composer origin, start just under the dock top (behind the composer).
     const fromY = (start ? start.top : node.getBoundingClientRect().top + node.clientHeight - inset) - bubble.top;
-    const { duration, easeX } = pinTravelTiming(pinTravelRef.current);
+    const { duration, easeY, easeX } = pinTravelTiming(pinTravelRef.current, pinEaseRef.current);
     if (pinDebugRef.current) {
       debug = {
         phase: 'start', at: performance.now(), origin: start ? { x: start.left, y: start.top } : null,
@@ -667,11 +683,11 @@ export default function ChatMessageList({
     // `transform` (QA round 5: the individual `translate` property is not composited in
     // every WebKit, so at 1x a busy main thread could hold X back while Y ran).
     const specs: RowAnimationSpec[] = [
-      { target: 'row', keyframes: [{ transform: `translate3d(0, ${rowY}px, 0)` }, { transform: 'translate3d(0, 0, 0)' }], options: { duration, easing: bezierCss(PIN_EASE) } },
+      { target: 'row', keyframes: [{ transform: `translate3d(0, ${rowY}px, 0)` }, { transform: 'translate3d(0, 0, 0)' }], options: { duration, easing: bezierCss(easeY) } },
       { target: 'inner', keyframes: [{ transform: `translate3d(${rowX}px, 0, 0)` }, { transform: 'translate3d(0, 0, 0)' }], options: { duration, easing: bezierCss(easeX) } },
     ];
     if (typeof content.animate === 'function' && typeof row.animate === 'function') {
-      const contentAnimation = content.animate(contentFrames, { duration, easing: bezierCss(PIN_EASE) });
+      const contentAnimation = content.animate(contentFrames, { duration, easing: bezierCss(easeY) });
       const rows = specs.map((spec) => pinTargetOf(row, spec.target).animate(spec.keyframes, spec.options));
       pinAnimationsRef.current = { content: contentAnimation, rows, rowEl: row, specs };
       contentAnimation.onfinish = settle;
@@ -682,7 +698,7 @@ export default function ChatMessageList({
     }
     const apply = (elapsed: number) => {
       const progress = Math.min(1, elapsed / duration);
-      const remainingY = 1 - cubicBezierAt(PIN_EASE, progress);
+      const remainingY = 1 - cubicBezierAt(easeY, progress);
       const remainingX = 1 - cubicBezierAt(easeX, progress);
       content.style.transform = `translate3d(0, ${history * remainingY}px, 0)`;
       const pinned = content.querySelector<HTMLElement>('[data-chat-pin-row="true"]');

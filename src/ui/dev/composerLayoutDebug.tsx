@@ -168,6 +168,8 @@ export function useLayoutDebug(enabled: boolean, onResend: (text: string) => voi
   const [paused, setPaused] = useState(false);
   const [hudOpen, setHudOpen] = useState(true);
   const [logs, setLogs] = useState<PinDebugLog[]>([]);
+  const [firstFrames, setFirstFrames] = useState<string[]>([]);
+  const [easing, setEasing] = useState('-');
   const animationsRef = useRef<Animation[]>([]);
   const rateRef = useRef(rate);
   rateRef.current = rate;
@@ -185,10 +187,19 @@ export function useLayoutDebug(enabled: boolean, onResend: (text: string) => voi
       // QA round 5: per-frame bubble position and scrollTop over the first 100ms, at any rate.
       const t0 = performance.now();
       const scroller = document.querySelector<HTMLElement>(`[data-debug-id="${PREFIX}-scroll"]`);
-      const frames: Array<{ t: number; bubble: string; scrollTop: number }> = [{ t: 0, bubble: fmt(atEvent), scrollTop: scroller?.scrollTop ?? -1 }];
+      // `anim t` is the main-thread animation time. WebKit runs these on the compositor, which can
+      // already be ahead of it on screen, so a rect matching the origin at anim t=0 does not
+      // prove the painted pixel was there (iPad, 13:04).
+      const main = animations[0];
+      // [list, bubble Y, bubble X]: the list and Y share one curve.
+      const curves = animations.map((a) => a.effect?.getTiming().easing ?? '?');
+      setEasing(curves.length ? `Y ${curves[0]}${curves[2] && curves[2] !== curves[0] ? ` X ${curves[2]}` : ''}` : '- (no travel)');
+      const animT = () => (main && typeof main.currentTime === 'number' ? Math.round(main.currentTime) : -1);
+      const frames: Array<{ t: number; animT: number; bubble: string; scrollTop: number }> = [{ t: 0, animT: animT(), bubble: fmt(atEvent), scrollTop: scroller?.scrollTop ?? -1 }];
       const sample = () => {
         const t = Math.round(performance.now() - t0);
-        frames.push({ t, bubble: fmt(measureBubble()), scrollTop: Math.round(scroller?.scrollTop ?? -1) });
+        frames.push({ t, animT: animT(), bubble: fmt(measureBubble()), scrollTop: Math.round(scroller?.scrollTop ?? -1) });
+        if (frames.length <= 7) setFirstFrames(frames.map((f) => `+${String(f.t).padStart(3)}ms anim t${String(f.animT).padStart(4)} bubble ${f.bubble} st ${f.scrollTop}`));
         if (t < 100) requestAnimationFrame(sample);
         else { console.log('[pin-debug] per-frame (first 100ms):'); console.table(frames); }
       };
@@ -281,6 +292,7 @@ export function useLayoutDebug(enabled: boolean, onResend: (text: string) => voi
     `bottom inset  ${inset}`,
     `visualVP      h${vv ? Math.round(vv.height) : '-'} top${vv ? Math.round(vv.offsetTop) : '-'}  win h${window.innerHeight}`,
     `travel        ${travel ? 'ON' : 'off'}${paused ? ' (paused)' : ''}  rate ${rate}x`,
+    `easing        ${easing}`,
     `progress      ${(progress * 100).toFixed(0)}%  t=${main?.currentTime != null ? Math.round(Number(main.currentTime)) : '-'}/${last?.duration ?? '-'}ms`,
     `── last send ──`,
     `origin        ${fmt(last?.origin)}${last && !last.origin ? ' (NO ORIGIN, fallback)' : ''}`,
@@ -292,6 +304,8 @@ export function useLayoutDebug(enabled: boolean, onResend: (text: string) => voi
     `scroll b→a    ${last ? `${last.scrollBefore} → ${last.scrollAfter}` : '-'}`,
     `history Δ     ${last?.history ?? '-'}   row Δ ${last ? `${Math.round(last.rowX)},${Math.round(last.rowY)}` : '-'}`,
     `tail          ${last?.tail ?? '-'}   scroller top ${view ? Math.round(view.top) : '-'}`,
+    `── first frames (vs calc start ${fmt(last?.computedStart)}) ──`,
+    ...(firstFrames.length ? firstFrames : ['(none yet)']),
     `── layout/scroll log ──`,
     ...(logs.length ? logs.map((l) => `${(l.at / 1000).toFixed(2)}s ${l.kind} ${l.detail}`) : ['(none yet)']),
   ].join('\n');
