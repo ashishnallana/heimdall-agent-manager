@@ -315,6 +315,28 @@ test('REQ-B3: fleet rows grouped by machine with Working / Idle / Coordinating /
   assert.equal(fleetSummary(machines), '1 working · 1 idle · 3 off');
 });
 
+test('edge state "Agent stopped mid-work": the slot reads Blocked on that ticket since the hub noticed', () => {
+  const stalled = makeTask({
+    task_id: 'tsk_stalled',
+    title: 'Bridges auto-update',
+    blocked_on: { kind: 'agent_not_running', agent_id: 'agt_worker', reason: 'Agent agt_worker is not running', since_ms: NOW - 2 * MIN },
+  });
+  const keys = ticketKeys([stalled]);
+  const [mac] = buildFleetMachines({
+    tasks: [stalled],
+    members: [{ agent_instance_id: 'inst_w5', agent_id: 'agt_worker', display_name: 'worker #5', runtime_status: 'stopped' }],
+    fleets: [{ agent_id: 'agt_worker', capacity: 1, roles: ['worker'], bridge_id: 'brg_mac' }],
+    bridges: [{ bridge_id: 'brg_mac', label: 'mac', status: 'online' }],
+    keys,
+    agentName: () => 'worker',
+  });
+  const slot = mac.slots[0];
+  assert.equal(slot.state, 'blocked');
+  assert.equal(slot.taskId, 'tsk_stalled');
+  assert.equal(slot.detail, 'T-1 Bridges auto-update');
+  assert.equal(formatAgo(slot.sinceMs, NOW), '2m ago');
+});
+
 /* Aux tab kind (REQ-T1) ---------------------------------------------- */
 
 test('REQ-T1: ticket tabs have a content-derived id that decodes back', () => {

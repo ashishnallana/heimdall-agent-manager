@@ -148,7 +148,7 @@ export const TicketBoard: React.FC<TicketBoardProps> = ({
       <header className="flex flex-col gap-3" data-debug-id="ticket-board-header">
         <div className="flex min-w-0 items-start justify-between gap-3">
           <div className="min-w-0">
-            <Text as="h2" role="heading" className="text-primary" data-debug-id="ticket-board-headline">
+            <Text as="h2" role="heading" className="font-[family-name:var(--font-display)] text-primary" data-debug-id="ticket-board-headline">
               {headline.title}
             </Text>
             {headline.subtitle && (

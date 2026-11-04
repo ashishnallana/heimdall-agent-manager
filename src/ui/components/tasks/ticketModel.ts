@@ -800,6 +800,23 @@ export function buildFleetMachines(input: FleetInputs): FleetMachine[] {
     }
   }
 
+  // Agents the hub found not running mid-work (blocked_on agent_not_running):
+  // their slot reads Blocked, on that ticket, since the hub's since_ms.
+  for (const t of tasks) {
+    const b: any = t.blocked_on;
+    if (isFinishedTask(t) || !b || (b.kind !== 'agent_not_running' && b.kind !== 'dispatch')) continue;
+    const agentId = str(b.agent_id) || str(t.brief?.assignee);
+    const slot =
+      slots.find((s) => s.agentId === agentId && s.instanceId && (s.state === 'not_running' || s.state === 'blocked')) ||
+      slots.find((s) => s.agentId === agentId && (s.state === 'not_running' || s.state === 'blocked'));
+    if (!slot) continue;
+    const since = timestampMs(b.since_ms);
+    slot.state = 'blocked';
+    slot.taskId = t.task_id;
+    slot.detail = `${keyFor(keys, t.task_id)} ${titleOf.get(t.task_id) || ''}`.trim();
+    slot.sinceMs = Number.isNaN(since) ? null : since;
+  }
+
   const byBridge = new Map<string, FleetMachine>();
   for (const slot of slots) {
     const { bridgeId, ...rest } = slot;

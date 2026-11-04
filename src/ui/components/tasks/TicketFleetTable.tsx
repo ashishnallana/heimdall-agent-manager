@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { Button, Icon, StatusDot, StatusPill, Text } from '@ui';
 import { TicketAgentAvatar } from './TicketAgentAvatar';
-import { FLEET_STATE_LABELS, FLEET_STATE_TONE, fleetSummary, formatDuration, type FleetMachine, type FleetSlot } from './ticketModel';
+import { FLEET_STATE_LABELS, FLEET_STATE_TONE, fleetSummary, formatAgo, formatDuration, type FleetMachine, type FleetSlot } from './ticketModel';
 
 export interface TicketFleetTableProps {
   machines: FleetMachine[];
@@ -126,7 +126,7 @@ function SlotRow({
 }) {
   const working = (slot.state === 'working' || slot.state === 'reviewing') && slot.taskId;
   const inert = slot.state === 'not_running' || (!working && !slot.instanceId);
-  const since = slot.sinceMs !== null ? ` · ${formatDuration(now - slot.sinceMs)}` : '';
+  const since = slot.sinceMs === null ? '' : slot.state === 'blocked' ? ` · stopped ${formatAgo(slot.sinceMs, now)}` : ` · ${formatDuration(now - slot.sinceMs)}`;
   const onClick = () => {
     if (working && slot.taskId) onOpenTicket(slot.taskId);
     else if (!inert && slot.instanceId) onOpenAgent(slot.instanceId, slot.name);

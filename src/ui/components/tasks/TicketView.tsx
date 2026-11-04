@@ -40,6 +40,7 @@ import {
 import { useTaskActions, type TaskActionsApi } from './useTaskActions';
 import { TaskComposer } from './TaskComposer';
 import { TaskEditModal, type TaskEditField } from './TaskEditModal';
+import { HoldReasonDialog } from './HoldReasonDialog';
 import { RequirementsEditorModal, EditedText } from './RequirementsEditorModal';
 import { TicketActivity, type ActivityTab } from './TicketActivity';
 import { TicketAgentAvatar } from './TicketAgentAvatar';
@@ -67,6 +68,7 @@ import {
   ticketPosition,
   ticketTabTitle,
   type FleetMachine,
+  type FleetSlot,
   type FleetSlotState,
 } from './ticketModel';
 
@@ -160,6 +162,7 @@ export const TicketView: React.FC<TicketViewProps> = ({ chainId, taskId, isMobil
   }, [detailData?.task, listTask]);
 
   const actions = useTaskActions(chainId, taskId, task?.title || '', task || undefined);
+  const [holdOpen, setHoldOpen] = useState(false);
   const [editing, setEditing] = useState<TaskEditField | null>(null);
   const [reqEditorOpen, setReqEditorOpen] = useState(false);
   const [activityTab, setActivityTab] = useState<ActivityTab>('all');
@@ -279,11 +282,8 @@ export const TicketView: React.FC<TicketViewProps> = ({ chainId, taskId, isMobil
         if (result) dispatch(showToast({ ...recheckToast(result), autoDismissMs: 6000 }));
         return;
       }
-      case 'hold': {
-        const reason = window.prompt(`Hold ${key}? No new lease until it is released. Reason:`)?.trim();
-        if (reason) await actions.hold(reason);
-        return;
-      }
+      case 'hold':
+        return setHoldOpen(true);
       case 'release':
         return void actions.release();
       case 'cancel':
@@ -378,7 +378,7 @@ export const TicketView: React.FC<TicketViewProps> = ({ chainId, taskId, isMobil
 
   const header = (
     <div className="flex flex-col gap-3" data-debug-id="ticket-view-header">
-      <Text as="h2" role="heading" className="break-words text-primary" data-debug-id="ticket-view-title">
+      <Text as="h2" role="heading" className="break-words font-[family-name:var(--font-display)] text-primary" data-debug-id="ticket-view-title">
         <VaultText value={task.title} fallback="Untitled ticket" />
       </Text>
       <div className="flex flex-wrap items-center gap-2">
@@ -588,6 +588,7 @@ export const TicketView: React.FC<TicketViewProps> = ({ chainId, taskId, isMobil
       )}
 
       <TaskEditModal chainId={chainId} task={task} field={editing} onClose={() => setEditing(null)} tasks={ctx.tickets} chainFleets={ctx.fleets} names={ctx.names} />
+      <HoldReasonDialog ticketKey={key} open={holdOpen} busy={actions.busy} onHold={actions.hold} onClose={() => setHoldOpen(false)} />
       <RequirementsEditorModal open={reqEditorOpen} onClose={() => setReqEditorOpen(false)} chainId={chainId} task={task} keys={ctx.keys} names={ctx.names} />
     </div>
   );
@@ -789,6 +790,8 @@ function TicketAgentsCard({
   const state = normalizeTaskState(task.state);
   const slots = machines.flatMap((m) => m.slots);
   const slotForAgent = (agentId: string) => slots.find((s) => s.agentId === agentId && s.instanceId) || slots.find((s) => s.agentId === agentId) || null;
+  const offlineSlots = new Set(machines.filter((m) => !m.online).flatMap((m) => m.slots));
+  const offline = (slot: FleetSlot | null | undefined) => (slot && offlineSlots.has(slot) ? ' · machine offline' : '');
   const lease = leaseClock(task, now);
   const rows: { id: string; name: string; sub: string; state: FleetSlotState; instanceId: string }[] = [];
 
@@ -796,7 +799,7 @@ function TicketAgentsCard({
     rows.push({
       id: `holder-${lease.holderInstanceId}`,
       name: names.instance(lease.holderInstanceId) || names.agent(people.assignee) || 'Worker',
-      sub: `Assignee · has the lease · ${formatDuration(lease.leftMs)} left`,
+      sub: `Assignee · has the lease · ${formatDuration(lease.leftMs)} left${offline(slots.find((s) => s.instanceId === lease.holderInstanceId))}`,
       state: 'working',
       instanceId: lease.holderInstanceId,
     });
@@ -806,7 +809,7 @@ function TicketAgentsCard({
     rows.push({
       id: `assignee-${agentId || 'any'}`,
       name: people.assignee ? names.agent(people.assignee) : 'Any worker',
-      sub: state === 'done' ? 'Assignee · finished' : state === 'in_review' ? 'Assignee · handed off' : 'Assignee · waiting for the lease',
+      sub: (state === 'done' ? 'Assignee · finished' : state === 'in_review' ? 'Assignee · handed off' : 'Assignee · waiting for the lease') + offline(slot),
       state: slot ? (slot.state === 'working' || slot.state === 'reviewing' ? 'working' : slot.state) : 'not_running',
       instanceId: slot?.instanceId || '',
     });
@@ -821,13 +824,13 @@ function TicketAgentsCard({
     rows.push({
       id: `reviewer-${agentId}`,
       name: names.agent(agentId),
-      sub: holder
+      sub: (holder
         ? `Reviewer · reviewing, ${holder.leftMins}m left`
         : verdict
           ? `Reviewer · ${verdict === 'approve' ? 'approved' : 'requested changes'}`
           : state === 'in_review'
             ? 'Reviewer · up to review'
-            : 'Reviewer · next, after handoff',
+            : 'Reviewer · next, after handoff') + offline(slot),
       state: holder ? 'working' : slot ? (slot.state === 'working' || slot.state === 'reviewing' ? 'working' : slot.state) : 'not_running',
       instanceId: holder?.instanceId || slot?.instanceId || '',
     });

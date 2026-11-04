@@ -8,6 +8,8 @@ import { showToast } from '../../store/toastSlice';
 import { useTaskActions } from './useTaskActions';
 import { VaultText } from '../vault/VaultText';
 import { TicketAgentAvatar } from './TicketAgentAvatar';
+import { usePrefersReducedMotion } from './useTicketClock';
+import { HoldReasonDialog } from './HoldReasonDialog';
 import type { TaskEditField } from './TaskEditModal';
 import type { TaskNames } from './taskNames';
 import {
@@ -72,6 +74,7 @@ export const BoardTicketCard: React.FC<BoardTicketCardProps> = ({
   const reqLine = requirementChangeLine(task, now);
   const rework = isRework(task);
   const actions = useTaskActions(chainId, id, task.title, task);
+  const [holdOpen, setHoldOpen] = React.useState(false);
   const dispatch = useDispatch();
   const { primary, more } = getTaskActions(task);
   const lock = editLock(task, chainKind);
@@ -98,11 +101,8 @@ export const BoardTicketCard: React.FC<BoardTicketCardProps> = ({
         if (result) dispatch(showToast({ ...recheckToast(result), autoDismissMs: 6000 }));
         return;
       }
-      case 'hold': {
-        const reason = window.prompt(`Hold ${key}? No new lease until it is released. Reason:`)?.trim();
-        if (reason) await actions.hold(reason);
-        return;
-      }
+      case 'hold':
+        return setHoldOpen(true);
       case 'cancel':
         if (window.confirm(`Cancel ${key}?`)) await actions.cancel();
         return;
@@ -115,6 +115,21 @@ export const BoardTicketCard: React.FC<BoardTicketCardProps> = ({
         return;
     }
   };
+
+  // A requirement change arriving over the socket highlights the card for 3 s
+  // (not under reduced motion).
+  const reducedMotion = usePrefersReducedMotion();
+  const revision = Number(task.requirements?.revision) || 0;
+  const shownRevision = React.useRef(revision);
+  const [highlight, setHighlight] = React.useState(false);
+  React.useEffect(() => {
+    const changed = revision > shownRevision.current;
+    shownRevision.current = revision;
+    if (!changed || reducedMotion) return;
+    setHighlight(true);
+    const t = setTimeout(() => setHighlight(false), 3000);
+    return () => clearTimeout(t);
+  }, [revision, reducedMotion]);
 
   // Failures show as a toast on the board (edge states: Action fails).
   React.useEffect(() => {
@@ -132,9 +147,10 @@ export const BoardTicketCard: React.FC<BoardTicketCardProps> = ({
       data-debug-id={`task-card-${id}`}
       data-id={id}
       data-needs-you={ask ? 'true' : undefined}
+      data-highlight={highlight || undefined}
       aria-label={`${key} ${task.title}`}
       onClick={() => onOpen(id)}
-      className="group cursor-pointer rounded-lg border border-subtle bg-surface p-3 text-left transition-colors duration-fast hover:border-strong hover:bg-surface-raised motion-reduce:transition-none sm:p-4"
+      className={`group cursor-pointer rounded-lg border p-3 text-left transition-colors duration-slow hover:border-strong motion-reduce:transition-none sm:p-4 ${highlight ? 'border-info bg-info-soft' : 'border-subtle bg-surface hover:bg-surface-raised'}`}
     >
       <div className="flex min-w-0 items-start gap-2">
         <span className="mt-px shrink-0 font-mono text-caption text-faint">{key}</span>
@@ -180,7 +196,7 @@ export const BoardTicketCard: React.FC<BoardTicketCardProps> = ({
 
       <div className="mt-2 space-y-1.5 pl-0 text-body-sm sm:pl-9">
         {ask ? (
-          <Text as="p" role="body-sm" tone="muted" data-debug-id={`task-card-status-${id}`}>
+          <Text as="p" role="body-sm" tone={ask === 'agent_down' ? 'danger' : 'muted'} data-debug-id={`task-card-status-${id}`}>
             {needsYouContext(task, names)}
           </Text>
         ) : lease ? (
@@ -269,6 +285,9 @@ export const BoardTicketCard: React.FC<BoardTicketCardProps> = ({
           </div>
         )}
       </div>
+      <span onClick={stop}>
+        <HoldReasonDialog ticketKey={key} open={holdOpen} busy={actions.busy} onHold={actions.hold} onClose={() => setHoldOpen(false)} />
+      </span>
     </article>
   );
 };
