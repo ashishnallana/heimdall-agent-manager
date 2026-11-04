@@ -1,5 +1,6 @@
 package extension
 
+import "core:os"
 import "core:strings"
 import "core:testing"
 
@@ -208,4 +209,19 @@ test_hook_permission_reregisters_same_blocker_after_disconnect :: proc(t: ^testi
 	rr_reset([]string{deny_reply})
 	testing.expect_value(t, hook_run("antigravity", agy_ham_ctl, env, rr_send), `{"decision":"allow"}`)
 	testing.expect_value(t, len(rr_params), 0)
+}
+
+// DEBUG (remove before merge): with HEIMDALL_EXTENSION_DEBUG_LOG set the hook still
+// returns "" (nothing for stdout) and logging itself never prints.
+@(test)
+hook_debug_log_keeps_stdout_empty :: proc(t: ^testing.T) {
+	path := "/tmp/ham_hook_debug_test.jsonl"
+	os.remove(path)
+	defer os.remove(path)
+	line := hook_debug_line("claude", `{"hook_event_name":"Stop","session_id":"s1","transcript_path":"/nope","prompt":"SECRET"}`, "2026-01-01T00:00:00Z", 3, "")
+	testing.expect(t, !strings.contains(line, "SECRET"), line)
+	testing.expect(t, !strings.contains(line, "\n"), line)
+	hook_debug_append(path, line)
+	data, err := os.read_entire_file(path, context.temp_allocator)
+	testing.expect(t, err == nil && strings.count(string(data), "\n") == 1)
 }
