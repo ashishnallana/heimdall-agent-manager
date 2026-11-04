@@ -1156,19 +1156,21 @@ html[data-window-chrome="win-overlay"][data-window-fullscreen] .window-gate-drag
 }
 
 /* REQ-PIN-3: send pin-to-top resting state (ChatMessageList pinOnSend). Only the strip
-   above the pinned bubble (--chat-pin-offset tall) is de-emphasised: the scroller's mask
-   fades it from ~30% opacity next to the bubble to 0 at the header (holding 30% over the
-   lower half, where the previous message's last line sits), and a light blur with
-   feathered edges sits over that strip alone. Both fade out as the reader scrolls up into history.
-   The strip spans the previous message's last line and action row (pinTailFor), and
-   --chat-pin-start moves it below a floating header (pinOffsetFor). */
-/* --chat-pin-fade (0..1) follows the scroll distance from the end of the range, so the
-   tail fades in as the reader returns to the pin position and out as they scroll up. */
-[data-chat-pin-tail="on"] {
-  --chat-pin-tail-alpha: calc(1 - var(--chat-pin-fade, 1));
-  --chat-pin-mid-alpha: calc(1 - 0.7 * var(--chat-pin-fade, 1));
-  -webkit-mask-image: linear-gradient(to bottom, rgb(0 0 0 / var(--chat-pin-tail-alpha)) var(--chat-pin-start, 0px), rgb(0 0 0 / var(--chat-pin-mid-alpha)) calc(var(--chat-pin-start, 0px) + (var(--chat-pin-offset, 48px) - var(--chat-pin-start, 0px)) * 0.45), rgb(0 0 0 / var(--chat-pin-mid-alpha)) calc(var(--chat-pin-offset, 48px) - 6px), #000 var(--chat-pin-offset, 48px));
-  mask-image: linear-gradient(to bottom, rgb(0 0 0 / var(--chat-pin-tail-alpha)) var(--chat-pin-start, 0px), rgb(0 0 0 / var(--chat-pin-mid-alpha)) calc(var(--chat-pin-start, 0px) + (var(--chat-pin-offset, 48px) - var(--chat-pin-start, 0px)) * 0.45), rgb(0 0 0 / var(--chat-pin-mid-alpha)) calc(var(--chat-pin-offset, 48px) - 6px), #000 var(--chat-pin-offset, 48px));
+   above the pinned bubble is de-emphasised: the history there shows at ~30% next to the
+   bubble (holding over the lower half, where the previous message's last line sits) and
+   fades to 0 at the header, under a light blur with feathered edges. Both fade out as the
+   reader scrolls up into history. The strip spans the previous message's last line and
+   action row (pinTailFor); its top clears a floating header (pinOffsetFor).
+   REQ-PIN-3 rev3 (QA round 5): both are fixed overlays outside the scroller, so scrolling
+   only changes their opacity. The fade paints the list's own background colour
+   (--chat-pin-bg, "r g b") over the strip instead of masking the scroller, whose mask
+   change rebuilt WebKit's scrolling layer and stopped the first scroll-up. */
+.ui-chat-pin-tail-fade {
+  position: absolute;
+  inset: 0 0 auto 0;
+  z-index: 10;
+  pointer-events: none;
+  background: linear-gradient(to bottom, rgb(var(--chat-pin-bg, 15 15 15) / 1), rgb(var(--chat-pin-bg, 15 15 15) / 0.7) 45%, rgb(var(--chat-pin-bg, 15 15 15) / 0.7) calc(100% - 6px), rgb(var(--chat-pin-bg, 15 15 15) / 0));
 }
 .ui-chat-pin-tail-blur {
   position: absolute;
@@ -1181,6 +1183,6 @@ html[data-window-chrome="win-overlay"][data-window-fullscreen] .window-gate-drag
   mask-image: linear-gradient(to bottom, transparent, #000 35%, #000 75%, transparent);
 }
 @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
-  /* The mask alone still reads as faded history. */
+  /* The colour fade alone still reads as faded history. */
   .ui-chat-pin-tail-blur { display: none; }
 }

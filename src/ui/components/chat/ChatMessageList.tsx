@@ -115,7 +115,9 @@ export type PinDebugEvent = {
   reducedMotion: boolean;
   animations: Animation[];
 };
-export type PinDebugHooks = { playbackRate?: number; onEvent?: (event: PinDebugEvent) => void };
+/** One layout or scroll change on the pin path (QA round 5: proves what moved mid-gesture). */
+export type PinDebugLog = { at: number; kind: 'scrollTop' | 'spacer' | 'inset' | 'load-older' | 'gesture'; detail: string };
+export type PinDebugHooks = { playbackRate?: number; onEvent?: (event: PinDebugEvent) => void; onLog?: (entry: PinDebugLog) => void };
 
 export function pinTravelTiming(travel: PinTravel): { duration: number; easeX: [number, number, number, number] } {
   return travel === 'snappy' ? { duration: PIN_SNAPPY_TRAVEL_MS, easeX: PIN_EASE } : { duration: PIN_TRAVEL_MS, easeX: PIN_EASE_X };
@@ -141,6 +143,21 @@ export function pinOffsetFor(paddingTop: number, tail = PIN_TAIL_PX): number {
 export function pinSpacerFor(clientHeight: number, pinOffset: number, belowRowExcludingSpacer: number): number {
   return Math.max(0, Math.round(clientHeight - pinOffset - belowRowExcludingSpacer));
 }
+// REQ-PIN-2 rev3 (user decision 2026-11-04, "decouple"): the composer and the keyboard
+// overlay the conversation instead of resizing it. The exchange is sized against the
+// RESTING composer height: the smallest settled dock inset seen for this form factor (the
+// collapsed, single-line pill), never the live one. An expanded composer, an attachment
+// tray or the keyboard covers the empty space under the pinned bubble.
+export function restingInsetFor(previous: number, inset: number): number {
+  if (inset <= 0) return previous;
+  return previous <= 0 ? inset : Math.min(previous, inset);
+}
+// While the reader's finger is down or momentum runs, and for this long after the last
+// user scroll event, the list never shrinks the spacer or writes scrollTop (iOS kills
+// momentum on either); a deferred re-size lands once the scroll is idle.
+export const PIN_SCROLL_IDLE_MS = 160;
+// "Jump to latest" shows only when the reader is this far above the end of the range.
+export const JUMP_THRESHOLD_PX = 64;
 // REQ-PIN-3 rev2: the faded tail follows the scroll position. It is fully on at the
 // maximum scrollTop and fades out over the first PIN_FADE_RANGE_PX the reader scrolls up.
 export const PIN_FADE_RANGE_PX = 64;
@@ -154,11 +171,34 @@ function cssPx(el: Element, prop: 'paddingTop' | 'paddingBottom' | 'paddingLeft'
   return parseFloat(style?.[prop] ?? '') || 0;
 }
 
+// The first opaque background at or above `el`, as "r g b" for rgb(... / alpha): the tail
+// fade paints this colour over the strip instead of masking the scroller (REQ-PIN-3 rev3).
+function opaqueBackgroundRgb(el: Element | null): string | null {
+  for (let node = el; node; node = node.parentElement) {
+    const match = node.ownerDocument.defaultView?.getComputedStyle(node).backgroundColor
+      ?.match(/^rgba?\(\s*([\d.]+)[\s,]+([\d.]+)[\s,]+([\d.]+)(?:\s*[,/]\s*([\d.]+%?))?\s*\)$/);
+    if (match && (match[4] === undefined || parseFloat(match[4]) > 0)) return `${match[1]} ${match[2]} ${match[3]}`;
+  }
+  return null;
+}
+
 // Where an element's text starts on screen (its content box's top-left corner).
 function textOrigin(el: Element): { left: number; top: number } {
   const rect = el.getBoundingClientRect();
   return { left: rect.left + cssPx(el, 'borderLeftWidth') + cssPx(el, 'paddingLeft'),
     top: rect.top + cssPx(el, 'borderTopWidth') + cssPx(el, 'paddingTop') };
+}
+
+// The send travel moves the pinned row on Y and its inner column on X.
+function pinTargetOf(row: HTMLElement, target: 'row' | 'inner'): HTMLElement {
+  return target === 'inner' ? (row.firstElementChild as HTMLElement | null) ?? row : row;
+}
+
+function resetPinnedRowStyle(content: HTMLElement) {
+  const row = content.querySelector<HTMLElement>('[data-chat-pin-row="true"]');
+  if (!row) return;
+  for (const prop of ['transform', 'translate', 'position', 'z-index']) row.style.removeProperty(prop);
+  if (row.firstElementChild instanceof HTMLElement) row.firstElementChild.style.removeProperty('transform');
 }
 
 // Solves a CSS cubic-bezier timing function for progress x in [0, 1].
@@ -386,11 +426,14 @@ export default function ChatMessageList({
   const finishTravelRef = useRef<(() => void) | null>(null);
   const [activityHeld, setActivityHeld] = useState(false);
   const pinFrameRef = useRef(0);
-  type RowAnimationSpec = { keyframes: Keyframe[]; options: KeyframeAnimationOptions };
+  type RowAnimationSpec = { target: 'row' | 'inner'; keyframes: Keyframe[]; options: KeyframeAnimationOptions };
   const pinAnimationsRef = useRef<{ content: Animation; rows: Animation[]; rowEl: HTMLElement; specs: RowAnimationSpec[] } | null>(null);
   const activityTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const turnSpacerRef = useRef<HTMLDivElement | null>(null);
   const tailBlurRef = useRef<HTMLDivElement | null>(null);
+  const tailFadeRef = useRef<HTMLDivElement | null>(null);
+  const messageCountRef = useRef(messages.length);
+  messageCountRef.current = messages.length;
   // How far the exchange reaches past the view (0 for a short reply): the pin position
   // is this far above the end of the scroll range.
   const pinOverflowRef = useRef(0);
@@ -402,7 +445,32 @@ export default function ChatMessageList({
   // padding), measured at each send.
   const [pinOffset, setPinOffset] = useState(PIN_TAIL_PX);
   const [pinTop, setPinTop] = useState(0);
+  const [pinBackground, setPinBackground] = useState<string | null>(null);
   const pinOffsetRef = useRef(PIN_TAIL_PX);
+  // REQ-PIN-2 rev3: the fixed composer reference (restingInsetFor), per form factor.
+  const restingInsetRef = useRef({ mobile: isMobile, value: 0 });
+  if (restingInsetRef.current.mobile !== isMobile) restingInsetRef.current = { mobile: isMobile, value: 0 };
+  restingInsetRef.current.value = restingInsetFor(restingInsetRef.current.value, bottomInset);
+  const restingInset = restingInsetRef.current.value;
+  // The reader's scroll gesture: finger down, or a user scroll event within PIN_SCROLL_IDLE_MS.
+  const gestureRef = useRef({ touching: false, lastScroll: -Infinity });
+  const idleTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const deferredSizeRef = useRef(false);
+  const userScrolling = useCallback(() => gestureRef.current.touching
+    || performance.now() - gestureRef.current.lastScroll < PIN_SCROLL_IDLE_MS, []);
+  const debugLog = useCallback((kind: PinDebugLog['kind'], detail: string) => {
+    pinDebugRef.current?.onLog?.({ at: performance.now(), kind, detail });
+  }, []);
+  // Every programmatic scrollTop write on this list goes through here, tagged for the
+  // debug log, so a write during a gesture is visible on a device.
+  // The scroll event a programmatic write raises is not the reader's gesture.
+  const programmaticScrollUntilRef = useRef(0);
+  const writeScrollTop = useCallback((node: HTMLElement, top: number, tag: string) => {
+    const before = node.scrollTop;
+    programmaticScrollUntilRef.current = performance.now() + 50;
+    node.scrollTop = top;
+    if (pinDebugRef.current) debugLog('scrollTop', `${tag}: ${Math.round(before)} → ${Math.round(node.scrollTop)}${userScrolling() ? ' DURING GESTURE' : ''}`);
+  }, [debugLog, userScrolling]);
   const setPinIndex = useCallback((index: number) => {
     pinIndexRef.current = index;
     setPinIndexState(index);
@@ -416,6 +484,12 @@ export default function ChatMessageList({
   // REQ-PIN-3 rev2: the faded, blurred tail is tied to the scroll position, not a mode:
   // fully on during the travel and at the pin position (max scrollTop for a short reply),
   // fading out as the reader scrolls away, so the end of a long reply is never masked.
+  // REQ-PIN-3 rev3 (QA round 5, the first scroll-up stopping on iPad): nothing on the
+  // scroller changes while it scrolls. The fade was a mask-image on the scroller driven by
+  // a custom property, so every scroll event restyled the whole list and the mask dropped
+  // off 64px in, which rebuilds WebKit's scrolling layer and kills the momentum. Two
+  // fixed overlays now carry it (a backdrop blur, then the background colour fading the
+  // strip), and the scroll only changes their opacity.
   const applyPinFade = useCallback(() => {
     const node = scrollRef.current;
     if (!node) return;
@@ -423,10 +497,21 @@ export default function ChatMessageList({
       : travelRef.current ? 1
         : pinFadeFor(Math.abs(node.scrollHeight - node.clientHeight - pinOverflowRef.current - node.scrollTop));
     const value = String(Math.round(fade * 1000) / 1000);
-    if (node.style.getPropertyValue('--chat-pin-fade') !== value) node.style.setProperty('--chat-pin-fade', value);
-    if (fade > 0) node.dataset.chatPinTail = 'on';
-    else delete node.dataset.chatPinTail;
-    if (tailBlurRef.current) tailBlurRef.current.style.opacity = value;
+    for (const overlay of [tailBlurRef.current, tailFadeRef.current]) {
+      if (overlay && overlay.style.opacity !== value) overlay.style.opacity = value;
+    }
+  }, []);
+
+  // "Jump to latest" (QA round 5): shown only when the reader is more than
+  // JUMP_THRESHOLD_PX above the end of the range, which with an exchange spacer IS the pin
+  // position, so the spacer never counts as unread content. Re-evaluated on scroll, at
+  // settle and after every layout change, so a stale value never outlives the layout.
+  const updateJump = useCallback(() => {
+    const node = scrollRef.current;
+    if (!node || travelRef.current) return;
+    const distance = node.scrollHeight - node.clientHeight - node.scrollTop;
+    stickyRef.current = distance < JUMP_THRESHOLD_PX;
+    setShowJump(!stickyRef.current && messageCountRef.current > 0);
   }, []);
 
   const clearPinMotion = useCallback(() => {
@@ -442,31 +527,49 @@ export default function ChatMessageList({
     const content = contentRef.current;
     if (!content) return;
     content.style.transform = '';
-    const row = content.querySelector<HTMLElement>('[data-chat-pin-row="true"]');
-    for (const prop of ['transform', 'translate', 'position', 'z-index']) row?.style.removeProperty(prop);
+    resetPinnedRowStyle(content);
   }, []);
 
   // REQ-PIN-2 rev2: size the spacer that ends the newest exchange (the sent row and
   // everything after it) so max scrollTop puts that row at pinOffset. Layout positions
-  // only (offsetTop/offsetHeight ignore the travel transforms), and it is re-run on
-  // layout changes (content, scroller, composer inset, visual viewport), never on scroll.
-  const sizeTurnSpacer = useCallback(() => {
+  // only (offsetTop/offsetHeight ignore the travel transforms).
+  // REQ-PIN-2 rev3 (decouple): measured against the resting composer (restingInsetFor),
+  // and re-run only on a send, exchange growth and the scroller's own resize (rotation,
+  // window), never on composer, inset, keyboard or visual-viewport changes, nor on scroll.
+  // A shrink during the reader's gesture waits until the scroll is idle (`force` skips
+  // that for a send or a conversation switch, which are not gestures).
+  const sizeTurnSpacer = useCallback((force = false) => {
     const node = scrollRef.current;
     const spacer = turnSpacerRef.current;
     if (!node || !spacer) return;
     const row = pinIndexRef.current < 0 ? null : contentRef.current?.querySelector<HTMLElement>('[data-chat-pin-row="true"]');
-    let height = '0px';
-    pinOverflowRef.current = 0;
+    let height = 0;
+    let overflow = 0;
     if (row) {
-      const inset = node.querySelector<HTMLElement>('[data-chat-bottom-inset]')?.offsetHeight ?? 0;
-      const after = inset + (bottomAnchorRef.current?.offsetHeight ?? 0) + cssPx(node, 'paddingBottom');
+      const after = restingInsetRef.current.value + (bottomAnchorRef.current?.offsetHeight ?? 0) + cssPx(node, 'paddingBottom');
       const below = spacer.offsetTop - row.offsetTop + after;
-      height = `${pinSpacerFor(node.clientHeight, pinOffsetRef.current, below)}px`;
-      pinOverflowRef.current = Math.max(0, Math.round(below - (node.clientHeight - pinOffsetRef.current)));
+      height = pinSpacerFor(node.clientHeight, pinOffsetRef.current, below);
+      overflow = Math.max(0, Math.round(below - (node.clientHeight - pinOffsetRef.current)));
     }
-    if (spacer.style.height !== height) spacer.style.height = height;
+    const current = parseFloat(spacer.style.height) || 0;
+    if (height < current && !force && userScrolling()) {
+      if (!deferredSizeRef.current && pinDebugRef.current) debugLog('spacer', `shrink ${current} → ${height} deferred (gesture)`);
+      deferredSizeRef.current = true;
+      return;
+    }
+    deferredSizeRef.current = false;
+    pinOverflowRef.current = overflow;
+    if (height !== current || spacer.style.height === '') {
+      spacer.style.height = `${height}px`;
+      if (pinDebugRef.current) debugLog('spacer', `${current} → ${height}${force ? ' (send)' : ''}`);
+    }
+    // The live-inset spacer only reaches past the exchange spacer (the end of a long reply
+    // stays reachable above an expanded composer); see the bottom-inset element below.
+    const inset = node.querySelector<HTMLElement>('[data-chat-bottom-inset="fixed"]');
+    if (inset) inset.style.setProperty('--chat-turn-spacer', `${height}px`);
     applyPinFade();
-  }, [applyPinFade]);
+    updateJump();
+  }, [applyPinFade, debugLog, updateJump, userScrolling]);
 
   // REQ-PIN-1/1b/6: pin the just-sent row at `index`. Runs in a layout effect, before
   // the first paint of the new row: the scroll position jumps to the end of the range
@@ -499,10 +602,11 @@ export default function ChatMessageList({
     pinOffsetRef.current = offset;
     setPinOffset(offset);
     setPinTop(Math.round(paddingTop));
+    setPinBackground(opaqueBackgroundRgb(node));
     const fromScroll = node.scrollTop;
-    sizeTurnSpacer();
-    const inset = node.querySelector<HTMLElement>('[data-chat-bottom-inset]')?.offsetHeight ?? 0;
-    node.scrollTop = node.scrollHeight - node.clientHeight;
+    sizeTurnSpacer(true);
+    const inset = restingInsetRef.current.value;
+    writeScrollTop(node, node.scrollHeight - node.clientHeight, 'send pin');
     travelRef.current = true;
     let debug: PinDebugEvent | null = null;
     applyPinFade();
@@ -515,9 +619,9 @@ export default function ChatMessageList({
       pinAnimationsRef.current = null;
       if (animations) { animations.content.cancel(); animations.rows.forEach((a) => a.cancel()); }
       content.style.transform = '';
-      const pinned = content.querySelector<HTMLElement>('[data-chat-pin-row="true"]');
-      for (const prop of ['transform', 'translate', 'position', 'z-index']) pinned?.style.removeProperty(prop);
+      resetPinnedRowStyle(content);
       applyPinFade();
+      updateJump();
       if (debug) pinDebugRef.current?.onEvent?.({ ...debug, phase: 'settle', at: performance.now(), scrollAfter: node.scrollTop, animations: [] });
       setActivityHeld(true);
       clearTimeout(activityTimerRef.current);
@@ -559,14 +663,16 @@ export default function ChatMessageList({
     setActivityHeld(true);
     finishTravelRef.current = settle;
     const contentFrames: Keyframe[] = [{ transform: `translate3d(0, ${history}px, 0)` }, { transform: 'translate3d(0, 0, 0)' }];
-    // X runs on the `translate` property and Y on `transform`, so each gets its own curve.
+    // Y runs on the row and X on its inner column, each on its own curve. Both are
+    // `transform` (QA round 5: the individual `translate` property is not composited in
+    // every WebKit, so at 1x a busy main thread could hold X back while Y ran).
     const specs: RowAnimationSpec[] = [
-      { keyframes: [{ transform: `translate3d(0, ${rowY}px, 0)` }, { transform: 'translate3d(0, 0, 0)' }], options: { duration, easing: bezierCss(PIN_EASE) } },
-      { keyframes: [{ translate: `${rowX}px 0` }, { translate: '0 0' }], options: { duration, easing: bezierCss(easeX) } },
+      { target: 'row', keyframes: [{ transform: `translate3d(0, ${rowY}px, 0)` }, { transform: 'translate3d(0, 0, 0)' }], options: { duration, easing: bezierCss(PIN_EASE) } },
+      { target: 'inner', keyframes: [{ transform: `translate3d(${rowX}px, 0, 0)` }, { transform: 'translate3d(0, 0, 0)' }], options: { duration, easing: bezierCss(easeX) } },
     ];
     if (typeof content.animate === 'function' && typeof row.animate === 'function') {
       const contentAnimation = content.animate(contentFrames, { duration, easing: bezierCss(PIN_EASE) });
-      const rows = specs.map((spec) => row.animate(spec.keyframes, spec.options));
+      const rows = specs.map((spec) => pinTargetOf(row, spec.target).animate(spec.keyframes, spec.options));
       pinAnimationsRef.current = { content: contentAnimation, rows, rowEl: row, specs };
       contentAnimation.onfinish = settle;
       const rate = pinDebugRef.current?.playbackRate;
@@ -580,7 +686,10 @@ export default function ChatMessageList({
       const remainingX = 1 - cubicBezierAt(easeX, progress);
       content.style.transform = `translate3d(0, ${history * remainingY}px, 0)`;
       const pinned = content.querySelector<HTMLElement>('[data-chat-pin-row="true"]');
-      if (pinned) pinned.style.transform = `translate3d(${rowX * remainingX}px, ${rowY * remainingY}px, 0)`;
+      if (pinned) {
+        pinned.style.transform = `translate3d(0, ${rowY * remainingY}px, 0)`;
+        pinTargetOf(pinned, 'inner').style.transform = `translate3d(${rowX * remainingX}px, 0, 0)`;
+      }
     };
     apply(0);
     let begin = -1;
@@ -592,7 +701,7 @@ export default function ChatMessageList({
       pinFrameRef.current = requestAnimationFrame(step);
     };
     pinFrameRef.current = requestAnimationFrame(step);
-  }, [applyPinFade, clearPinMotion, setPinIndex, sizeTurnSpacer]);
+  }, [applyPinFade, clearPinMotion, setPinIndex, sizeTurnSpacer, updateJump, writeScrollTop]);
 
   // The optimistic local_ -> server-id swap re-mounts the pinned row mid-travel: carry
   // its animations (and raised stacking) over to the new element, in step with the list.
@@ -607,7 +716,7 @@ export default function ChatMessageList({
     row.style.position = 'relative';
     row.style.zIndex = '1';
     const rows = animations.specs.map((spec) => {
-      const next = row.animate(spec.keyframes, spec.options);
+      const next = pinTargetOf(row, spec.target).animate(spec.keyframes, spec.options);
       next.playbackRate = animations.content.playbackRate;
       next.currentTime = animations.content.currentTime;
       if (animations.content.playState === 'paused') next.pause();
@@ -684,7 +793,7 @@ export default function ChatMessageList({
       // above them. Never scroll to the bottom for this.
       if (grew && node && lastKey === prevLastKey && firstKey !== prevFirstKey) {
         if (pinIndexRef.current >= 0) setPinIndex(pinIndexRef.current + count - prevCount);
-        node.scrollTop += node.scrollHeight - prevScrollHeight;
+        writeScrollTop(node, node.scrollTop + node.scrollHeight - prevScrollHeight, 'older-page prepend');
         return;
       }
       // Only the user's OWN send moves the list (user QA round 3: inbound messages,
@@ -701,7 +810,7 @@ export default function ChatMessageList({
         pendingBottomFrameRef.current = requestAnimationFrame(() => scrollToBottom('smooth'));
       }
     }
-  }, [clearPinMotion, conversationKey, messages, pinRow, scrollToBottom, setPinIndex, sizeTurnSpacer]);
+  }, [clearPinMotion, conversationKey, messages, pinRow, scrollToBottom, setPinIndex, sizeTurnSpacer, writeScrollTop]);
 
   useLayoutEffect(() => () => cancelAnimationFrame(pendingBottomFrameRef.current), [conversationKey]);
 
@@ -771,20 +880,25 @@ export default function ChatMessageList({
     if (typeof IntersectionObserver === 'undefined') return;
     const observer = new IntersectionObserver((entries) => {
       if (!didInitialScrollRef.current && messages.length > 0) return;
-      if (entries.some((entry) => entry.isIntersecting)) onLoadOlder();
+      if (!entries.some((entry) => entry.isIntersecting)) return;
+      if (pinDebugRef.current) debugLog('load-older', `sentinel in view at scrollTop ${Math.round(root.scrollTop)}`);
+      onLoadOlder();
     }, { root, rootMargin: LOAD_OLDER_ROOT_MARGIN });
     observer.observe(sentinel);
     return () => observer.disconnect();
-  }, [hasMore, loadingOlder, onLoadOlder, messages.length, paginationCursor]);
+  }, [debugLog, hasMore, loadingOlder, onLoadOlder, messages.length, paginationCursor]);
 
   // REQ-FROST-1: when the overlay grows (multi-line draft, attachment tray), keep a
   // reader who was at the bottom pinned there instead of letting the overlay cover it.
-  // With an exchange spacer the spacer absorbs the inset instead (REQ-PIN-2 rev2), so max
-  // scrollTop stays the pin position as the composer collapses.
+  // REQ-PIN-2 rev3 (decouple): a pinOnSend list never reacts to its composer; the dock
+  // overlays it (see the bottom-inset element).
   useLayoutEffect(() => {
-    if (pinIndexRef.current >= 0) { sizeTurnSpacer(); return; }
+    if (pinEnabled) {
+      if (pinDebugRef.current) debugLog('inset', `live ${bottomInset}, resting ${restingInsetRef.current.value} (no layout change)`);
+      return;
+    }
     if (stickyRef.current && didInitialScrollRef.current) scrollToBottom('auto');
-  }, [bottomInset, scrollToBottom, sizeTurnSpacer]);
+  }, [bottomInset, debugLog, pinEnabled, scrollToBottom]);
 
   // Live tail rows change independently of message props. They never move the reader
   // (user QA round 3: no auto-follow of the bottom); only the exchange spacer and the
@@ -802,33 +916,51 @@ export default function ChatMessageList({
     return () => observer.disconnect();
   }, [conversationKey, sizeTurnSpacer]);
 
-  // The viewport resizes too (keyboard, rotation, the composer dock writing its inset
-  // spacer directly): re-size the exchange so max scrollTop stays the pin position.
+  // REQ-PIN-2 rev3: the scroller's own resize (rotation, window, app viewport) re-sizes
+  // the exchange. No visualViewport listener and no inset observer: the keyboard and the
+  // composer overlay the list instead of resizing it.
   useEffect(() => {
     const node = scrollRef.current;
-    if (!pinEnabled || !node) return;
-    const viewport = typeof window === 'undefined' ? undefined : window.visualViewport;
-    viewport?.addEventListener('resize', sizeTurnSpacer);
-    if (typeof ResizeObserver === 'undefined') return () => viewport?.removeEventListener('resize', sizeTurnSpacer);
+    if (!pinEnabled || !node || typeof ResizeObserver === 'undefined') return;
     const observer = new ResizeObserver(() => sizeTurnSpacer());
     observer.observe(node);
-    const inset = node.querySelector<HTMLElement>('[data-chat-bottom-inset]');
-    if (inset) observer.observe(inset);
-    return () => { observer.disconnect(); viewport?.removeEventListener('resize', sizeTurnSpacer); };
-  }, [conversationKey, pinEnabled, bottomInset > 0, sizeTurnSpacer]);
+    return () => observer.disconnect();
+  }, [conversationKey, pinEnabled, sizeTurnSpacer]);
+
+  // A spacer shrink deferred during the reader's gesture lands once the scroll is idle.
+  const scheduleIdle = useCallback(() => {
+    clearTimeout(idleTimerRef.current);
+    idleTimerRef.current = setTimeout(() => {
+      if (userScrolling()) { scheduleIdle(); return; }
+      if (deferredSizeRef.current) sizeTurnSpacer();
+    }, PIN_SCROLL_IDLE_MS);
+  }, [sizeTurnSpacer, userScrolling]);
+  useEffect(() => () => clearTimeout(idleTimerRef.current), []);
 
   const onScroll = useCallback((event: UIEvent<HTMLDivElement>) => {
     onScrollProp?.(event);
     const node = scrollRef.current;
     if (!node) return;
     prevScrollHeightRef.current = node.scrollHeight;
-    // Scrolling never changes the layout (REQ-PIN-2 rev2), only the tail fade.
+    if (performance.now() >= programmaticScrollUntilRef.current) {
+      gestureRef.current.lastScroll = performance.now();
+      scheduleIdle();
+    }
+    // Scrolling never changes the layout (REQ-PIN-2 rev2), only the tail overlays' opacity.
     applyPinFade();
-    if (travelRef.current) return;
-    const nearBottom = node.scrollHeight - node.scrollTop - node.clientHeight < 64;
-    stickyRef.current = nearBottom;
-    setShowJump(!nearBottom && messages.length > 0);
-  }, [applyPinFade, messages.length, onScrollProp]);
+    updateJump();
+  }, [applyPinFade, onScrollProp, scheduleIdle, updateJump]);
+
+  const onTouchStart = () => {
+    gestureRef.current.touching = true;
+    if (pinDebugRef.current) debugLog('gesture', 'touch start');
+  };
+  const onTouchEnd = () => {
+    gestureRef.current.touching = false;
+    // Momentum may follow the lift: its scroll events extend the gesture.
+    gestureRef.current.lastScroll = performance.now();
+    scheduleIdle();
+  };
 
   // The reader's own scroll-up gesture: stop a pending bottom scroll, and land a send
   // travel at once so it never fights their scroll.
@@ -849,17 +981,24 @@ export default function ChatMessageList({
   return (
     <div className={wrapperClassName}>
       {pinEnabled ? (
-        // REQ-PIN-3: blur only the tail strip above the pinned bubble; the scroller's mask
-        // ([data-chat-pin-tail]) fades it. Its opacity follows --chat-pin-fade (applyPinFade).
-        <div ref={tailBlurRef} data-debug-id={`${debugPrefix}-pin-tail-blur`} aria-hidden="true"
-          className="ui-chat-pin-tail-blur"
-          style={{ top: pinTop, height: pinOffset - pinTop, opacity: 0 }} />
+        // REQ-PIN-3 rev3: blur only the tail strip above the pinned bubble, then fade it
+        // into the list's own background. Both overlays sit outside the scroller and only
+        // their opacity follows the scroll (applyPinFade).
+        <>
+          <div ref={tailBlurRef} data-debug-id={`${debugPrefix}-pin-tail-blur`} aria-hidden="true"
+            className="ui-chat-pin-tail-blur"
+            style={{ top: pinTop, height: pinOffset - pinTop, opacity: 0 }} />
+          <div ref={tailFadeRef} data-debug-id={`${debugPrefix}-pin-tail-fade`} aria-hidden="true"
+            className="ui-chat-pin-tail-fade"
+            style={{ top: pinTop, height: pinOffset - pinTop, opacity: 0, ...(pinBackground ? { ['--chat-pin-bg' as string]: pinBackground } : {}) }} />
+        </>
       ) : null}
       {/* Polite live region for scroll-to-match: announces the jump / paging / not-found
           to screen readers without stealing focus or blocking. */}
       <div data-debug-id={`${debugPrefix}-focus-status`} role="status" aria-live="polite" className="sr-only">{focusAnnouncement}</div>
       <div ref={scrollRef} data-debug-id={`${debugPrefix}-scroll`} onScroll={onScroll}
         onWheel={(event) => { if (event.deltaY < 0) cancelTailFollow(); }} onTouchMove={cancelTailFollow}
+        onTouchStart={onTouchStart} onTouchEnd={onTouchEnd} onTouchCancel={onTouchEnd}
         onPointerDown={(event) => { if (event.target === event.currentTarget) cancelTailFollow(); }}
         onKeyDown={(event) => {
           if (event.defaultPrevented || (event.target as HTMLElement).closest('input, textarea, select, [contenteditable="true"]')) return;
@@ -965,7 +1104,16 @@ export default function ChatMessageList({
               className="!mt-0" style={{ height: 0, overflowAnchor: 'none' }} />
           ) : null}
         </div>
-        {bottomInset > 0 ? (
+        {bottomInset > 0 && pinEnabled ? (
+          // REQ-PIN-2 rev3 (decouple): as tall as the RESTING composer, so the composer never
+          // changes the scroll range of a short exchange. It grows (min-height, written per
+          // frame by useComposerDockInset as --chat-live-inset) only by however much the live
+          // dock outgrows the exchange spacer, which keeps the end of a long reply reachable
+          // above an expanded composer without any scrollTop write.
+          <div data-debug-id={`${debugPrefix}-bottom-inset`} data-chat-bottom-inset="fixed" aria-hidden="true" className="!mt-0 shrink-0"
+            style={{ height: restingInset, minHeight: 'calc(var(--chat-live-inset, 0px) - var(--chat-turn-spacer, 0px))', overflowAnchor: 'none',
+              ['--chat-live-inset' as string]: `${bottomInset}px` }} />
+        ) : bottomInset > 0 ? (
           <div data-debug-id={`${debugPrefix}-bottom-inset`} data-chat-bottom-inset="" aria-hidden="true" className="!mt-0 shrink-0" style={{ height: bottomInset, overflowAnchor: 'none' }} />
         ) : null}
         <div ref={bottomAnchorRef} data-debug-id={`${debugPrefix}-bottom-anchor`} aria-hidden="true"
