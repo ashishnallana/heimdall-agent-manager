@@ -50,16 +50,16 @@ async function withList(run: (env: any) => Promise<void>) {
   const tail = { extra: 0 };
   const px = (el: HTMLElement | null) => parseFloat(el?.style.height ?? '') || 0;
   const indexOf = (el: Element | null) => Number(el?.closest('[data-chat-pin-index]')?.getAttribute('data-chat-pin-index') ?? -1);
+  const lastIndex = () => dom.window.document.querySelectorAll('[data-chat-pin-index]').length - 1;
+  // The last row is ROW_H + tail.extra tall (a long reply), the others ROW_H.
   dom.window.HTMLElement.prototype.getBoundingClientRect = function (this: HTMLElement) {
     const scroller = scrollerOf(this);
     const index = indexOf(this);
     const top = index >= 0 && scroller ? rowTop(index) - scroller.scrollTop : 0;
-    return { top, bottom: top + ROW_H, height: ROW_H, width: 600, x: 0, y: top, left: 0, right: 600, toJSON() {} } as DOMRect;
+    const height = index >= 0 && index === lastIndex() ? ROW_H + tail.extra : ROW_H;
+    return { top, bottom: top + height, height, width: 600, x: 0, y: top, left: 0, right: 600, toJSON() {} } as DOMRect;
   };
-  const lastRowBottom = () => {
-    const rows = dom.window.document.querySelectorAll('[data-chat-pin-index]');
-    return rowTop(rows.length - 1) + ROW_H + tail.extra;
-  };
+  const lastRowBottom = () => rowTop(lastIndex()) + ROW_H + tail.extra;
   Object.defineProperties(dom.window.HTMLElement.prototype, {
     offsetTop: { configurable: true, get(this: HTMLElement) {
       if (this.dataset.debugId === 'pin-pin-turn-spacer') return lastRowBottom();
@@ -372,32 +372,47 @@ test('the resting reference is the smallest settled inset (the collapsed pill), 
   assert.equal(restingInsetFor(78, 0), 78, 'a missing measurement keeps it');
 });
 
-test('QA round 5: jump-latest stays hidden at rest at the pin position and shows only above the threshold', async () => {
+test('user QA 13:24: jump-latest shows only while the last content is below the composer top', async () => {
   await withList(async ({ q, render, list, geometry, settle, observers, tail }) => {
     await render(list(history));
     const scroll = geometry();
     await render(list([...history, msg('local_a', true)]));
     await settle();
+    assert.equal(q('pin-jump-latest-btn'), null, 'at rest after a send: only the bubble, above the composer');
     await render(list([...history, msg('local_a', true), msg('reply', false, 'Short answer')]));
     tail.extra = 30;
     await act(async () => { observers.forEach((cb: (entries: any[]) => void) => cb([])); });
+    const spacer = q('pin-pin-turn-spacer')!;
+    const spacerHeight = spacer.style.height;
     await scrollTo(scroll, target);
     assert.equal(q('pin-jump-latest-btn'), null, 'at rest after a short reply: the spacer is not unread content');
-    await scrollTo(scroll, target - (JUMP_THRESHOLD_PX - 10));
-    assert.equal(q('pin-jump-latest-btn'), null, 'a small scroll stays under the threshold');
-    await scrollTo(scroll, target - 300);
+    // The reply (index 4) ends at 2100 + ROW_H + 30 in content coordinates; the composer's
+    // top edge is VIEWPORT - INSET on screen.
+    const hiddenUntil = 2100 + ROW_H + 30 - (VIEWPORT - INSET);
+    await scrollTo(scroll, hiddenUntil + 5);
+    assert.ok(target - scroll.scrollTop > JUMP_THRESHOLD_PX, 'well above max scroll (the old rule fired here)');
+    assert.equal(q('pin-jump-latest-btn'), null, 'the spacer scrolled under the composer: last content still visible');
+    await scrollTo(scroll, hiddenUntil - 20);
     const jump = q('pin-jump-latest-btn');
-    assert.ok(jump, 'scrolled up past the threshold: offered');
+    assert.ok(jump, 'the last content is below the composer top: offered');
     await act(async () => jump!.click());
     assert.equal(scroll.scrollTop, target, 'tapping it returns to the pin position');
     assert.equal(q('pin-jump-latest-btn'), null, 'and hides it');
-    // A stale value never outlives a layout change: scrolled up, then the list moves back
-    // to the end with no scroll event (e.g. a clamp), and the next layout pass re-checks.
-    await scrollTo(scroll, target - 300);
-    assert.ok(q('pin-jump-latest-btn'));
-    scroll.scrollTop = target;
+    // The composer's live top counts (an expanded draft covers the reply), but only for
+    // this check: the spacer and scrollTop do not move.
+    await scrollTo(scroll, hiddenUntil + 5);
+    const writes = (scroll as any).writes.length;
+    await render(list([...history, msg('local_a', true), msg('reply', false, 'Short answer')], { bottomInset: INSET + 120 }));
+    assert.ok(q('pin-jump-latest-btn'), 'an expanded composer covers the reply: offered');
+    assert.equal(spacer.style.height, spacerHeight, 'no spacer re-size from the composer');
+    assert.equal((scroll as any).writes.length, writes, 'no scrollTop write from the composer');
+    await render(list([...history, msg('local_a', true), msg('reply', false, 'Short answer')]));
+    assert.equal(q('pin-jump-latest-btn'), null, 'collapsed again: hidden');
+    // The reply grows past the composer with no scroll event: re-checked on the resize.
+    await scrollTo(scroll, target);
+    tail.extra = 400;
     await act(async () => { observers.forEach((cb: (entries: any[]) => void) => cb([])); });
-    assert.equal(q('pin-jump-latest-btn'), null, 're-evaluated after layout changes');
+    assert.ok(q('pin-jump-latest-btn'), 'a growing reply that runs under the composer is offered');
     tail.extra = 0;
   });
 });

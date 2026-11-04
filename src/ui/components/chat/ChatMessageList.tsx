@@ -168,7 +168,14 @@ export function restingInsetFor(previous: number, inset: number): number {
 // momentum on either); a deferred re-size lands once the scroll is idle.
 export const PIN_SCROLL_IDLE_MS = 160;
 // "Jump to latest" shows only when the reader is this far above the end of the range.
+// A pinOnSend list uses lastContentHidden instead (user QA 2026-11-04 13:24).
 export const JUMP_THRESHOLD_PX = 64;
+// User QA 13:24: on a pinOnSend list the exchange spacer runs under the floating composer,
+// so distance from max scroll says nothing about unread content. "Jump to latest" shows
+// only while the bottom of the newest real content sits below the composer's top edge.
+export function lastContentHidden(contentBottom: number, composerTop: number): boolean {
+  return contentBottom > composerTop + 1;
+}
 // REQ-PIN-3 rev2: the faded tail follows the scroll position. It is fully on at the
 // maximum scrollTop and fades out over the first PIN_FADE_RANGE_PX the reader scrolls up.
 export const PIN_FADE_RANGE_PX = 64;
@@ -467,6 +474,9 @@ export default function ChatMessageList({
   const restingInsetRef = useRef({ mobile: isMobile, value: 0 });
   if (restingInsetRef.current.mobile !== isMobile) restingInsetRef.current = { mobile: isMobile, value: 0 };
   restingInsetRef.current.value = restingInsetFor(restingInsetRef.current.value, bottomInset);
+  // The live dock height, for the jump-latest visibility check only (see updateJump).
+  const liveInsetRef = useRef(bottomInset);
+  liveInsetRef.current = bottomInset;
   const restingInset = restingInsetRef.current.value;
   // The reader's scroll gesture: finger down, or a user scroll event within PIN_SCROLL_IDLE_MS.
   const gestureRef = useRef({ touching: false, lastScroll: -Infinity });
@@ -518,16 +528,33 @@ export default function ChatMessageList({
     }
   }, []);
 
-  // "Jump to latest" (QA round 5): shown only when the reader is more than
-  // JUMP_THRESHOLD_PX above the end of the range, which with an exchange spacer IS the pin
-  // position, so the spacer never counts as unread content. Re-evaluated on scroll, at
-  // settle and after every layout change, so a stale value never outlives the layout.
+  // "Jump to latest": re-evaluated on scroll, at settle, after every spacer re-size, when
+  // the reply grows and when the live composer inset changes, so a stale value never
+  // outlives the layout. A plain list uses the distance from the end of the range. A
+  // pinOnSend list (user QA 13:24) compares the bottom of the newest real content (the
+  // last row's action row or body, or the revealed activity line) with the composer's
+  // live top edge. That edge is read here only; it never feeds the spacer or scrollTop.
   const updateJump = useCallback(() => {
     const node = scrollRef.current;
     if (!node || travelRef.current) return;
     const distance = node.scrollHeight - node.clientHeight - node.scrollTop;
     stickyRef.current = distance < JUMP_THRESHOLD_PX;
-    setShowJump(!stickyRef.current && messageCountRef.current > 0);
+    if (!pinOnSendRef.current) {
+      setShowJump(!stickyRef.current && messageCountRef.current > 0);
+      return;
+    }
+    const content = contentRef.current;
+    const rows = content?.querySelectorAll<HTMLElement>('[data-chat-pin-index]');
+    const last = rows && rows.length > 0 ? rows[rows.length - 1] : null;
+    if (!content || !last) { setShowJump(false); return; }
+    const end = last.querySelector<HTMLElement>('[data-chat-actions]') ?? last.querySelector<HTMLElement>('[data-chat-body]') ?? last;
+    let bottom = end.getBoundingClientRect().bottom;
+    const activitySlot = content.querySelector<HTMLElement>('[data-chat-pin-activity]');
+    if (activitySlot && activitySlot.childElementCount > 0 && activitySlot.getAttribute('aria-hidden') !== 'true') {
+      bottom = Math.max(bottom, activitySlot.getBoundingClientRect().bottom);
+    }
+    const composerTop = node.getBoundingClientRect().top + node.clientHeight - liveInsetRef.current;
+    setShowJump(lastContentHidden(bottom, composerTop));
   }, []);
 
   const clearPinMotion = useCallback(() => {
@@ -571,6 +598,8 @@ export default function ChatMessageList({
     if (height < current && !force && userScrolling()) {
       if (!deferredSizeRef.current && pinDebugRef.current) debugLog('spacer', `shrink ${current} → ${height} deferred (gesture)`);
       deferredSizeRef.current = true;
+      // The visibility check moves no layout, so it need not wait for the gesture.
+      updateJump();
       return;
     }
     deferredSizeRef.current = false;
@@ -911,10 +940,14 @@ export default function ChatMessageList({
   useLayoutEffect(() => {
     if (pinEnabled) {
       if (pinDebugRef.current) debugLog('inset', `live ${bottomInset}, resting ${restingInsetRef.current.value} (no layout change)`);
+      updateJump();
       return;
     }
     if (stickyRef.current && didInitialScrollRef.current) scrollToBottom('auto');
-  }, [bottomInset, debugLog, pinEnabled, scrollToBottom]);
+  }, [bottomInset, debugLog, pinEnabled, scrollToBottom, updateJump]);
+
+  // Revealing the held activity line adds content below the bubble without a resize.
+  useLayoutEffect(() => { if (pinEnabled) updateJump(); }, [activityHeld, pinEnabled, updateJump]);
 
   // Live tail rows change independently of message props. They never move the reader
   // (user QA round 3: no auto-follow of the bottom); only the exchange spacer and the
@@ -1093,7 +1126,7 @@ export default function ChatMessageList({
                     </div>
                   )}
                   {!hideCardChrome && (
-                    <div data-debug-id={`${debugPrefix}-message-actions-${message.messageId}`} className="mt-1 flex min-h-11 w-full items-center justify-end gap-1.5 text-[10px] text-faint sm:min-h-8">
+                    <div data-debug-id={`${debugPrefix}-message-actions-${message.messageId}`} data-chat-actions="" className="mt-1 flex min-h-11 w-full items-center justify-end gap-1.5 text-[10px] text-faint sm:min-h-8">
                       <MessageCopyButton debugId={`${debugPrefix}-message-copy-btn-${message.messageId}`} body={message.body} className="rounded-full border border-subtle bg-surface/80 shadow-lg" />
                       {timestamp.label ? <time data-debug-id={`${debugPrefix}-message-${message.messageId}-time`} dateTime={timestamp.iso} title={timestamp.iso}>{timestamp.label}</time> : null}
                       {message.isUser && delivery.glyph ? (
@@ -1108,7 +1141,7 @@ export default function ChatMessageList({
           {pinEnabled ? (
             // REQ-PIN-4: the activity line appears PIN_ACTIVITY_DELAY_MS after the bubble
             // settles. It keeps its layout box while held, so revealing it moves nothing.
-            <div data-debug-id={`${debugPrefix}-pin-activity-slot`} className="empty:hidden"
+            <div data-debug-id={`${debugPrefix}-pin-activity-slot`} data-chat-pin-activity="" className="empty:hidden"
               aria-hidden={activityHeld || undefined}
               style={activityHeld ? { opacity: 0, pointerEvents: 'none' } : undefined}>
               {activity}
