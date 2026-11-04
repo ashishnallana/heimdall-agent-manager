@@ -112,6 +112,13 @@ test('focus opens; moving focus between the field and composer controls keeps it
   assert.equal(lastExpansion!.focusWithin, false);
 });
 
+/** jsdom has no PointerEvent: a MouseEvent carrying the pointer fields the hook reads. */
+function pointerish(type: string, pointerType: 'mouse' | 'touch', button = 0) {
+  const event = new dom.window.MouseEvent(type, { bubbles: true, cancelable: true, button });
+  if (type.startsWith('pointer')) Object.defineProperties(event, { pointerType: { value: pointerType }, isPrimary: { value: true } });
+  return event;
+}
+
 /** A press the way WebKit (Safari, iOS) delivers it: the pressed <button> never takes focus,
  *  so the field blurs to <body> (relatedTarget null). Desktop Safari blurs on mousedown,
  *  before pointerup; iOS sends pointerdown/pointerup at touch time and the compatibility
@@ -119,7 +126,7 @@ test('focus opens; moving focus between the field and composer controls keeps it
  *  is still hit-testable: a browser never dispatches it into an inert subtree, and jsdom does
  *  not model inert, so that check is made here, at the moment the click would be dispatched. */
 async function webkitPress(target: HTMLElement, order: 'desktop' | 'ios' = 'desktop') {
-  const fire = (type: string) => act(async () => { target.dispatchEvent(new dom.window.MouseEvent(type, { bubbles: true, cancelable: true, button: 0 })); });
+  const fire = (type: string) => act(async () => { target.dispatchEvent(pointerish(type, order === 'ios' ? 'touch' : 'mouse')); });
   const blurField = () => act(async () => { (document.activeElement as HTMLElement | null)?.blur(); });
   await fire('pointerdown');
   if (order === 'desktop') { await fire('mousedown'); await blurField(); await fire('pointerup'); await fire('mouseup'); }
@@ -175,6 +182,33 @@ test('after a WebKit control press, focus returning to the field, Tab/Shift+Tab 
   await act(async () => field.focus());
   await act(async () => field.blur());
   assert.equal(expandedOf(container), 'false', 'blur to <body> without a composer press collapses');
+});
+
+test('presses that never click (disabled send, right-click, cancelled touch) do not arm a hold for a later blur', async () => {
+  const { container } = await mount(h(Morph));
+  const field = fieldOf(container);
+  const send = q<HTMLButtonElement>(container, 'conversation-composer-send-btn')!;
+  assert.equal(send.disabled, true);
+  const cases: [string, HTMLElement, () => Promise<void>][] = [
+    ['disabled send', send, () => act(async () => { send.dispatchEvent(pointerish('pointerdown', 'touch')); })],
+    ['right-click', q<HTMLButtonElement>(container, 'conversation-attach-btn')!, () => act(async () => { q(container, 'conversation-attach-btn')!.dispatchEvent(pointerish('pointerdown', 'mouse', 2)); })],
+    ['cancelled touch', q<HTMLButtonElement>(container, 'conversation-attach-btn')!, async () => {
+      await act(async () => { q(container, 'conversation-attach-btn')!.dispatchEvent(pointerish('pointerdown', 'touch')); });
+      await act(async () => { q(container, 'conversation-attach-btn')!.dispatchEvent(pointerish('pointercancel', 'touch')); });
+    }],
+    ['mouse press released without a click', q<HTMLButtonElement>(container, 'conversation-attach-btn')!, async () => {
+      await act(async () => { q(container, 'conversation-attach-btn')!.dispatchEvent(pointerish('pointerdown', 'mouse')); });
+      await act(async () => { q(container, 'conversation-attach-btn')!.dispatchEvent(pointerish('pointerup', 'mouse')); });
+    }],
+  ];
+  for (const [label, , pressWithoutClick] of cases) {
+    await act(async () => field.focus());
+    assert.equal(expandedOf(container), 'true');
+    await pressWithoutClick();
+    // Later, focus goes nowhere with no press in progress (iOS keyboard "Done", programmatic blur).
+    await act(async () => field.blur());
+    assert.equal(expandedOf(container), 'false', `${label}: a later blur to <body> collapses`);
+  }
 });
 
 test('window blur (relatedTarget null, document unfocused) keeps it open like :focus-within', async () => {

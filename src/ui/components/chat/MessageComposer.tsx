@@ -259,8 +259,8 @@ export function useComposerExpanded(inputs: ComposerExpansionInputs): ComposerEx
   latest.current = inputs;
   // WebKit (Safari, iOS) does not focus a pressed <button>: pressing + or the terminal
   // button blurs the field with `relatedTarget` null, and collapsing then makes the tools
-  // inert before the click lands. `pressInside` is true from a primary press on the
-  // composer until that interaction's click (or cancel); `held` means the composer stays
+  // inert before the click lands. `pressInside` is true from a primary press on an enabled
+  // part of the composer until that press ends; `held` means the composer stays
   // engaged although focus went nowhere. A press or focus outside the composer ends it.
   const pressInside = useRef(false);
   const held = useRef(false);
@@ -275,23 +275,35 @@ export function useComposerExpanded(inputs: ComposerExpansionInputs): ComposerEx
       setFocusWithin(false);
     };
     const onPointerDown = (event: Event) => {
-      pressInside.current = inside(event.target);
-      if (!pressInside.current) release();
+      const press = event as PointerEvent;
+      const target = event.target as Element | null;
+      // Only a primary press on an enabled control can end in a click; anything else
+      // (right-click, a disabled send button) must not leave a hold armed.
+      pressInside.current = inside(target) && (press.isPrimary ?? true) && (press.button ?? 0) === 0
+        && !target?.closest?.(':disabled, [aria-disabled="true"]');
+      if (!inside(target)) release();
     };
     const onPressEnd = () => { pressInside.current = false; };
+    // Mouse and pen: WebKit blurs at mousedown, before pointerup, so the press ends there
+    // (a drag-off release may never click). Touch: iOS blurs after pointerup, just before
+    // click, so a touch press ends at its click or cancel.
+    const onPointerUp = (event: Event) => { if ((event as PointerEvent).pointerType !== 'touch') onPressEnd(); };
     const onFocusIn = (event: Event) => {
       if (inside(event.target)) held.current = false;
       else release();
     };
+    // Capture phase throughout, so a handler's stopPropagation() cannot leave a hold armed;
+    // the blur that sets the hold always comes before the press's pointerup/click.
     doc.addEventListener('pointerdown', onPointerDown, true);
+    doc.addEventListener('pointerup', onPointerUp, true);
     doc.addEventListener('focusin', onFocusIn, true);
-    // Bubble phase: the press is over once its click has been handled.
-    doc.addEventListener('click', onPressEnd);
+    doc.addEventListener('click', onPressEnd, true);
     doc.addEventListener('pointercancel', onPressEnd, true);
     return () => {
       doc.removeEventListener('pointerdown', onPointerDown, true);
+      doc.removeEventListener('pointerup', onPointerUp, true);
       doc.removeEventListener('focusin', onFocusIn, true);
-      doc.removeEventListener('click', onPressEnd);
+      doc.removeEventListener('click', onPressEnd, true);
       doc.removeEventListener('pointercancel', onPressEnd, true);
     };
   }, []);

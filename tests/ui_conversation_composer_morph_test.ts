@@ -261,7 +261,12 @@ for (const aux of [false, true]) {
     await fixture({ aux, onOpenAuxTab: aux ? undefined : (content: any) => opened.push(content.type) }, async ({ q, store, wait, expanded, focusIn, outside, dom }) => {
       const doc = dom.window.document as Document;
       const press = async (target: HTMLElement) => {
-        const fire = (type: string) => act(async () => { target.dispatchEvent(new dom.window.MouseEvent(type, { bubbles: true, cancelable: true, button: 0 })); });
+        const fire = (type: string) => act(async () => {
+          const event = new dom.window.MouseEvent(type, { bubbles: true, cancelable: true, button: 0 });
+          // jsdom has no PointerEvent; desktop Safari order, so a mouse pointer.
+          if (type.startsWith('pointer')) Object.defineProperties(event, { pointerType: { value: 'mouse' }, isPrimary: { value: true } });
+          target.dispatchEvent(event);
+        });
         await fire('pointerdown'); await fire('mousedown');
         await act(async () => { (doc.activeElement as HTMLElement | null)?.blur(); });
         await fire('pointerup'); await fire('mouseup');
