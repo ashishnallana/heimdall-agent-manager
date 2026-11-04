@@ -1604,16 +1604,14 @@ validate_provider_model_intersection :: proc(service: ^Agent_Service, bridge_id,
 	model_ok := false
 	for candidate in entry.models { if candidate.model_id == model && candidate.state == "active" { model_ok = true; break } }
 	if !model_ok do return {}, false, domain.domain_error(.Unprocessable_Entity, "model is unknown or deprecated for provider")
-	statuses, status_err := iface.bridge_provider_status_list(service.providers, bridge_id)
-	if status_err.code != .None do return {}, false, status_err
-	defer domain.bridge_provider_statuses_destroy(statuses)
-	settings, settings_err := iface.bridge_provider_setting_list(service.providers, bridge_id)
-	if settings_err.code != .None do return {}, false, settings_err
-	defer domain.bridge_provider_settings_destroy(settings)
-	present, enabled := false, domain.profile_effective_id(provider,profile_id)!=provider
-	for status in statuses { if status.provider == provider && domain.profile_effective_id(provider,status.profile_id)==domain.profile_effective_id(provider,profile_id) && status.state == "present" { present = true; break } }
-	for setting in settings { if setting.provider == provider && domain.profile_effective_id(provider,setting.profile_id)==domain.profile_effective_id(provider,profile_id) { enabled = setting.enabled; break } }
-	if !present || !enabled do return {}, false, domain.domain_error(.Provider_Unavailable, "provider is not enabled and present on bridge")
+	// Single source of truth with the provider list/profile views (profile enabled AND bridge setting, default-on when present).
+	view_service := provider_service.Provider_Service{repo = service.providers}
+	views, views_err := provider_service.list_bridge_providers(&view_service, bridge_id)
+	if views_err.code != .None do return {}, false, views_err
+	defer provider_service.bridge_provider_views_destroy(views)
+	launchable := false
+	for view in views { if view.catalog.provider == provider && view.profile_id == domain.profile_effective_id(provider, profile_id) && view.enabled && view.detection_state == "present" { launchable = true; break } }
+	if !launchable do return {}, false, domain.domain_error(.Provider_Unavailable, "provider is not enabled and present on bridge")
 	return domain.Resolved_Provider_Model{provider = provider, model = model}, true, domain.Domain_Error{}
 }
 
