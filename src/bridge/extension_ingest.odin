@@ -110,7 +110,6 @@ bridge_ext_ingest :: proc(rec: Bridge_Local_Agent_Token_Record, params: string, 
 			continue
 		}
 		defer contracts.ext_event_destroy(&ev)
-		bridge_ext_debugf("ingest instance=%s provider=%s session=%s kind=%v usage_unavailable=%v", instance_id, ev.provider, ev.session_id, ev.kind, ev.usage_unavailable)
 		bridge_tool_live_event(rec, ev, raw)
 		if bridge_startup_event(ev) {
 			// A launch's first readiness completes a context rollover restart (T6).
@@ -150,7 +149,6 @@ bridge_ext_ingest :: proc(rec: Bridge_Local_Agent_Token_Record, params: string, 
 		s.last_event_at_ms = now
 		s.events_accepted += 1
 		token_changed := bridge_ext_token_usage_apply(&s.token_usage, ev, now)
-		if token_changed do bridge_ext_debug_usage(instance_id, "token_usage_update", s.token_usage)
 		if ev.usage_unavailable && s.token_usage.usage_supported && ev.session_id != "" && s.usage_dark_logged_session != ev.session_id {
 			delete(s.usage_dark_logged_session)
 			s.usage_dark_logged_session = strings.clone(ev.session_id)

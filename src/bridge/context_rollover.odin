@@ -168,7 +168,6 @@ bridge_rollover_heap :: proc() -> runtime.Allocator {
 
 @(private = "file")
 bridge_rollover_set_phase_locked :: proc(s: ^Bridge_Rollover_State, phase: Bridge_Rollover_Phase, now: i64) {
-	bridge_ext_debugf("rollover instance=%s %v -> %v", s.agent_instance_id, s.phase, phase)
 	s.phase = phase
 	s.phase_at_ms = now
 }
@@ -296,7 +295,6 @@ bridge_rollover_end_persist :: proc(instance_id: string, acked: bool, now: i64) 
 	defer sync.mutex_unlock(&bridge_rollover_mutex)
 	s := bridge_rollover_state_locked(instance_id, create = false)
 	if s == nil || s.phase != .Persisting do return
-	bridge_ext_debugf("rollover instance=%s previous_context persist acked=%v", instance_id, acked)
 	if acked {
 		bridge_rollover_set_phase_locked(s, .Restarting, now)
 		s.restart_requested = false

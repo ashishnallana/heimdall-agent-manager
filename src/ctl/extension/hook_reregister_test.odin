@@ -1,7 +1,5 @@
 package extension
 
-import "core:os"
-import "core:sys/posix"
 import "core:strings"
 import "core:testing"
 
@@ -210,97 +208,4 @@ test_hook_permission_reregisters_same_blocker_after_disconnect :: proc(t: ^testi
 	rr_reset([]string{deny_reply})
 	testing.expect_value(t, hook_run("antigravity", agy_ham_ctl, env, rr_send), `{"decision":"allow"}`)
 	testing.expect_value(t, len(rr_params), 0)
-}
-
-// DEBUG (remove before merge): with HEIMDALL_EXTENSION_DEBUG_LOG set the hook still
-// returns "" (nothing for stdout) and logging itself never prints.
-@(test)
-hook_debug_log_keeps_stdout_empty :: proc(t: ^testing.T) {
-	path := "/tmp/ham_hook_debug_test.jsonl"
-	os.remove(path)
-	defer os.remove(path)
-	line := hook_debug_line("claude", `{"hook_event_name":"Stop","session_id":"s1","transcript_path":"/nope","prompt":"SECRET"}`, "2026-01-01T00:00:00Z", 3, "")
-	testing.expect(t, !strings.contains(line, "SECRET"), line)
-	testing.expect(t, !strings.contains(line, "\n"), line)
-	hook_debug_append(path, line)
-	data, err := os.read_entire_file(path, context.temp_allocator)
-	testing.expect(t, err == nil && strings.count(string(data), "\n") == 1)
-}
-
-@(private = "file")
-dbg_send_ok :: proc(endpoint, token, method, params: string, timeout_ms: int) -> (string, bool) {
-	return `{"ok":true}`, true
-}
-
-@(private = "file")
-dbg_send_fail :: proc(endpoint, token, method, params: string, timeout_ms: int) -> (string, bool) {
-	return "", false
-}
-
-// DEBUG (remove before merge): drive hook_run_logged with the env var set. Two
-// invocations append exactly two JSON lines (usage + POST outcome), return ""
-// (the CLI prints nothing for ""), and write no hook marker to fd 1/2 (both are
-// redirected to files for the duration; the unique session id must not appear).
-@(test)
-hook_debug_log_hook_invocations_append_jsonl_and_stay_silent :: proc(t: ^testing.T) {
-	log_path := "/tmp/ham_hook_debug_integration.jsonl"
-	out_path := "/tmp/ham_hook_debug_integration.out"
-	err_path := "/tmp/ham_hook_debug_integration.err"
-	os.remove(log_path)
-	defer os.remove(log_path)
-	defer os.remove(out_path)
-	defer os.remove(err_path)
-	os.set_env(HOOK_DEBUG_LOG_ENV, log_path)
-	defer os.unset_env(HOOK_DEBUG_LOG_ENV)
-
-	// Run the hooks in a forked child so stdout/stderr are isolated from the
-	// test runner's own output: the captured files must be exactly empty.
-	out_fd := posix.open(strings.clone_to_cstring(out_path, context.temp_allocator), {.WRONLY, .CREAT, .TRUNC}, {.IRUSR, .IWUSR})
-	err_fd := posix.open(strings.clone_to_cstring(err_path, context.temp_allocator), {.WRONLY, .CREAT, .TRUNC}, {.IRUSR, .IWUSR})
-	testing.expect(t, out_fd >= 0 && err_fd >= 0)
-	if out_fd < 0 || err_fd < 0 {
-		return
-	}
-	raw := `{"hook_event_name":"Stop","session_id":"dbgmark_s1","transcript_path":"/nonexistent/dbgmark.jsonl","prompt":"SECRET_PROMPT"}`
-	env := Hook_Env{endpoint = "unix:/tmp/x.sock", token = "tok", ts = "2026-10-22T06:00:00Z"}
-	pid := posix.fork()
-	testing.expect(t, pid >= 0)
-	if pid < 0 {
-		return
-	}
-	if pid == 0 {
-		posix.dup2(out_fd, 1)
-		posix.dup2(err_fd, 2)
-		res1 := hook_run_logged("claude", raw, env, dbg_send_ok)
-		res2 := hook_run_logged("claude", raw, env, dbg_send_fail)
-		posix._exit(res1 == "" && res2 == "" ? 0 : 3)
-	}
-	posix.close(out_fd)
-	posix.close(err_fd)
-	status: i32
-	w := posix.waitpid(pid, &status, {})
-	testing.expect_value(t, w, pid)
-	testing.expect(t, posix.WIFEXITED(status) && posix.WEXITSTATUS(status) == 0, "child must exit 0 with empty hook results")
-	for p in ([]string{out_path, err_path}) {
-		d, rerr := os.read_entire_file(p, context.temp_allocator)
-		testing.expect(t, rerr == nil, p)
-		testing.expect_value(t, len(d), 0)
-	}
-	data, err := os.read_entire_file(log_path, context.temp_allocator)
-	testing.expect(t, err == nil)
-	text := string(data)
-	testing.expect(t, !strings.contains(text, "SECRET_PROMPT"), text)
-	lines := strings.split_lines(strings.trim_right(text, "\n"), context.temp_allocator)
-	testing.expect_value(t, len(lines), 2)
-	if len(lines) == 2 {
-		for l in lines {
-			testing.expect(t, strings.contains(l, `"provider":"claude"`), l)
-			testing.expect(t, strings.contains(l, `"hook_event":"Stop"`), l)
-			testing.expect(t, strings.contains(l, `"session_id":"dbgmark_s1"`), l)
-			testing.expect(t, strings.contains(l, `"usage_ok":false`), l)
-			testing.expect(t, strings.contains(l, `"event_posted":true`), l)
-		}
-		testing.expect(t, strings.contains(lines[0], `"event_post_ok":true`), lines[0])
-		testing.expect(t, strings.contains(lines[1], `"event_post_ok":false`), lines[1])
-	}
 }

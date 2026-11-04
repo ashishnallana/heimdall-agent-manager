@@ -43,7 +43,7 @@ ctl_extension_command :: proc(cmd: []string, args: []string) {
 		if !ok do return
 		env.ts = ctl_extension_now_rfc3339()
 		env.permission_timeout_ms = ext.permission_timeout_from_env()
-		out := ext.hook_run_logged(provider, raw, env, ctl_extension_send)
+		out := ext.hook_run(provider, raw, env, ctl_extension_send)
 		if out != "" do fmt.println(out)
 	case "event":
 		if !ext.env_ready(env) do return

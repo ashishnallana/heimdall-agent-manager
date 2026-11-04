@@ -274,7 +274,6 @@ bridge_ext_token_usage_field :: proc(b: ^strings.Builder, instance_id: string, r
 		if s.token_usage.updated_at_ms != 0 {
 			strings.write_string(b, ",\"token_usage\":")
 			bridge_ext_token_usage_write_json(b, s.token_usage, run_count)
-			bridge_ext_debug_usage(instance_id, "status_frame_token_usage", s.token_usage)
 			if sent_at_ms > 0 && s.token_usage.dirty do bridge_ext_token_mark_pushed(&s.token_usage, sent_at_ms)
 		}
 		if s.token_final_run > 0 {
