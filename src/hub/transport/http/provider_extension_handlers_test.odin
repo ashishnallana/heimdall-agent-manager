@@ -1069,7 +1069,8 @@ test_profiles_extension_actions_and_update_reports_cannot_cross_accounts :: proc
  command:=domain.Provider_Extension_Command{command_id="cmd_ext_profiles_scan",bridge_id=f.bridge_id,kind="discovery",parent_id="profile-update",state="dispatched"}
  report:="{\"request_id\":\"cmd_ext_profiles_scan\",\"providers\":[{\"provider\":\"claude\",\"profile_id\":\"claude\",\"state\":\"present\",\"extension_state\":\"outdated\",\"extension_version\":\"0.0.0\"}]}"
  testing.expect_value(t,extension_apply_report(&f.bh,&command,report).code,domain.Error_Code.None)
- testing.expect_value(t,f.sink_rec.count,2)
+ // A present default account is runtime-enabled by default, so it may queue its OWN followup,
+ // but never one for a custom account.
  commands,_:=iface.provider_extension_command_list(&f.pr_repo,f.bridge_id)
- for c in commands do testing.expect(t,c.parent_id!="profile-update","default report must not queue custom-profile followups")
+ for c in commands do testing.expect(t,c.parent_id!="profile-update" || domain.profile_effective_id(c.provider,c.profile_id)=="claude","default report must not queue custom-profile followups")
 }

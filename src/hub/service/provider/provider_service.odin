@@ -381,7 +381,7 @@ list_bridge_providers :: proc(service: ^Provider_Service, bridge_id: string) -> 
   entry,found,eerr:=iface.provider_catalog_get(service.repo,p.provider)
   if eerr.code!=.None { bridge_provider_views_destroy(views);return nil,eerr }
   if !found do continue
-  v:=Bridge_Provider_View{catalog=entry,bridge_id=strings.clone(bridge_id),profile_id=strings.clone(p.profile_id),profile_state=strings.clone(p.state),label_enc=strings.clone(p.label_enc),accent=strings.clone(p.accent),enabled=p.enabled && p.profile_id!=p.provider,binary_path=strings.clone(""),version_text=strings.clone(""),detection_state=strings.clone("absent"),checked_at=strings.clone(""),extension_state=strings.clone(""),extension_version=strings.clone(""),extension_checked_at=strings.clone("")}
+  v:=Bridge_Provider_View{catalog=entry,bridge_id=strings.clone(bridge_id),profile_id=strings.clone(p.profile_id),profile_state=strings.clone(p.state),label_enc=strings.clone(p.label_enc),accent=strings.clone(p.accent),enabled=p.enabled,binary_path=strings.clone(""),version_text=strings.clone(""),detection_state=strings.clone("absent"),checked_at=strings.clone(""),extension_state=strings.clone(""),extension_version=strings.clone(""),extension_checked_at=strings.clone("")}
   for status in statuses {
    if status.provider!=p.provider || domain.profile_effective_id(status.provider,status.profile_id)!=p.profile_id do continue
    delete(v.binary_path);v.binary_path=strings.clone(status.binary_path)
@@ -393,6 +393,9 @@ list_bridge_providers :: proc(service: ^Provider_Service, bridge_id: string) -> 
    delete(v.extension_checked_at);v.extension_checked_at=strings.clone(status.extension_checked_at)
    break
   }
+  // Single source of truth: with no explicit per-bridge setting, a present provider whose profile is
+  // enabled is runtime-enabled by default. An explicit setting (PUT .../providers/<p>) always overrides.
+  v.enabled=v.enabled && v.detection_state=="present"
   for setting in settings do if setting.provider==p.provider && domain.profile_effective_id(setting.provider,setting.profile_id)==p.profile_id {v.enabled=setting.enabled;break}
   v.enabled=v.enabled && p.enabled && p.state!="missing"
   observation,oerr:=effective_model_observation(service.repo,bridge_id,&v.catalog,p.profile_id)
