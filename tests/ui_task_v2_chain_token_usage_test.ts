@@ -185,3 +185,16 @@ test('chain context carries estimate provenance and effective tokens', async () 
   assert.match(html, /estimated from tool traffic/);
   assert.match(html, /~150K/);
 });
+
+// Hidden panes stay mounted (PaneVisibilityProvider), and ChainTokenUsageSection holds a
+// viewer registration (retainChainTokenUsageView) until unmount. The overview therefore
+// mounts the section only while the panel is visible AND the section is expanded, so a
+// hidden pane releases the viewer (no token-usage refetch) and re-mounting catches up
+// via the stale-on-mount refetch. Source-level check, like the sibling relocation test.
+test('overview mounts token usage only while the pane is visible (hidden pane = no viewer, no refetch)', () => {
+  const panel = fs.readFileSync(fileURLToPath(new URL('../src/ui/components/chat/ChainOverviewPanel.tsx', import.meta.url)), 'utf8');
+  assert.match(panel, /const panelVisible = usePaneVisible\(\)/);
+  assert.match(panel, /!isCollapsed\('tokenUsage'\) && panelVisible && <ChainTokenUsageSection chainId=\{chainId\} embedded \/>/);
+  const section = fs.readFileSync(fileURLToPath(new URL('../src/ui/components/taskchain/ChainTokenUsage.tsx', import.meta.url)), 'utf8');
+  assert.match(section, /retainChainTokenUsageView\(chainId\)[\s\S]{0,200}if \(view\.stale && !fetchingRef\.current\) refetch\(\)[\s\S]{0,60}return view\.release/);
+});

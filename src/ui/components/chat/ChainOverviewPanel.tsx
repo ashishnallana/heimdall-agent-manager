@@ -8,7 +8,9 @@ import {
   Badge,
   Button,
   Icon,
+  IconButton,
   Spinner,
+  Textarea,
   StatusDot,
   StatusPill,
   Text,
@@ -292,12 +294,13 @@ function AttentionTaskReviewCard({
         <label className="block text-caption font-medium text-muted mb-1">
           Review Feedback / Justification
         </label>
-        <textarea
+        <Textarea
           value={voteComment}
-          onChange={(e) => setVoteComment(e.target.value)}
+          onChange={setVoteComment}
           placeholder="Add comments or required fixes before voting…"
           rows={2}
-          className="w-full rounded-[var(--radius-sm)] border border-subtle bg-canvas px-3 py-2 text-xs text-primary placeholder:text-muted focus:border-accent focus:outline-none"
+          size="sm"
+          width="full"
         />
       </div>
 
@@ -656,8 +659,8 @@ export default function ChainOverviewPanel({
                         handleNavigateToAgent(instId, name);
                       }
                     }}
-                    className={`group flex h-8 min-w-0 cursor-pointer items-center gap-2 rounded-[var(--radius-md)] px-2 text-xs transition-colors hover:bg-neutral-soft ${
-                      isSelected ? 'bg-accent/10' : ''
+                    className={`group flex min-h-8 min-w-0 cursor-pointer items-center gap-2 rounded-[var(--radius-md)] px-2 text-xs transition-colors hover:bg-neutral-soft ${
+                      isSelected ? 'bg-neutral-soft' : ''
                     }`}
                   >
                     <StatusDot tone={statusTone(rawStatus)} label={rawStatus} size="sm" />
@@ -683,52 +686,47 @@ export default function ChainOverviewPanel({
                       className="hidden shrink-0 items-center gap-0.5 group-hover:flex group-focus-within:flex"
                       onClick={(e) => e.stopPropagation()}
                     >
-                      <button
-                        type="button"
+                      <IconButton
                         data-debug-id={`chain-overview-open-pty-${instId}`}
+                        icon="terminal"
+                        label="Open live terminal"
+                        size="sm"
+                        variant="ghost"
                         onClick={(e) => handleOpenAgentPtyTab(instId, name, e)}
-                        title="Open live terminal"
-                        aria-label="Open live terminal"
-                        className="grid h-6 w-6 place-items-center rounded-[var(--radius-md)] text-muted transition-colors hover:bg-neutral-soft hover:text-primary"
-                      >
-                        <Icon name="terminal" size={12} />
-                      </button>
+                      />
                       {isStopped ? (
-                        <button
-                          type="button"
-                          disabled={isStarting}
+                        <IconButton
                           data-debug-id={`chain-overview-start-agent-${instId}`}
+                          icon="play"
+                          label="Start Agent"
+                          size="sm"
+                          variant="ghost"
                           onClick={(e) => handleStartAgent(instId, e)}
-                          title="Start Agent"
-                          aria-label="Start Agent"
-                          className="grid h-6 w-6 place-items-center rounded-[var(--radius-md)] text-accent hover:bg-neutral-soft disabled:opacity-50"
-                        >
-                          {isStarting ? <Spinner size="sm" /> : <Icon name="play" size={12} />}
-                        </button>
+                          disabled={isStarting}
+                          loading={isStarting}
+                        />
                       ) : isRunning ? (
                         <>
-                          <button
-                            type="button"
-                            disabled={isStopping || isRestarting}
+                          <IconButton
                             data-debug-id={`chain-overview-stop-agent-${instId}`}
+                            icon="stop"
+                            label="Stop Agent"
+                            size="sm"
+                            variant="danger"
                             onClick={(e) => handleStopAgent(instId, agentId, e)}
-                            title="Stop Agent"
-                            aria-label="Stop Agent"
-                            className="grid h-6 w-6 place-items-center rounded-[var(--radius-md)] text-muted hover:bg-neutral-soft hover:text-danger disabled:opacity-50"
-                          >
-                            {isStopping ? <Spinner size="sm" /> : <Icon name="stop" size={11} />}
-                          </button>
-                          <button
-                            type="button"
                             disabled={isStopping || isRestarting}
+                            loading={isStopping}
+                          />
+                          <IconButton
                             data-debug-id={`chain-overview-restart-agent-${instId}`}
+                            icon="refresh"
+                            label="Restart Agent"
+                            size="sm"
+                            variant="ghost"
                             onClick={(e) => handleRestartAgent(instId, agentId, e)}
-                            title="Restart Agent"
-                            aria-label="Restart Agent"
-                            className="grid h-6 w-6 place-items-center rounded-[var(--radius-md)] text-muted hover:bg-neutral-soft hover:text-primary disabled:opacity-50"
-                          >
-                            {isRestarting ? <Spinner size="sm" /> : <Icon name="refresh" size={12} />}
-                          </button>
+                            disabled={isStopping || isRestarting}
+                            loading={isRestarting}
+                          />
                         </>
                       ) : null}
                     </div>
@@ -1040,7 +1038,7 @@ export default function ChainOverviewPanel({
             </h3>
           </div>
         </button>
-        {!isCollapsed('tokenUsage') && <ChainTokenUsageSection chainId={chainId} embedded />}
+        {!isCollapsed('tokenUsage') && panelVisible && <ChainTokenUsageSection chainId={chainId} embedded />}
       </section>
 
       {/* SECTION 3: VCS Changes */}
