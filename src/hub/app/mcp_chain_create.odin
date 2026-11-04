@@ -27,22 +27,31 @@ mcp_create_chain :: proc(ctx:rawptr,raw:string,view:mcp.Access_View,args:mcp.Con
 	provider,model:=tv2.resolve_launch_model(&g.agents,args.bridge_id,args.provider,args.model,args.provider_profile)
 	defer delete(provider);defer delete(model)
 	if provider=="" || model=="" do return "","","provider_unavailable: choose an enabled provider and model on bridge_id"
+	// Validate the optional project with the native launch rule (owned, active,
+	// path resolvable) before the chain row, coordinator or reservation exist.
+	if args.project_id!="" {
+		perr:=agent.validate_launch_project(&g.agents,principal,domain.Project_ID(args.project_id),args.bridge_id)
+		if perr.code==.Not_Found do return "","","project_not_found: choose an accessible project_id"
+		if perr.code==.Conflict do return "","","project_archived: choose an active project_id"
+		if perr.code!=.None do return "","","request_failed"
+	}
 	chain,created,cerr:=tc.create_chain(&g.taskchains,principal,{title=title,description=description})
 	if !created || cerr.code!=.None do return "","",mcp_task_error(cerr)
-	// Reuse the sealed chain title for the conversation. The native default agent
-	// name/counter may be armored; appending plaintext would corrupt that token.
+	// Native coordinator naming: prepare_instance mints "<agent name> #<n>" for the
+	// instance and conversation, like POST /task-chains. The chain keeps the caller
+	// title. A sealed agent name yields "<token> #<n>"; MCP readers open embedded tokens.
 	inst,generation,prepared,perr:=agent.prepare_instance(&g.agents,principal,{
-		agent_id=args.coordinator_agent_id,bridge_id=args.bridge_id,chain_id=string(chain.chain_id),
+		agent_id=args.coordinator_agent_id,bridge_id=args.bridge_id,project_id=domain.Project_ID(args.project_id),chain_id=string(chain.chain_id),
 		provider=provider,provider_profile=args.provider_profile,model=model,
-		member_role="coordinator",display_name=title,
-	},title)
+		member_role="coordinator",
+	})
 	if !prepared || perr.code!=.None do return "","",mcp_task_error(perr)
 	committed:=false
 	defer if !committed do project.bridge_runtime_instance_cancel_reservation(g.agents.bridge_runtime_registry,inst.bridge_id,generation,inst.agent_instance_id)
 	// Native preparation currently treats membership writes as best effort. The
 	// MCP operation promises atomic binding, so verify them before committing.
 	saved,bound,rerr:=iface.taskchain_get_chain(&g.repos.taskchains,chain.chain_id)
-	if !bound || rerr.code!=.None || saved.coordinator_agent_instance_id!=inst.agent_instance_id do return "","","request_failed"
+	if !bound || rerr.code!=.None || saved.coordinator_agent_instance_id!=inst.agent_instance_id || string(inst.project_id)!=args.project_id do return "","","request_failed"
 	members,merr:=iface.taskchain_list_members_by_chain(&g.repos.taskchains,chain.chain_id,domain.User_ID(view.owner))
 	if merr.code!=.None do return "","","request_failed"
 	member_ok:=false

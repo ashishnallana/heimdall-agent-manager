@@ -42,8 +42,11 @@ import type {
   Size,
 } from '../types';
 
-/** Visual weight of an icon action. */
-export type IconButtonVariant = 'ghost' | 'solid' | 'danger';
+/**
+ * Visual weight of an icon action. `primary` is the accent-filled icon action (a
+ * composer's send): hover brightens, press scales to .96 (no scale under reduced motion).
+ */
+export type IconButtonVariant = 'ghost' | 'solid' | 'danger' | 'primary';
 
 const BASE =
   'inline-flex items-center justify-center rounded-[var(--radius-md)] ' +
@@ -54,6 +57,9 @@ const VARIANT_CLASSES: Record<IconButtonVariant, string> = {
   ghost: 'text-muted hover:text-primary hover:bg-surface-raised',
   solid: 'border border-subtle bg-surface-raised text-primary hover:brightness-125',
   danger: 'text-danger hover:bg-surface-raised hover:brightness-110',
+  primary:
+    'bg-accent text-accent-fg ease-standard hover:brightness-110 active:scale-[.96] ' +
+    'motion-reduce:transition-none motion-reduce:active:scale-100',
 };
 
 /** Box size per size. `md` (44px) meets the AA touch-target minimum. */
@@ -86,13 +92,38 @@ export interface IconButtonProps
   variant?: IconButtonVariant;
   /** Maps to hit-target + glyph size. Default `md` (≥44px). */
   size?: Size;
+  /**
+   * Toggle state (opt-in). When set, the button is a toggle: `aria-pressed`
+   * reflects it, a pressed button is accent-coloured, and `pressedIcon` (if any)
+   * replaces `icon` with a `pop` as it turns on. Omit for a plain action.
+   */
+  pressed?: boolean;
+  /** Glyph shown while `pressed` (e.g. `star-filled` for a `star` toggle). */
+  pressedIcon?: IconName;
 }
 
 export const IconButton = React.forwardRef<HTMLButtonElement, IconButtonProps>(function IconButton(
-  { icon, label, variant = 'ghost', size = 'md', loading = false, disabled, className, type = 'button', ...rest },
+  { icon, label, variant = 'ghost', size = 'md', loading = false, disabled, className, type = 'button', pressed, pressedIcon, ...rest },
   ref,
 ) {
-  const rootClassName = [BASE, VARIANT_CLASSES[variant], BOX_CLASSES[size], disabled || loading ? '' : 'cursor-pointer', className ?? '']
+  const toggle = pressed !== undefined;
+  // `pop` only when the toggle turns on after mount, never on first render (a list
+  // of already-starred rows must not all pop when it opens). Derived while rendering.
+  const [prevPressed, setPrevPressed] = React.useState(pressed);
+  const [turnedOn, setTurnedOn] = React.useState(false);
+  if (prevPressed !== pressed) {
+    setPrevPressed(pressed);
+    setTurnedOn(Boolean(pressed));
+  }
+  const rootClassName = [
+    BASE,
+    // A pressed toggle keeps the accent through hover; colour changes at fast/standard.
+    toggle && pressed ? 'text-accent hover:bg-surface-raised ease-standard motion-reduce:transition-none' : VARIANT_CLASSES[variant],
+    toggle && !pressed ? 'ease-standard motion-reduce:transition-none' : '',
+    BOX_CLASSES[size],
+    disabled || loading ? '' : 'cursor-pointer',
+    className ?? '',
+  ]
     .filter(Boolean)
     .join(' ')
     .replace(/\s+/g, ' ')
@@ -106,10 +137,17 @@ export const IconButton = React.forwardRef<HTMLButtonElement, IconButtonProps>(f
       title={label}
       disabled={disabled || loading}
       aria-busy={loading || undefined}
+      aria-pressed={toggle ? pressed : undefined}
       className={rootClassName}
       {...rest}
     >
-      <Icon name={loading ? 'refresh' : icon} size={ICON_SIZE[size]} className={loading ? 'animate-spin' : undefined} />
+      {/* Keyed on the toggle state so the filled glyph mounts (and pops) only when it turns on. */}
+      <Icon
+        key={toggle && pressed ? 'on' : 'off'}
+        name={loading ? 'refresh' : toggle && pressed && pressedIcon ? pressedIcon : icon}
+        size={ICON_SIZE[size]}
+        className={loading ? 'animate-spin' : toggle && pressed && turnedOn ? 'animate-pop' : undefined}
+      />
     </button>
   );
 });

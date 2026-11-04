@@ -1,7 +1,7 @@
 import React, { useRef, useState } from 'react';
 import { Badge, Button, Icon, Spinner, Text, Textarea } from '@ui';
 import { useCreateArtifactMutation } from '../../api/endpoints/artifacts';
-import { MAX_UPLOAD_BYTES } from '../ArtifactUpload';
+import { MAX_UPLOAD_BYTES, MAX_UPLOAD_LABEL } from '../ArtifactUpload';
 import {
   artifactKindForFile,
   artifactLinkFromResponse,
@@ -73,7 +73,7 @@ export const TaskComposer: React.FC<TaskComposerProps> = ({
         file,
         link: '',
         status: tooLarge ? 'error' : 'uploading',
-        error: tooLarge ? `Too large. The limit is ${Math.round(MAX_UPLOAD_BYTES / (1024 * 1024))} MB.` : '',
+        error: tooLarge ? `Too large. The limit is ${MAX_UPLOAD_LABEL}.` : '',
       },
     ]);
     if (tooLarge) return;

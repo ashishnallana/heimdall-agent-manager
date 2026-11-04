@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { importKeyring, serializeKeyringBytes } from '../src/ui/utils/vaultKeyring.ts';
-import { decryptVaultBytes, decryptVaultText, encryptVaultText } from '../src/ui/utils/vaultContent.ts';
+import { decryptVaultBytes, decryptVaultText, encryptVaultBytes, encryptVaultText } from '../src/ui/utils/vaultContent.ts';
 import { keyringFromHex } from './helpers/vaultTestKeyring.ts';
 
 const fixture = JSON.parse(readFileSync(new URL('./fixtures/artifact_binary_vault_v2.json', import.meta.url), 'utf8'));
@@ -52,4 +52,23 @@ test('decryptVaultText keeps its text contract for UTF-8 content', async () => {
   const opened = await decryptVaultBytes(armored, kr);
   assert.ok(opened.status === 'ok');
   assert.equal(new TextDecoder().decode(opened.bytes), 'héllo — ✓');
+});
+
+// REQ-ART-2: the UI seals an uploaded html-bundle ZIP as bytes, so the viewer's Download
+// returns exactly the uploaded archive, up to the 15 MB (15 MiB) artifact limit.
+test('encryptVaultBytes round-trips a binary ZIP byte-for-byte, including at the 15 MiB limit', async () => {
+  const kr = await keyringFromHex('0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef');
+  const zipLike = Uint8Array.from([0x50, 0x4b, 0x03, 0x04, 0xff, 0xfe, 0x00, 0x80, 0xc3, 0x28]);
+  const armored = await encryptVaultBytes(zipLike, kr);
+  const opened = await decryptVaultBytes(armored, kr);
+  assert.ok(opened.status === 'ok');
+  assert.deepEqual([...opened.bytes], [...zipLike]);
+  assert.deepEqual([...zipLike.subarray(0, 4)], [0x50, 0x4b, 0x03, 0x04], 'caller keeps its plaintext');
+
+  const big = new Uint8Array(15 * 1024 * 1024);
+  for (let i = 0; i < big.length; i += 1) big[i] = (i * 131 + 7) & 0xff;
+  const bigOpened = await decryptVaultBytes(await encryptVaultBytes(big, kr), kr);
+  assert.ok(bigOpened.status === 'ok');
+  assert.equal(bigOpened.bytes.length, 15_728_640);
+  assert.ok(Buffer.from(bigOpened.bytes).equals(Buffer.from(big)));
 });

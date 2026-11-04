@@ -7,7 +7,7 @@ import "core:strings"
 import "core:sync"
 import vault "odin_test:lib/vault"
 
-Worker_Slot :: struct {active,claimed,done:bool,owner,id,generation,device,registration,job,result:string,deadline_ms:i64,connection_generation:int}
+Worker_Slot :: struct {active,claimed,done:bool,owner,id,generation,device,registration,job,result:string,deadline_ms:i64,connection_generation,max_result:int}
 Worker_Broker :: struct {mutex:sync.Mutex,slots:[64]Worker_Slot}
 worker_assign :: proc(b:^Worker_Broker,id,generation,device:string,connection_generation:=0)->bool {
 	sync.mutex_lock(&b.mutex);defer sync.mutex_unlock(&b.mutex)
@@ -28,7 +28,9 @@ worker_unclaim :: proc(b:^Worker_Broker,id,generation,device:string) {
 }
 worker_begin :: proc(b:^Worker_Broker,job:vault.Control_Job)->bool {
 	encoded,err:=json.marshal(job,allocator=context.temp_allocator)
-	if err!=nil || len(encoded)>5*1024*1024 do return false
+	// Job envelope = payload bound (artifact-specific for bundle seals) + 1 MiB of
+	// consent/directory/signature metadata.
+	if err!=nil || len(encoded)>vault.control_job_payload_max(job.operation,job.tool)+1024*1024 do return false
 	defer if len(encoded)>0 do crypto.zero_explicit(raw_data(encoded),len(encoded))
 	sync.mutex_lock(&b.mutex);defer sync.mutex_unlock(&b.mutex)
 	count:=0
@@ -36,7 +38,7 @@ worker_begin :: proc(b:^Worker_Broker,job:vault.Control_Job)->bool {
 	if count>=4 do return false
 	for &slot in b.slots do if !slot.active {
 		a:=runtime.heap_allocator()
-		slot={active=true,owner=strings.clone(job.owner,a),id=strings.clone(job.request_id,a),generation=strings.clone(job.generation,a),job=strings.clone(string(encoded),a),deadline_ms=job.deadline_ms}
+		slot={active=true,owner=strings.clone(job.owner,a),id=strings.clone(job.request_id,a),generation=strings.clone(job.generation,a),job=strings.clone(string(encoded),a),deadline_ms=job.deadline_ms,max_result=vault.control_reply_max(job.operation,job.tool)}
 		return true
 	}
 	return false
@@ -62,9 +64,9 @@ worker_job :: proc(b:^Worker_Broker,owner,device,id,generation:string,now:i64,re
 	return job,err==nil
 }
 worker_complete :: proc(b:^Worker_Broker,owner,device:string,reply:vault.Control_Reply,now:i64,registration:="",connection_generation:=0)->bool {
-	if len(reply.result)>4*1024*1024 do return false
+	if len(reply.result)>vault.CONTROL_JOB_ARTIFACT_PAYLOAD_MAX do return false
 	sync.mutex_lock(&b.mutex);defer sync.mutex_unlock(&b.mutex)
-	for &slot in b.slots do if slot.active && slot.claimed && !slot.done && slot.owner==owner && slot.device==device && slot.registration==registration && slot.connection_generation==connection_generation && slot.id==reply.request_id && slot.generation==reply.generation && slot.deadline_ms==reply.deadline_ms && slot.deadline_ms>now {
+	for &slot in b.slots do if slot.active && slot.claimed && !slot.done && len(reply.result)<=slot.max_result && slot.owner==owner && slot.device==device && slot.registration==registration && slot.connection_generation==connection_generation && slot.id==reply.request_id && slot.generation==reply.generation && slot.deadline_ms==reply.deadline_ms && slot.deadline_ms>now {
 		slot.result=strings.clone(reply.result,runtime.heap_allocator());slot.done=true
 		return true
 	}

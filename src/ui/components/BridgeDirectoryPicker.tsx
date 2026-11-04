@@ -6,7 +6,7 @@
 // create a new folder, or create a typed-but-missing path.
 
 import { useEffect, useMemo, useState } from 'react';
-import { useLazyListBridgeDirQuery, useMkdirBridgePathMutation, type BridgeFsEntry } from '../api/endpoints/bridgeFs';
+import { useLazyListBridgeDirQuery, useMkdirBridgePathMutation, LOSSY_NAME_HINT, type BridgeFsEntry } from '../api/endpoints/bridgeFs';
 import { Badge, Button, Icon, IconButton, Input, Panel } from '@ui';
 function str(v: any): string { return String(v ?? '').trim(); }
 
@@ -146,13 +146,15 @@ export default function BridgeDirectoryPicker({
           <div data-debug-id={`${debugId}-loading`} className="p-4 text-center text-xs text-muted">Loading…</div>
         ) : visibleEntries.length === 0 ? (
           <div data-debug-id={`${debugId}-empty`} className="p-4 text-center text-xs text-faint">No subfolders here.</div>
-        ) : visibleEntries.map((e) => (
+        ) : visibleEntries.map((e, i) => (
           <button
-            key={e.name}
+            key={e.name_lossy ? `lossy:${i}` : e.name}
             data-debug-id={`${debugId}-entry-${e.name}`}
             type="button"
+            disabled={e.name_lossy}
+            title={e.name_lossy ? LOSSY_NAME_HINT : undefined}
             onClick={() => void load(cwd ? joinPath(cwd, e.name) : e.name)}
-            className="flex w-full items-center justify-between gap-3 px-3 py-2 rounded-lg hover:bg-surface-raised transition cursor-pointer text-left group"
+            className="flex w-full items-center justify-between gap-3 px-3 py-2 rounded-lg hover:bg-surface-raised transition cursor-pointer text-left group disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:bg-transparent"
           >
             <div className="flex items-center gap-2.5 min-w-0">
               <Icon name="folder" size={15} className="shrink-0 text-accent group-hover:scale-105 transition-transform" />
@@ -161,6 +163,7 @@ export default function BridgeDirectoryPicker({
             <div className="flex items-center gap-2 shrink-0">
               {e.has_git ? <Badge tone="success" emphasis="soft" className="font-mono text-[10px]">git</Badge> : null}
               {e.hidden ? <Badge tone="neutral" emphasis="soft" className="font-mono text-[10px]">hidden</Badge> : null}
+              {e.name_lossy ? <Badge tone="warning" emphasis="soft" className="text-[10px]">Unreadable name</Badge> : null}
               <Icon name="chevron-right" size={14} className="shrink-0 text-faint group-hover:text-muted transition-colors" />
             </div>
           </button>

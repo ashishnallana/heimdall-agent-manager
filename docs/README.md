@@ -137,6 +137,8 @@ Point-in-time findings. File paths, commit ids and numbers reflect the snapshot 
 - [audits/shell_preview_memory_audit.md](audits/shell_preview_memory_audit.md): memory-leak audit of shell sessions and the preview proxy.
 - [reports/json_string_manipulation_audit.md](reports/json_string_manipulation_audit.md): audit of direct JSON string manipulation in the Odin code and a refactoring roadmap.
 - [investigations/html-bundle-navigation-diagnosis.md](investigations/html-bundle-navigation-diagnosis.md): diagnosis and approved correction plan for broken navigation links in HTML bundles.
+- [investigations/mcp-file-transfer-patterns.md](investigations/mcp-file-transfer-patterns.md): comparative study (2026-11-02) of how other MCP servers upload and download files and how Heimdall's encryption relay fits; not an implementation plan.
+- [incidents/2026-11-03-riverwood-oom-t4b.md](incidents/2026-11-03-riverwood-oom-t4b.md): riverwood `ham-bridge` out-of-memory A/B investigation (T4b) that confirmed a per-command temp-allocator leak in the dispatch workers; soak data in [incidents/t4b/soak-10m-bc.csv](incidents/t4b/soak-10m-bc.csv) and [incidents/t4b/soak-20m.csv](incidents/t4b/soak-20m.csv) (`elapsed_s,label,pid,rss_kib,threads,ops_ok`).
 
 ### Performance and call-reduction reports
 
@@ -166,6 +168,8 @@ Superseded or one-off records kept for context. Do not treat them as current beh
 - [ui-rebuild/memory-redesign-spec.md](ui-rebuild/memory-redesign-spec.md): the user's verbatim Memory redesign spec, with several clauses since superseded.
 - [tool-stream-main-merge.md](tool-stream-main-merge.md): merge reconciliation record for the tool integration into `origin/main`.
 - [tool-stream-preview-run.md](tool-stream-preview-run.md): record of an isolated tool stream preview run on 2026-10-23.
+- [plans/mcp-large-artifact-transfers.md](plans/mcp-large-artifact-transfers.md): **superseded (2026-11-02)** strict-E2EE transfer-handle design for 15 MiB MCP artifacts; large artifacts use the ordinary create path through the existing MCP relay instead, and this design's code was removed.
+- [plans/claude-browser-e2ee-artifact-upload.md](plans/claude-browser-e2ee-artifact-upload.md): **superseded (2026-11-02)** feasibility study of Hub-blind HTML bundle uploads from the Claude browser agent; kept for its egress and MCP App findings.
 
 ## Data and fixtures
 

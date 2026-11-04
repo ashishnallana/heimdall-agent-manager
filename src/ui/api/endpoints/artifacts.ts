@@ -3,10 +3,12 @@ import { useSelector } from 'react-redux';
 import * as daemonApi from '../daemonApi';
 import { heimdallApi, withSessionQuery } from '../heimdallApi';
 import { selectIsVaultUnlocked } from '../../store/vaultSlice';
+import { HTML_BUNDLE_KIND } from '../../utils/htmlBundle';
 import {
   VAULT_ARMOR_PREFIX,
   isVaultArmored,
   encryptVaultText,
+  encryptVaultBytes,
   decryptVaultText,
   decryptVaultBytes,
   getActiveVaultKey,
@@ -529,6 +531,18 @@ export const artifactsApi = heimdallApi.injectEndpoints({
                 content = encContent;
               }
             } catch {}
+          } else if (file instanceof Blob && args.kind === HTML_BUNDLE_KIND) {
+            // A bundle is a binary ZIP: seal its exact bytes (as ham-ctl does) so Download
+            // returns the byte-identical archive. Never routed through text encoding.
+            const bytes = new Uint8Array(await file.arrayBuffer());
+            try {
+              const encContent = await encryptVaultBytes(bytes, activeKey);
+              contentBase64 = bytesToBase64(new TextEncoder().encode(encContent));
+              content = encContent;
+              file = null;
+            } finally {
+              bytes.fill(0);
+            }
           } else if (file instanceof Blob) {
             const mime = String(args.mime || (file as any).type || '').toLowerCase();
             const ext = inferExt(args.name, args.ext);

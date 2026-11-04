@@ -42,6 +42,7 @@ import type { RootClassNameProps } from '../types';
 /** The type roles (size + weight + line-height + tracking), 11px floor enforced. */
 export type TextRole =
   | 'display'
+  | 'headline'
   | 'heading'
   | 'title'
   | 'body'
@@ -49,7 +50,8 @@ export type TextRole =
   | 'label'
   | 'caption'
   | 'overline'
-  | 'code';
+  | 'code'
+  | 'code-sm';
 
 /** Semantic text color. Never a raw color. */
 export type TextTone =
@@ -80,6 +82,8 @@ export type TextElement =
 /** Role → font-size token alias (each binds size/weight/line-height/tracking). */
 const ROLE_CLASS: Record<TextRole, string> = {
   display: 'text-display',
+  // Responsive: 26/44 below md (768px, the app's mobile breakpoint), 32/52 from md.
+  headline: 'text-headline-sm md:text-headline',
   heading: 'text-heading',
   title: 'text-title',
   body: 'text-body',
@@ -88,6 +92,7 @@ const ROLE_CLASS: Record<TextRole, string> = {
   caption: 'text-caption',
   overline: 'text-overline uppercase',
   code: 'text-code font-mono',
+  'code-sm': 'text-code-sm font-mono',
 };
 
 /** Tone → color token. */
@@ -108,6 +113,7 @@ const TONE_CLASS: Record<TextTone, string> = {
  */
 const DEFAULT_AS: Record<TextRole, TextElement> = {
   display: 'div',
+  headline: 'div',
   heading: 'div',
   title: 'div',
   body: 'p',
@@ -116,6 +122,7 @@ const DEFAULT_AS: Record<TextRole, TextElement> = {
   caption: 'span',
   overline: 'span',
   code: 'code',
+  'code-sm': 'code',
 };
 
 export interface TextProps

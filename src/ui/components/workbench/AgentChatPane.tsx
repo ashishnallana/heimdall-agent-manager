@@ -80,7 +80,7 @@ import {
   artifactUploadName,
   clipboardFilesFromEvent,
 } from '../../utils/artifactUpload';
-import { MAX_UPLOAD_BYTES } from '../ArtifactUpload';
+import { MAX_UPLOAD_BYTES, UPLOAD_TOO_LARGE_ERROR } from '../ArtifactUpload';
 import { ArtifactAttachmentPreview } from '../ArtifactAttachmentPreview';
 import Icon from '../Icon';
 import Markdown from '../Markdown';
@@ -104,7 +104,7 @@ import AgentActivityBubbles from '../chat/AgentActivityBubbles';
 import AtMentionPopup, { type MentionEntity } from '../chat/AtMentionPopup';
 import ChatMessageList from '../chat/ChatMessageList';
 import InstanceReconfigurationProgress from '../chat/InstanceReconfigurationProgress';
-import { MessageComposerInput, MessageComposerActions, MessageComposerStatus } from '../chat/MessageComposer';
+import { MessageComposerInput, MessageComposerActions, MessageComposerMorphShell, MessageComposerStatus, useComposerDockInset, useComposerExpanded } from '../chat/MessageComposer';
 import RuntimeConfigurationOptions from '../chat/RuntimeConfigurationOptions';
 import { usePaneDeferredRefresh, usePaneMarkRead, usePanePollPolicy, usePaneVisible, visiblePollInterval } from './paneVisibility';
 import {
@@ -1048,13 +1048,21 @@ export function AgentChatPane({
   }, [quoteFocusRevision]);
 
   const composerContainerRef = useRef<HTMLFormElement | HTMLDivElement | null>(null);
-  // REQ-FROST-1: on mobile the composer dock floats over the transcript; its measured
-  // height becomes the transcript's bottom inset so the last message stays reachable.
+  // REQ-FROST-1: the composer dock floats over the transcript; its measured height becomes
+  // the transcript's bottom inset so the last message stays reachable. The morphing card
+  // animates that height, so the inset is synced in the same frame (useComposerDockInset).
   const composerDockRef = useRef<HTMLDivElement | null>(null);
-  const [composerDockHeight, setComposerDockHeight] = useState(0);
+  const composerDockHeight = useComposerDockInset(composerDockRef, {
+    insetDebugId: 'conversation-thread-bottom-inset',
+    jumpDebugId: 'conversation-thread-jump-latest-btn',
+    resetKey: `${isMobile}:${conversation?.conversation_id || conversation?.conversationId || ''}:${agentInstanceId}`,
+  });
   const [error, setError] = useState('');
   const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
   const updateFilePickerPending = useRef(false);
+  // Mirrors updateFilePickerPending as render state: the native file chooser holds the
+  // morphing composer open until it reports a choice or a cancel.
+  const [filePickerOpen, setFilePickerOpen] = useState(false);
   const updateBlockers = useRef({ attachments, trayDraft, quotes, trayModeItem });
   updateBlockers.current = { attachments, trayDraft, quotes, trayModeItem };
   useEffect(() => desktopUpdatePreparation.register({
@@ -1163,19 +1171,6 @@ export function AgentChatPane({
     // showTray: the composer form unmounts while the action tray has the dock.
   }, [conversation?.conversation_id, conversation?.conversationId, agentInstanceId, showTray]);
 
-  useEffect(() => {
-    const el = composerDockRef.current;
-    if (!el || typeof ResizeObserver === 'undefined') {
-      setComposerDockHeight(0);
-      return;
-    }
-    const measure = () => setComposerDockHeight(Math.ceil(el.getBoundingClientRect().height));
-    measure();
-    const observer = new ResizeObserver(measure);
-    observer.observe(el);
-    return () => observer.disconnect();
-  }, [isMobile, conversation?.conversation_id, conversation?.conversationId, agentInstanceId]);
-
   const [statusMenuOpen, setStatusMenuOpen] = useState(false);
   const [headerActionsOpen, setHeaderActionsOpen] = useState(false);
   const actionsAccess = useActionsAccess();
@@ -1240,9 +1235,14 @@ export function AgentChatPane({
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   useEffect(() => {
     const input = fileInputRef.current;
-    const cancelled = () => { updateFilePickerPending.current = false; };
+    const cancelled = () => { updateFilePickerPending.current = false; setFilePickerOpen(false); };
+    // Engines without the input `cancel` event: the window regains focus when the chooser
+    // closes; a chosen file's `change` (and its attachment) arrives before this fallback.
+    let fallback: ReturnType<typeof setTimeout> | undefined;
+    const refocused = () => { clearTimeout(fallback); fallback = setTimeout(() => setFilePickerOpen(false), 1000); };
     input?.addEventListener('cancel', cancelled);
-    return () => input?.removeEventListener('cancel', cancelled);
+    window.addEventListener('focus', refocused);
+    return () => { input?.removeEventListener('cancel', cancelled); window.removeEventListener('focus', refocused); clearTimeout(fallback); };
   });
 
   const [renaming, setRenaming] = useState(false);
@@ -1690,9 +1690,7 @@ export function AgentChatPane({
           file,
           status: tooLarge ? 'error' : 'uploading',
           error: tooLarge
-            ? `File is too large. Maximum upload size is ${Math.round(
-                MAX_UPLOAD_BYTES / (1024 * 1024),
-              )} MB.`
+            ? UPLOAD_TOO_LARGE_ERROR
             : '',
         },
       ];
@@ -1732,6 +1730,7 @@ export function AgentChatPane({
 
   function handleAttachmentInput(event: any) {
     updateFilePickerPending.current = false;
+    setFilePickerOpen(false);
     if (desktopUpdateFrozen()) return;
     if (configurationInputBlocked || sendingRef.current) return;
     const files = Array.from(event.target.files || []) as File[];
@@ -1743,6 +1742,7 @@ export function AgentChatPane({
     if (desktopUpdateFrozen()) return;
     if (!configurationInputBlocked && !sendingRef.current && fileInputRef.current) {
       updateFilePickerPending.current = true;
+      setFilePickerOpen(true);
       fileInputRef.current.click();
     }
   }
@@ -2270,6 +2270,19 @@ export function AgentChatPane({
 
   const pendingReconfig =
     selectionChangesConfig || operation?.phase === 'recovery_required';
+  // Morphing composer: a 56px pill that grows into the full card while focused or while
+  // anything below holds it open (MessageComposer.tsx useComposerExpanded).
+  const composerExpansion = useComposerExpanded({
+    // Raw value: whitespace-only and restored drafts keep it open.
+    draft: trayModeItem ? trayDraft : draft,
+    hasAttachments: attachments.length > 0,
+    hasQuotes: !trayModeItem && quotes.length > 0,
+    borrowed: Boolean(trayModeItem),
+    menuOpen: statusMenuOpen || runtimeMenuOpen || mentionQuery !== null,
+    uploadActive: filePickerOpen || hasUploadingAttachments,
+    pendingActions: pendingReconfig,
+    readOnly: conversationReadOnly,
+  });
   const permissionToggle = permissionToggleState({
     catalogExtension: instanceCatalogExtension,
     instance,
@@ -2431,6 +2444,7 @@ export function AgentChatPane({
     const composerInput = (
       <MessageComposerInput
         mobile={isMobile}
+        morph
         debugId="conversation-composer-input"
         ref={textareaRef}
         value={trayModeItem ? trayDraft : draft}
@@ -2534,13 +2548,17 @@ export function AgentChatPane({
             data-status={runtimeStateFromStatus(runtimeStatus)}
             aria-label={`Agent ${runtimeLabel.replace('…', '').toLowerCase()}. Start or stop the agent`}
             title={`${runtimeLabel} — start/stop the agent`}
-            className={`grid shrink-0 place-items-center rounded-full hover:bg-neutral-soft ${isMobile ? 'h-10 w-10' : 'h-9 w-9'}`}
+            // Sits on the morph context row's 20px line: the negative margins keep the row
+            // height while the button keeps a larger hit area; the hover disc is inner.
+            className={`group grid shrink-0 place-items-center rounded-full ${isMobile ? '-my-2.5 -mr-2.5 h-10 w-10' : '-my-2 -mr-2 h-9 w-9'}`}
           >
-            <MessageComposerStatus
-              debugPrefix="conversation"
-              tone={runtimeStatusToTone(runtimeStatus)}
-              label={runtimeLabel}
-            />
+            <span className="grid h-6 w-6 place-items-center rounded-full group-hover:bg-neutral-soft">
+              <MessageComposerStatus
+                debugPrefix="conversation"
+                tone={runtimeStatusToTone(runtimeStatus)}
+                label={runtimeLabel}
+              />
+            </span>
           </button>
         }
       >
@@ -2693,115 +2711,55 @@ export function AgentChatPane({
             className="hidden"
             onChange={handleAttachmentInput}
           />
-          <div
-            data-debug-id="conversation-composer-card"
-            className={
-              isMobile
-                ? 'ui-frost-card relative isolate rounded-[26px] border px-3 py-2.5 focus-within:border-accent'
-                : 'ui-frost-card relative isolate rounded-[22px] border px-3 py-2.5 focus-within:border-accent sm:px-4 sm:py-3'
-            }
-          >
-            {/* REQ-FROST-2: stacked backdrop layers, strongest behind the input row and
-                fading toward the action row (see `.ui-frost-gradient` in styles.css). */}
-            <div data-debug-id="conversation-composer-frost" aria-hidden="true" className="ui-frost-gradient -z-10">
-              <span />
-              <span />
-              <span />
-            </div>
-            {/* REQ-AT-1: rides on the card's top edge, so it costs the composer no height. */}
-            {showNeedYouPill ? (
-              <div className="absolute -top-4 right-4 z-10">
-                <NeedYouPill
-                  count={trayItemList.length}
-                  onClick={() => dispatchTray({ type: 'show_items' })}
-                />
+          <MessageComposerMorphShell
+            expansion={composerExpansion}
+            debugPrefix="conversation"
+            debugId="conversation-composer-card"
+            // REQ-FROST-1/2: the frost rim and stacked backdrop layers stay; the shell owns
+            // geometry, borders while open, and motion.
+            className="ui-frost-card isolate rounded-[28px] border px-5"
+            leading={<>
+              <div data-debug-id="conversation-composer-frost" aria-hidden="true" className="ui-frost-gradient -z-10">
+                <span />
+                <span />
+                <span />
               </div>
-            ) : null}
-            {trayMode && trayModeItem ? (
-              <div
-                data-debug-id="conversation-composer-tray-mode"
-                className="mb-2 flex min-w-0 items-center gap-2 rounded-xl bg-warning-soft py-1 pl-2.5 pr-1 text-[13px] text-warning"
-              >
-                <Icon name={trayMode.kind === 'answer' ? 'chat' : 'pencil'} size={14} className="shrink-0" />
-                <span className="min-w-0 flex-1 truncate">
-                  {TRAY_MODE_COPY[trayMode.kind].banner}{' '}
-                  <strong className="font-semibold">
-                    <VaultText value={trayModeItem.title} fallback="this task" />
-                  </strong>
-                </span>
-                <button
-                  type="button"
-                  aria-label="Cancel"
-                  data-debug-id="conversation-composer-tray-mode-cancel"
-                  onClick={() => dispatchTray({ type: 'cancel_mode' })}
-                  className="grid h-8 w-8 shrink-0 place-items-center rounded-full hover:bg-surface-raised"
+              {showNeedYouPill ? (
+                <div className="absolute -top-4 right-4 z-10">
+                  <NeedYouPill
+                    count={trayItemList.length}
+                    onClick={() => dispatchTray({ type: 'show_items' })}
+                  />
+                </div>
+              ) : null}
+              {trayMode && trayModeItem ? (
+                <div
+                  data-debug-id="conversation-composer-tray-mode"
+                  className="mt-4 flex min-w-0 items-center gap-2 rounded-xl bg-warning-soft py-1 pl-2.5 pr-1 text-[13px] text-warning"
                 >
-                  <Icon name="close" size={14} />
-                </button>
-              </div>
-            ) : null}
-            {/* REQ-LAY-2: desktop only (REQ-LAY-3: no chips row on mobile). Bridge/project chips,
-                then the runtime StatusDot (start/stop menu) at the right end of the row. */}
-            {!isMobile ? (
-              <div
-                data-debug-id="conversation-composer-context"
-                className="mb-2 flex min-w-0 items-center gap-x-2 text-[12px] text-muted"
-              >
-                <div className="flex min-w-0 flex-1 items-center gap-1.5 overflow-hidden">
+                  <Icon name={trayMode.kind === 'answer' ? 'chat' : 'pencil'} size={14} className="shrink-0" />
+                  <span className="min-w-0 flex-1 truncate">
+                    {TRAY_MODE_COPY[trayMode.kind].banner}{' '}
+                    <strong className="font-semibold">
+                      <VaultText value={trayModeItem.title} fallback="this task" />
+                    </strong>
+                  </span>
                   <button
                     type="button"
-                    onClick={() => setRuntimeMenuOpen(true)}
-                    aria-haspopup="dialog"
-                    aria-label="Change bridge, provider or model"
-                    data-debug-id="conversation-composer-bridge-chip"
-                    className="inline-flex min-w-0 max-w-[50%] shrink items-center gap-1.5"
-                    title={`Bridge: ${bridgeLabel || '—'} (current location)`}
+                    aria-label="Cancel"
+                    data-debug-id="conversation-composer-tray-mode-cancel"
+                    onClick={() => dispatchTray({ type: 'cancel_mode' })}
+                    className="grid h-8 w-8 shrink-0 place-items-center rounded-full hover:bg-surface-raised"
                   >
-                    <Icon name="device" size={12} className="shrink-0" />
-                    <span className="min-w-0 truncate font-semibold text-muted">
-                      {bridgeLabel || 'no bridge'}
-                    </span>
+                    <Icon name="close" size={14} />
                   </button>
-                  {projectId && !isAuxSubagent ? (
-                    <>
-                      <span className="shrink-0 opacity-40">·</span>
-                      {/* The chip opens Project Explorer files only while it is enabled
-                          (REQ-EXP-GATE-2); otherwise it just names the project. */}
-                      <button
-                        type="button"
-                        data-debug-id="conversation-composer-project-chip"
-                        disabled={!projectVcsEnabled}
-                        onClick={projectVcsEnabled ? () => openAux({ type: 'files' }) : undefined}
-                        title={projectVcsEnabled ? `Open project files — ${projectName}` : `Project — ${projectName}`}
-                        className="inline-flex min-w-0 max-w-[50%] shrink items-center gap-1.5 rounded-md px-1 py-0.5 enabled:hover:bg-neutral-soft enabled:hover:text-primary disabled:cursor-default"
-                      >
-                        <Icon name="folder" size={13} className="shrink-0" />
-                        <span className="min-w-0 truncate font-semibold text-muted">
-                          <VaultText value={projectName} fallback="Project" />
-                        </span>
-                      </button>
-                    </>
-                  ) : null}
                 </div>
-                {!conversationReadOnly ? <div className="ml-auto -my-1.5 shrink-0">{runtimeStatusMenu}</div> : null}
-              </div>
-            ) : null}
-
-            <div className="relative">
-              {mentionQuery !== null && (
-                <AtMentionPopup
-                  query={mentionQuery}
-                  entities={filteredMentions}
-                  activeIndex={mentionIndex}
-                  onSelect={handleMentionSelect}
-                  onClose={() => setMentionQuery(null)}
-                />
-              )}
+              ) : null}
               {replacedCoordinator ? (
                 <div
                   data-debug-id="conversation-replaced-coordinator"
                   role="status"
-                  className="mb-2 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-subtle bg-neutral-soft px-3 py-2 text-xs text-muted"
+                  className="mt-4 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-subtle bg-neutral-soft px-3 py-2 text-xs text-muted"
                 >
                   <span className="min-w-0 flex-1">
                     This agent no longer coordinates{' '}
@@ -2821,7 +2779,7 @@ export function AgentChatPane({
                 <div
                   data-debug-id="conversation-apply-blocked-reasons"
                   role="status"
-                  className="mb-2 rounded-xl border border-subtle px-3 py-2 text-xs text-muted"
+                  className="mt-4 rounded-xl border border-subtle px-3 py-2 text-xs text-muted"
                 >
                   <div className="font-medium text-primary">
                     Changes cannot be applied yet
@@ -2837,7 +2795,7 @@ export function AgentChatPane({
                 <InstanceReconfigurationProgress operation={operation} />
               ) : null}
               {operationBlocksInput ? (
-                <div className="mb-3 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-subtle px-3 py-2">
+                <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-subtle px-3 py-2">
                   <p className="min-w-0 flex-1 text-xs text-muted">
                     {operation?.failure_code === 'force_stopping'
                       ? 'Waiting for confirmed termination. Settings will unlock once the agent is stopped.'
@@ -2865,7 +2823,7 @@ export function AgentChatPane({
                   data-debug-id="conversation-runtime-transition"
                   role="status"
                   aria-live="polite"
-                  className="mb-2 rounded-xl border border-subtle bg-neutral-soft px-3 py-2 text-sm"
+                  className="mt-4 rounded-xl border border-subtle bg-neutral-soft px-3 py-2 text-sm"
                 >
                   <div className="font-medium text-primary">
                     {runtimeStopping
@@ -2888,12 +2846,105 @@ export function AgentChatPane({
                   ) : null}
                 </div>
               ) : null}
+            </>}
+            // Reference context row: bridge · project, runtime status (start/stop menu) at the end.
+            context={
+              <div
+                data-debug-id="conversation-composer-context"
+                className="flex min-w-0 items-center gap-x-2 text-[13px] font-semibold leading-5 text-muted"
+              >
+                <div className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden">
+                  <button
+                    type="button"
+                    onClick={() => setRuntimeMenuOpen(true)}
+                    aria-haspopup="dialog"
+                    aria-label="Change bridge, provider or model"
+                    data-debug-id="conversation-composer-bridge-chip"
+                    className="inline-flex min-w-0 max-w-[50%] shrink items-center gap-1.5 rounded-md hover:text-primary"
+                    title={`Bridge: ${bridgeLabel || '—'} (current location)`}
+                  >
+                    <Icon name="device" size={16} className="shrink-0" />
+                    <span className="min-w-0 truncate">
+                      {bridgeLabel || 'no bridge'}
+                    </span>
+                  </button>
+                  {projectId && !isAuxSubagent ? (
+                    <>
+                      <span aria-hidden="true" className="shrink-0 text-faint">·</span>
+                      {/* The chip opens Project Explorer files only while it is enabled
+                          (REQ-EXP-GATE-2); otherwise it just names the project. */}
+                      <button
+                        type="button"
+                        data-debug-id="conversation-composer-project-chip"
+                        disabled={!projectVcsEnabled}
+                        onClick={projectVcsEnabled ? () => openAux({ type: 'files' }) : undefined}
+                        title={projectVcsEnabled ? `Open project files — ${projectName}` : `Project — ${projectName}`}
+                        className="inline-flex min-w-0 max-w-[50%] shrink items-center gap-1.5 rounded-md enabled:hover:text-primary disabled:cursor-default"
+                      >
+                        <Icon name="folder" size={16} className="shrink-0" />
+                        <span className="min-w-0 truncate">
+                          <VaultText value={projectName} fallback="Project" />
+                        </span>
+                      </button>
+                    </>
+                  ) : null}
+                </div>
+                {!conversationReadOnly ? <div className="ml-auto flex shrink-0">{runtimeStatusMenu}</div> : null}
+              </div>
+            }
+            actions={
+              <MessageComposerActions
+                {...composerActions}
+                readOnly={conversationReadOnly}
+                pendingActions={
+                  pendingReconfig ? (
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        data-debug-id="conversation-reconfigure-reset-btn"
+                        disabled={runtimeActionBusy || operationBlocksInput}
+                        onClick={resetRuntimeConfiguration}
+                        className="rounded-xl border border-subtle px-4 py-2 text-sm text-primary disabled:opacity-40"
+                      >
+                        Reset
+                      </button>
+                      <button
+                        type="button"
+                        data-debug-id="conversation-reconfigure-apply-btn"
+                        disabled={
+                          runtimeActionBusy ||
+                          (operation?.phase !== 'recovery_required' &&
+                            (isStarting || runtimeStopping)) ||
+                          stagedConfigurationIssues.length > 0
+                        }
+                        onClick={() => void applyReconfigure()}
+                        className="rounded-xl bg-accent px-4 py-2 text-sm font-semibold text-accent-fg disabled:opacity-40"
+                      >
+                        Apply
+                      </button>
+                    </div>
+                  ) : undefined
+                }
+                morph={composerExpansion}
+              />
+            }
+          >
+            <div className="relative">
+              {mentionQuery !== null && (
+                <AtMentionPopup
+                  query={mentionQuery}
+                  entities={filteredMentions}
+                  activeIndex={mentionIndex}
+                  onSelect={handleMentionSelect}
+                  onClose={() => setMentionQuery(null)}
+                />
+              )}
               {conversationReadOnly ? (
                 <div
                   data-debug-id="conversation-configuration-read-only"
                   role="status"
                   aria-live="polite"
-                  className="rounded-xl border border-subtle bg-neutral-soft px-4 py-3 text-sm"
+                  className="mt-4 rounded-xl border border-subtle bg-neutral-soft px-4 py-3 text-sm"
                 >
                   <div className="font-semibold text-primary">
                     This conversation is read-only
@@ -2909,53 +2960,10 @@ export function AgentChatPane({
                   </ul>
                 </div>
               ) : (
-                // REQ-LAY-3: mobile top row = input, then the runtime StatusDot (start/stop menu) at
-                // top right, in the same column as the send button below it. REQ-LAY-2: desktop = input only.
-                isMobile ? (
-                  <div className="flex items-start gap-1">
-                    <div className="min-w-0 flex-1 pt-1.5">{composerInput}</div>
-                    {runtimeStatusMenu}
-                  </div>
-                ) : (
-                  <div className="min-w-0">{composerInput}</div>
-                )
+                composerInput
               )}
             </div>
-
-            <MessageComposerActions
-              {...composerActions}
-              readOnly={conversationReadOnly}
-              pendingActions={
-                pendingReconfig ? (
-                  <div className="flex items-center gap-2">
-                    <button
-                      type="button"
-                      data-debug-id="conversation-reconfigure-reset-btn"
-                      disabled={runtimeActionBusy || operationBlocksInput}
-                      onClick={resetRuntimeConfiguration}
-                      className="rounded-xl border border-subtle px-4 py-2 text-sm text-primary disabled:opacity-40"
-                    >
-                      Reset
-                    </button>
-                    <button
-                      type="button"
-                      data-debug-id="conversation-reconfigure-apply-btn"
-                      disabled={
-                        runtimeActionBusy ||
-                        (operation?.phase !== 'recovery_required' &&
-                          (isStarting || runtimeStopping)) ||
-                        stagedConfigurationIssues.length > 0
-                      }
-                      onClick={() => void applyReconfigure()}
-                      className="rounded-xl bg-accent px-4 py-2 text-sm font-semibold text-accent-fg disabled:opacity-40"
-                    >
-                      Apply
-                    </button>
-                  </div>
-                ) : undefined
-              }
-            />
-          </div>
+          </MessageComposerMorphShell>
         </div>
       </form>
     );
@@ -3396,7 +3404,7 @@ export function AgentChatPane({
           onAnswerQuestions={(sourceMessageId, submission) => answerQuestions({ conversationId, sourceMessageId, submission }).unwrap()}
           formatTimestamp={formatMessageTimestamp}
           getDeliveryStatus={deliveryStatusFor}
-          agentIsWorking={isWorking}
+          agentActivity={<AgentActivityBubbles key={agentInstanceId} instanceId={agentInstanceId} isWorking={isWorking} />}
           bottomInset={composerDockHeight}
           renderMessageBody={({ message }) => renderConversationMessageBody(message)}
           wrapperClassName="relative min-h-0 min-w-0 max-w-full flex-1 overflow-hidden overflow-x-hidden"
@@ -3469,7 +3477,6 @@ export function AgentChatPane({
           className="ui-float-dock absolute inset-x-0 bottom-0 z-20 mx-auto w-full max-w-[calc(56rem+1.5rem)]"
         >
           <div aria-hidden="true" className="ui-frost-tail" />
-          <AgentActivityBubbles instanceId={agentInstanceId} />
           {trayNotice ? (
             <div className="pointer-events-none mb-2 flex justify-center px-3">
               <div

@@ -48,8 +48,10 @@ as text. JSON (`--kind json`) and diffs (`--kind diff`) also have viewers.
   screenshots to the part that matters.
 
 **HTML bundles** (static site viewed in a sandboxed iframe)
-- Local HTML, CSS, images and fonts only. **No JavaScript** (scripts, `on*` handlers and
-  `javascript:` URLs are removed), **no remote URLs** (CDN stylesheets, web fonts, remote
+- Local HTML, CSS, images and fonts. **JavaScript never runs**: `.js`/`.mjs` files may be
+  included (they stay in the downloaded ZIP) but scripts, `on*` handlers and `javascript:`
+  URLs are removed from the preview, so pages must read correctly without script. **No
+  remote URLs** (CDN stylesheets, web fonts, remote
   images are dropped and listed as warnings), no forms, iframes, objects or `<base>`.
   Inline all styling you need; use system font stacks or bundle font files.
 - Relative paths everywhere (`assets/style.css`, `../index.html`, `#section`). `/x` means
@@ -58,7 +60,12 @@ as text. JSON (`--kind json`) and diffs (`--kind diff`) also have viewers.
   no root `index.html`, `--entry` is required.
 - Responsive and readable: `<meta name="viewport" content="width=device-width,
   initial-scale=1">`, a max content width, `img { max-width: 100% }`, a nav linking every page.
-- Limits: 10 MiB archive, 50 MiB expanded, 1000 files, 10 MiB per file; symlinks are skipped.
+- Allowed file types: `.html .htm .css .js .mjs .json .map .txt .md .xml .csv .webmanifest
+  .png .jpg .jpeg .gif .webp .avif .bmp .ico .svg .woff .woff2 .ttf .otf .eot`. Anything
+  else (including extensionless files like `LICENSE` or `.DS_Store`) is rejected: remove it.
+- Limits: 15 MB archive (15 MiB = 15,728,640 bytes, the artifact limit; `--directory` packs
+  without compression, so this is roughly the sum of file sizes), 50 MiB expanded, 1000
+  files, 15 MiB per file; symlinks are skipped.
 
 Before uploading a bundle, check every local reference resolves (run from the site root;
 prints nothing when all links are fine):
@@ -96,7 +103,7 @@ ham-ctl artifact create --name design-doc --kind html-bundle --directory ./site 
 ```
 
 Optional context flags: `--task <id>`, `--chain <id>`, `--project <id>`, `--description <t>`.
-The JSON reply carries `data.artifact_id` (`art_…`); keep it. Uploads are capped at 50 MiB.
+The JSON reply carries `data.artifact_id` (`art_…`); keep it. Artifact content is capped at 15 MB: exactly 15 MiB = 15,728,640 bytes of the file or text before encryption (ham-ctl checks this before sealing; encryption and base64 overhead are budgeted separately). MCP `artifacts.create`/`get` carry at most 64 KiB of text inline; use `ham-ctl artifact create --file` for anything larger.
 Never use `--content` for large or binary payloads; use `--file`.
 
 ## 4. Verify before you deliver

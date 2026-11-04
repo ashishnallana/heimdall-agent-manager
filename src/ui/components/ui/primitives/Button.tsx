@@ -146,4 +146,42 @@ export const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(function 
   );
 });
 
+export interface ButtonLinkProps
+  extends Omit<React.AnchorHTMLAttributes<HTMLAnchorElement>, 'className'>,
+    RootClassNameProps,
+    Pick<ContentProps, 'leading' | 'trailing'> {
+  /** Real destination (required: a link without one is a Button). */
+  href: string;
+  /** Same visual weight as `Button`. Default `secondary`. */
+  variant?: ButtonVariant;
+  /** Same sizes as `Button`. Default `md`. */
+  size?: Size;
+  /** `full` = block link. Default `content`. */
+  width?: Width;
+}
+
+/**
+ * ButtonLink — a navigation that looks like a `Button` (e.g. "Download the
+ * bridge" next to a real button). It is a real `<a>`, so it opens in a new tab,
+ * can be copied, and is announced as a link; the caller owns `target`/`rel`.
+ * Same variant/size/width classes as `Button`; use `Link` for text links.
+ */
+export const ButtonLink = React.forwardRef<HTMLAnchorElement, ButtonLinkProps>(function ButtonLink(
+  { variant = 'secondary', size = 'md', width = 'content', leading, trailing, className, children, ...rest },
+  ref,
+) {
+  const rootClassName = [BASE, VARIANT_CLASSES[variant], SIZE_CLASSES[size], width === 'full' ? 'w-full' : '', 'no-underline', className ?? '']
+    .filter(Boolean)
+    .join(' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return (
+    <a ref={ref} className={rootClassName} {...rest}>
+      {leading}
+      {children}
+      {trailing}
+    </a>
+  );
+});
+
 export default Button;

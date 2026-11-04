@@ -60,7 +60,7 @@ bridge_os_start_hidden :: proc(desc: os.Process_Desc) -> (os.Process, os.Error) 
 	if !InitializeProcThreadAttributeList(attributes, 1, 0, &size) do return {}, os.Platform_Error(win.GetLastError())
 	defer DeleteProcThreadAttributeList(attributes)
 	if !UpdateProcThreadAttribute(attributes, 0, 0x20002, rawptr(&handles[0]), size_of(handles), nil, nil) do return {}, os.Platform_Error(win.GetLastError())
-	startup := Bridge_Hidden_Startup{base = {cb = size_of(Bridge_Hidden_Startup), dwFlags = win.STARTF_USESTDHANDLES, hStdInput = handles[0], hStdOutput = handles[1], hStdError = handles[2]}, attributes = attributes}
+	startup := Bridge_Hidden_Startup{base = {cb = size_of(Bridge_Hidden_Startup), dwFlags = win.STARTF_USESTDHANDLES|win.STARTF_USESHOWWINDOW, wShowWindow = u16(win.SW_HIDE), hStdInput = handles[0], hStdOutput = handles[1], hStdError = handles[2]}, attributes = attributes}
 	process: win.PROCESS_INFORMATION
 	if !win.CreateProcessW(nil, command, nil, nil, true, win.CREATE_NO_WINDOW|win.CREATE_UNICODE_ENVIRONMENT|win.EXTENDED_STARTUPINFO_PRESENT, environment, working, &startup.base, &process) do return {}, os.Platform_Error(win.GetLastError())
 	win.CloseHandle(process.hThread)

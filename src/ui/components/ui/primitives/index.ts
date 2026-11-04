@@ -3,8 +3,8 @@
  * Re-exported through the top-level `@ui` barrel (`../index.ts`).
  */
 
-export { Button } from './Button';
-export type { ButtonProps, ButtonTone } from './Button';
+export { Button, ButtonLink } from './Button';
+export type { ButtonLinkProps, ButtonProps, ButtonTone } from './Button';
 
 export { IconButton } from './IconButton';
 export type { IconButtonProps, IconButtonVariant } from './IconButton';
@@ -41,6 +41,9 @@ export type { BadgeProps } from './Badge';
 
 export { StatusPill } from './StatusPill';
 export type { StatusPillProps } from './StatusPill';
+
+export { IconWell } from './IconWell';
+export type { IconWellProps, IconWellSize } from './IconWell';
 
 export { StatusDot } from './StatusDot';
 export type { StatusDotProps } from './StatusDot';

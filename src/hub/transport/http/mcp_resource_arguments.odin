@@ -8,13 +8,14 @@ import domain "odin_test:hub/domain"
 import platform "odin_test:hub/platform"
 import mcp "odin_test:hub/service/mcp"
 import vault "odin_test:lib/vault"
+import hb "odin_test:lib/html_bundle"
 
 mcp_resource_allowed :: proc(tool,key:string)->bool {
 	allowed:string
 	switch tool {
 	case "artifacts.list":allowed="|project_id|chain_id|task_id|agent_id|agent_instance_id|cursor|limit|"
 	case "artifacts.get":allowed="|artifact_id|include_content|"
-	case "artifacts.create":allowed="|request_id|name|description|content|content_type|project_id|chain_id|task_id|agent_id|agent_instance_id|"
+	case "artifacts.create":allowed="|request_id|name|description|content|content_type|entry|files|project_id|chain_id|task_id|agent_id|agent_instance_id|"
 	case "artifacts.update":allowed="|artifact_id|request_id|expected_revision|name|description|"
 	case "artifacts.delete":allowed="|artifact_id|request_id|expected_revision|"
 	case "memories.list":allowed="|status|type|agent_id|project_id|bridge_id|template_id|cursor|limit|"
@@ -47,6 +48,12 @@ mcp_resource_arguments :: proc(tool:string,value:json.Value)->(mcp.Control_Argum
 		case "limit","comment_limit":n,ok:=value.(json.Integer);if !ok || n<1 || n>100 do return {},false;if key=="limit" {a.limit=int(n)} else {a.comment_limit=int(n)}
 		case "include_content":v,ok:=value.(json.Boolean);if !ok do return {},false;a.include_content=bool(v)
 		case "include_comments":v,ok:=value.(json.Boolean);if !ok do return {},false;a.include_comments=bool(v)
+		case "files":
+			// Shape only here; hb.html_bundle_from_entry_files validates members and
+			// reports a specific reason from the write call.
+			files,ok:=value.(json.Object);if !ok || len(files)<1 || len(files)>=hb.HTML_BUNDLE_MAX_ENTRIES do return {},false;a.files=files
+		case "entry":
+			text,ok:=value.(json.String);if !ok || len(text)<1 || len(text)>hb.HTML_BUNDLE_MAX_PATH do return {},false;a.entry=string(text)
 		case "bridge_paths":
 			items,ok:=value.(json.Array);if !ok || len(items)>20 do return {},false
 			paths:=make([dynamic]mcp.Resource_Bridge_Path,context.temp_allocator);seen:=make(map[string]bool,context.temp_allocator)
@@ -67,7 +74,7 @@ mcp_resource_arguments :: proc(tool:string,value:json.Value)->(mcp.Control_Argum
 			case "artifact_id":if !mcp_runtime_id(s,"art_") do return {},false;a.id=s
 			case "task_id":if !mcp_runtime_id(s,"task_") do return {},false;a.task_id=s
 			case "agent_instance_id":if !mcp_runtime_id(s,"inst_") do return {},false;a.agent_instance_id=s
-			case "content_type":if s!="text/plain" && s!="text/markdown" && s!="application/json" do return {},false;a.content_type=s
+			case "content_type":if s!="text/plain" && s!="text/markdown" && s!="application/json" && s!=hb.HTML_BUNDLE_CONTENT_TYPE do return {},false;a.content_type=s
 			case "memory_id":if !mcp_runtime_id(s,"mem_") do return {},false;a.id=s
 			case "issue_id":if !mcp_runtime_id(s,"iss_") do return {},false;a.id=s
 			case "project_id":if !mcp_runtime_id(s,"proj_") do return {},false;if mcp.resource_kind(tool)=="project" {a.id=s} else {a.project_id=s}
@@ -96,7 +103,11 @@ mcp_resource_arguments :: proc(tool:string,value:json.Value)->(mcp.Control_Argum
 	if strings.has_suffix(tool,".list") do return mcp.Control_Arguments{resource=a},true
 	if strings.has_suffix(tool,".get") do return mcp.Control_Arguments{resource=a},a.id!="" && (a.include_comments || a.comment_limit==0 && a.comment_cursor=="")
 	if tool=="artifacts.create" {
-		if mcp.resource_text(a.fields,"name")=="" || !mcp.resource_present(a,"content") || a.content_type=="" do return {},false
+		if mcp.resource_present(a,"files") || mcp.resource_present(a,"entry") {
+			// html-bundle: entry+files replace content; content_type is implied.
+			if mcp.resource_text(a.fields,"name")=="" || mcp.resource_present(a,"content") || a.files==nil || a.entry=="" || a.content_type!="" && a.content_type!=hb.HTML_BUNDLE_CONTENT_TYPE do return {},false
+			a.content_type=hb.HTML_BUNDLE_CONTENT_TYPE
+		} else if mcp.resource_text(a.fields,"name")=="" || !mcp.resource_present(a,"content") || a.content_type=="" || a.content_type==hb.HTML_BUNDLE_CONTENT_TYPE do return {},false
 		if a.content_type=="application/json" {
 			candidate:=strings.clone(mcp.resource_text(a.fields,"content"),context.temp_allocator)
 			defer if len(candidate)>0 do crypto.zero_explicit(raw_data(candidate),len(candidate))

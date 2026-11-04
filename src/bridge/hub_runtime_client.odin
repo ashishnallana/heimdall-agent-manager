@@ -920,7 +920,9 @@ bridge_hub_handle_command :: proc(conn: ^ws.Connection, text: string) {
 		}
 		schedules_version := extract_json_int(text, "schedules_version", 0)
 		bridge_action_scheduler_notify_version(schedules_version)
-        bridge_action_scheduler_notify_snapshot(extract_json_string(text, "schedules_epoch", ""), i64(extract_json_int(text, "schedules_revision", -1)), bridge_runtime_now_ms())
+        schedules_epoch := extract_json_string(text, "schedules_epoch", "")
+        defer delete(schedules_epoch)
+        bridge_action_scheduler_notify_snapshot(schedules_epoch, i64(extract_json_int(text, "schedules_revision", -1)), bridge_runtime_now_ms())
 		return
 	}
 	if type == "agent_instance_status_ack" {

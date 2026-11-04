@@ -13,7 +13,7 @@
 // The authorized session-projects endpoint supplies counts and mtimes without
 // returning session bodies. Claude encoded names still use sandboxed fs/stat.
 
-export interface FsEntry { name: string; is_dir: boolean }
+export interface FsEntry { name: string; is_dir: boolean; name_lossy?: boolean }
 export interface FsListing { ok: boolean; path: string; entries: FsEntry[] }
 export interface FsStat { ok: boolean; exists: boolean; is_dir: boolean; path?: string }
 
@@ -133,7 +133,7 @@ export async function discoverClaudeProjects(fs: SessionFs, limit = 40): Promise
   const listing = await fs.list('~/.claude/projects').catch(() => null);
   if (!listing?.ok) return [];
   const sep = listing.path.includes('\\') ? '\\' : '/';
-  const dirs = listing.entries.filter((e) => e.is_dir && parseClaudeProjectDir(e.name)).slice(0, limit);
+  const dirs = listing.entries.filter((e) => e.is_dir && !e.name_lossy && parseClaudeProjectDir(e.name)).slice(0, limit);
   const found = await mapLimit<FsEntry, DiscoveredProject | null>(dirs, 4, async (entry) => {
     const sessionsDir = listing.path.endsWith(sep) ? listing.path + entry.name : listing.path + sep + entry.name;
     const [inside, path] = await Promise.all([

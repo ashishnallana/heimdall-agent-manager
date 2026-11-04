@@ -36,6 +36,11 @@ MCP_Control_Handlers :: struct {
 // 64KiB agent instructions may expand sixfold when JSON-escaped; typed tool
 // field limits remain stricter than this bounded transport envelope.
 MCP_CONTROL_MAX_BODY_BYTES :: 512*1024
+// artifacts.create with entry/files only: 15 MiB of decoded bundle content as
+// base64 (x4/3) or JSON-escaped text, plus metadata. Every other method/tool is
+// still refused above MCP_CONTROL_MAX_BODY_BYTES after the parse.
+MCP_CONTROL_MAX_ARTIFACT_BODY_BYTES :: 48*1024*1024
+#assert(MCP_CONTROL_MAX_ARTIFACT_BODY_BYTES<=MAX_HTTP_REQUEST_BYTES)
 mcp_control_register_routes :: proc(r:^Router,h:^MCP_Control_Handlers) {
 	router_add(r,"ANY",MCP_PATH,h,mcp_control_handler)
 	router_add(r,"GET",MCP_OAUTH+"/jobs",h,mcp_worker_handler)
@@ -89,6 +94,9 @@ mcp_arguments :: proc(name:string,value:json.Value)->(mcp.Control_Arguments,bool
 			case "provider_profile":args.provider_profile=string(s)
 			case "model":args.model=string(s)
 			}
+		case "project_id":
+			s,typed:=v.(json.String);if !typed || name!="chains.create" || len(s)<=5 || len(s)>256 || !strings.has_prefix(string(s),"proj_") || !vault.valid_id_value(string(s)) do return {},false
+			args.project_id=string(s)
 		case "task_id":
 			s,typed:=v.(json.String);if !typed || (name!="tasks.comment" && name!="tasks.get") || len(s)<=5 || len(s)>256 || !strings.has_prefix(string(s),"task_") || !vault.valid_id_value(string(s)) do return {},false
 			args.task_id=string(s)
@@ -150,6 +158,11 @@ mcp_unauthorized :: proc(h:^MCP_Control_Handlers)->Response {
 	headers[len(resp.headers)]={"WWW-Authenticate",mcp_join("Bearer resource_metadata=\"",h.delegation.origin,"/.well-known/oauth-protected-resource/api/v1/mcp\", scope=\"",mcp.supported_scope_string(),"\"")}
 	resp.headers=headers;return resp
 }
+// Cheap substring screen run before parsing a body over MCP_CONTROL_MAX_BODY_BYTES.
+// It only rejects; the parsed-tree check after it stays authoritative.
+mcp_large_body_plausible :: proc(body:string)->bool {
+	return strings.contains(body,"\"artifacts.create\"") && strings.contains(body,"\"files\"") && strings.contains(body,"\"tools/call\"")
+}
 mcp_control_handler :: proc(ctx:rawptr,req:Request)->(response:Response) {
 	h:=(^MCP_Control_Handlers)(ctx)
 	started:=time.tick_now()
@@ -161,8 +174,11 @@ mcp_control_handler :: proc(ctx:rawptr,req:Request)->(response:Response) {
 	view,valid:=mcp.access_view(h.delegation.service,h.delegation.grant_directory,raw)
 	if !valid do return mcp_unauthorized(h)
 	if req.method!="POST" do return plain_response(405,"method not allowed",{"Allow","POST"})
-	if len(req.body)>MCP_CONTROL_MAX_BODY_BYTES || !strings.has_prefix(header_value(req.headers,"Content-Type"),"application/json") do return mcp_oauth_error("invalid_request")
+	if len(req.body)>MCP_CONTROL_MAX_ARTIFACT_BODY_BYTES || !strings.has_prefix(header_value(req.headers,"Content-Type"),"application/json") do return mcp_oauth_error("invalid_request")
 	defer if req.body!="" do crypto.zero_explicit(raw_data(req.body),len(req.body))
+	// Pre-parse gate: only an artifacts.create bundle may exceed 512 KiB, so a large
+	// body that cannot name that tool or carry files is refused before the JSON parse.
+	if len(req.body)>MCP_CONTROL_MAX_BODY_BYTES && !mcp_large_body_plausible(req.body) do return mcp_rpc_error(nil,-32602,"request_too_large: only artifacts.create with entry/files accepts more than 512 KiB")
 	rpc,parsed:=mcp_parse_object(req.body)
 	defer vault.control_wipe_value(rpc)
 	version,vok:=rpc["jsonrpc"].(json.String)
@@ -170,6 +186,7 @@ mcp_control_handler :: proc(ctx:rawptr,req:Request)->(response:Response) {
 	if !parsed || !vok || string(version)!="2.0" || !mok do return mcp_rpc_error(nil,-32600,"Invalid Request")
 	id,has_id:=rpc["id"]
 	if has_id && !mcp_id_ok(id) do return mcp_rpc_error(nil,-32600,"Invalid request id")
+	if len(req.body)>MCP_CONTROL_MAX_BODY_BYTES && (!has_id || string(method)!="tools/call") do return mcp_rpc_error(id,-32602,"request_too_large: only artifacts.create with entry/files accepts more than 512 KiB")
 	params,_:=rpc["params"].(json.Object)
 	key:=auth.sha256_hex(raw)
 	if !has_id {
@@ -202,6 +219,13 @@ mcp_control_handler :: proc(ctx:rawptr,req:Request)->(response:Response) {
 	case:return mcp_rpc_error(id,-32601,"Method not found")
 	}
 	name,nok:=params["name"].(json.String)
+	if len(req.body)>MCP_CONTROL_MAX_BODY_BYTES {
+		// Two-value assertions only: a failed single-value assertion panics the Hub.
+		arguments,args_object:=params["arguments"].(json.Object)
+		files_object:=false
+		if args_object {files,has_files:=arguments["files"];if has_files {_,files_object=files.(json.Object)}}
+		if !nok || string(name)!="artifacts.create" || !files_object do return mcp_rpc_error(id,-32602,"request_too_large: only artifacts.create with entry/files accepts more than 512 KiB")
+	}
 	args,args_ok:=mcp_arguments(string(name),params["arguments"])
 	defer {
 		for text in ([]string{args.catalog.name,args.catalog.slug,args.catalog.instructions}) do if text!="" do crypto.zero_explicit(raw_data(text),len(text))
@@ -209,7 +233,7 @@ mcp_control_handler :: proc(ctx:rawptr,req:Request)->(response:Response) {
 		for text in args.task_write.acceptance do if text!="" do crypto.zero_explicit(raw_data(text),len(text))
 	}
 	if !nok || !args_ok {
-		if nok && string(name)=="chains.create" do return mcp_rpc_error(id,-32602,"chains.create requires title, coordinator_agent_id (agt_...), bridge_id (brg_...) and valid optional provider settings")
+		if nok && string(name)=="chains.create" do return mcp_rpc_error(id,-32602,"chains.create requires title, coordinator_agent_id (agt_...), bridge_id (brg_...) and valid optional project_id (proj_...) and provider settings")
 		return mcp_rpc_error(id,-32602,"Unknown tool or invalid arguments")
 	}
 	if !mcp.scope_allows_tool(view.scope,string(name)) do return mcp_tool_result(id,"scope_missing",true)
@@ -232,6 +256,8 @@ mcp_control_handler :: proc(ctx:rawptr,req:Request)->(response:Response) {
 	if string(name)=="chains.message" do return mcp_chain_message_call(h,id,raw,view,args,handle,started)
 	if string(name)=="tasks.comment" do return mcp_task_comment_call(h,id,raw,view,args,handle,started)
 	data:mcp.Control_Data
+	bundle_slot:=false
+	defer if bundle_slot do mcp_bundle_slot_release()
 	wait_changed:=false
 	if string(name)=="events.wait" {
 		// Validate ownership before attaching, attach before the baseline read.
@@ -257,13 +283,19 @@ mcp_control_handler :: proc(ctx:rawptr,req:Request)->(response:Response) {
 	if string(name)=="tasks.get" || string(name)=="tasks.list" do op.tool=string(name)
 	if mcp.catalog_tool(string(name)) do op.tool=string(name)
 	if mcp.resource_tool(string(name)) do op.tool=string(name)
-	defer if mcp.resource_kind(string(name))=="artifact" {for row in data.records {for key in ([]string{"name","description","content"}) {if text,typed:=row[key].(json.String);typed && len(text)>0 do crypto.zero_explicit(raw_data(text),len(text))}}}
+	defer if mcp.resource_kind(string(name))=="artifact" {for row in data.records {for key in ([]string{"name","description","content","content_base64"}) {if text,typed:=row[key].(json.String);typed && len(text)>0 do crypto.zero_explicit(raw_data(text),len(text))}}}
 	if !op.seal {
 		code:string
 		data,code=mcp.control_read(&h.control,view.owner,string(name),args)
 		if code!="" do return mcp_tool_result(id,code,true)
 		op.data=data
 		if !mcp.control_payload_ok(data) do return mcp_tool_result(id,"result_too_large",true)
+		// An html-bundle download (one artifact record with content_base64) shares
+		// the Hub-wide bundle bound with bundle creates.
+		if vault.control_data_payload_max(data)>vault.CONTROL_JOB_PAYLOAD_MAX {
+			if !mcp_bundle_slot_acquire() do return mcp_tool_result(id,MCP_BUNDLE_BUSY,true)
+			bundle_slot=true
+		}
 	}
 	result:mcp.Delegation_Result
 	if view.mode=="hosted" {
@@ -290,7 +322,7 @@ mcp_control_handler :: proc(ctx:rawptr,req:Request)->(response:Response) {
 		chain_id,instance_id,code:=h.create(h.create_ctx,raw,view,args,title,description)
 		if code=="invalid_token" do return mcp_unauthorized(h)
 		if code!="" && chain_id=="" do return mcp_tool_result(id,code,true)
-		encoded,_:=json.marshal(struct {chain_id,title,description,status,coordinator_agent_id,coordinator_agent_instance_id,error:string}{chain_id,args.title,args.description,"draft",args.coordinator_agent_id,instance_id,code},allocator=context.temp_allocator)
+		encoded,_:=json.marshal(struct {chain_id,title,description,status,project_id,coordinator_agent_id,coordinator_agent_instance_id,error:string}{chain_id,args.title,args.description,"draft",args.project_id,args.coordinator_agent_id,instance_id,code},allocator=context.temp_allocator)
 		defer if len(encoded)>0 do crypto.zero_explicit(raw_data(encoded),len(encoded))
 		return mcp_tool_result(id,string(encoded),code!="")
 	}

@@ -10,7 +10,10 @@ import assert from 'node:assert/strict';
 import { deflateRawSync } from 'node:zlib';
 import { JSDOM } from 'jsdom';
 import {
+  HTML_BUNDLE_CSP,
+  HTML_BUNDLE_LIMITS,
   HtmlBundleError,
+  isAllowedMemberType,
   HtmlBundleRenderer,
   crc32,
   htmlBundleNavHash,
@@ -96,9 +99,9 @@ test('rejects unsafe archives', async () => {
   await rejects([...ok, { name: 'a\\b.css', data: 'x' }], 'unsafe', /backslash/);
   await rejects([...ok, { name: 'C:/x.css', data: 'x' }], 'unsafe', /drive-qualified/);
   await rejects([...ok, { name: 'index.html', data: 'y' }], 'unsafe', /Duplicate member path/);
-  await rejects([...ok, { name: 'a', data: 'x' }, { name: 'a/b.css', data: 'y' }], 'unsafe', /both a file and a directory/);
+  await rejects([...ok, { name: 'a.css', data: 'x' }, { name: 'a.css/b.css', data: 'y' }], 'unsafe', /both a file and a directory/);
   await rejects([...ok, { name: 'inner.zip', data: 'x' }], 'unsafe', /nested archive/);
-  await rejects([...ok, { name: 'inner.bin', data: 'PK\x03\x04data' }], 'unsafe', /nested archive/);
+  await rejects([...ok, { name: 'inner.png', data: 'PK\x03\x04data' }], 'unsafe', /nested archive/);
   await rejects([...ok, { name: 's.css', data: 'x', flags: 0x0801 }], 'unsafe', /encrypted/);
   await rejects([...ok, { name: 's.css', data: 'x', method: 12, raw: true }], 'unsafe', /compression method 12/);
   await rejects([...ok, { name: 'l.css', data: '/etc/passwd', madeBy: 0x0314, external: (0o120777 << 16) >>> 0 }], 'unsafe', /symbolic link/);
@@ -109,11 +112,13 @@ test('enforces declared and actual size limits', async () => {
   const ok = [MANIFEST, { name: 'index.html', data: 'x' }];
   // 1 MiB of zeros deflates to ~1 KiB; declaring 1000 bytes must not let it expand.
   await rejects([...ok, { name: 'bomb.txt', data: new Uint8Array(1024 * 1024), method: 8, declared: 1000 }], 'too_large', /expands beyond its declared size/);
-  await rejects([...ok, { name: 'big.txt', data: 'x', method: 8, declared: 10 * 1024 * 1024 + 1 }], 'too_large', /per-member limit/);
-  const many = Array.from({ length: 6 }, (_, i) => ({ name: `f${i}.bin`, data: 'x', method: 8, declared: 10 * 1024 * 1024 }));
+  await rejects([...ok, { name: 'big.txt', data: 'x', method: 8, declared: 15 * 1024 * 1024 + 1 }], 'too_large', /per-member limit is 15 MiB/);
+  const many = Array.from({ length: 6 }, (_, i) => ({ name: `f${i}.txt`, data: 'x', method: 8, declared: 15 * 1024 * 1024 }));
   await rejects([...ok, ...many], 'too_large', /expands past 50 MiB/);
   await rejects([...ok, ...Array.from({ length: 1000 }, (_, i) => ({ name: `p${i}.css`, data: 'x' }))], 'too_large', /entries; the limit is 1000/);
-  await rejects(new Uint8Array(10 * 1024 * 1024 + 1), 'too_large', /limit is 10 MiB/);
+  await rejects(new Uint8Array(15 * 1024 * 1024 + 1), 'too_large', /limit is 15 MB \(15 MiB, 15728640 bytes\)/);
+  // Exactly 15 MiB passes the size gate and fails only as a non-ZIP.
+  await rejects(new Uint8Array(15 * 1024 * 1024), 'malformed', /Not a ZIP archive/);
   await rejects([...ok, { name: 's.css', data: 'abc', crc: 0x12345678 }], 'malformed', /CRC-32/);
   await rejects([...ok, { name: 'c.txt', data: Uint8Array.from([0xff, 0xff, 0xff]), method: 8, raw: true, declared: 10 }], 'malformed', /could not be inflated/);
   await rejects(enc('<html>not a zip</html>'), 'malformed', /Not a ZIP archive/);
@@ -172,9 +177,9 @@ test('compilePage strips SVG SMIL animation that could retarget a link at runtim
   assert.ok(doc.querySelector('meta[http-equiv="Content-Security-Policy"]'));
 });
 
-function jsdomRenderer(bundle: Awaited<ReturnType<typeof readHtmlBundle>>, parseHtml = (html: string) => new JSDOM(html).window.document) {
+function jsdomRenderer(bundle: Awaited<ReturnType<typeof readHtmlBundle>>, parseHtml = (html: string) => new JSDOM(html).window.document, created: string[] = []) {
   let n = 0;
-  return new HtmlBundleRenderer(bundle, { parseHtml, createObjectURL: () => `blob:test/${n++}`, revokeObjectURL: () => {} });
+  return new HtmlBundleRenderer(bundle, { parseHtml, createObjectURL: () => { const url = `blob:test/${n++}`; created.push(url); return url; }, revokeObjectURL: () => {} });
 }
 
 /** What the sandboxed iframe sees: compiled text reparsed. */
@@ -315,4 +320,91 @@ test('compilePage routes other-page links through hb-page and keeps same-page li
   assert.deepEqual(parseHtmlBundleNavHash(details.getElementById('back')?.getAttribute('href')?.slice('about:srcdoc'.length) || ''), { page: 'index.html', fragment: '' });
   assert.deepEqual(parseHtmlBundleNavHash(details.getElementById('up')?.getAttribute('href')?.slice('about:srcdoc'.length) || ''), { page: 'index.html', fragment: 's2' });
   assert.equal(details.getElementById('me')?.getAttribute('href'), 'about:srcdoc#end');
+});
+
+// ── REQ-ART-2: 15 MB limit, member type allowlist, inert JS, hostile content ─────────
+
+test('archive limit is the 15 MB artifact content limit; expanded/entries bound decompression', () => {
+  assert.equal(HTML_BUNDLE_LIMITS.archiveBytes, 15_728_640);
+  assert.equal(HTML_BUNDLE_LIMITS.memberBytes, 15_728_640);
+  assert.equal(HTML_BUNDLE_LIMITS.expandedBytes, 50 * 1024 * 1024);
+  assert.equal(HTML_BUNDLE_LIMITS.entries, 1000);
+});
+
+test('member type allowlist accepts site assets (JS included) and rejects everything else', async () => {
+  for (const path of ['index.html', 'a/b.HTM', 's.css', 'app.js', 'm.mjs', 'd.json', 'app.js.map', 'n.txt', 'R.md', 'f.xml', 't.csv', 'site.webmanifest', 'i.png', 'i.JPG', 'i.jpeg', 'i.gif', 'i.webp', 'i.avif', 'i.bmp', 'favicon.ico', 'l.svg', 'f.woff', 'f.woff2', 'f.ttf', 'f.otf', 'f.eot', 'heimdall-artifact.json']) {
+    assert.ok(isAllowedMemberType(path), path);
+  }
+  for (const path of ['LICENSE', '.DS_Store', 'a/.htaccess', 'run.exe', 'x.wasm', 'index.php', 'page.xhtml', 'm.mp4', 'doc.pdf', 'trailing.']) {
+    assert.ok(!isAllowedMemberType(path), path);
+  }
+  const ok = [MANIFEST, { name: 'index.html', data: 'x' }];
+  await rejects([...ok, { name: 'tool.exe', data: 'MZ' }], 'unsafe', /"tool\.exe" has an unsupported file type/);
+  await rejects([...ok, { name: 'LICENSE', data: 'MIT' }], 'unsafe', /unsupported file type/);
+  await rejects([...ok, { name: 'x.wasm', data: '\0asm' }], 'unsafe', /unsupported file type/);
+  const bundle = await readHtmlBundle(zip([...ok, { name: 'js/app.js', data: 'alert(1)', method: 8 }, { name: 'js/app.js.map', data: '{}' }]));
+  assert.equal(new TextDecoder().decode(bundle.files.get('js/app.js')), 'alert(1)', 'JS is kept byte-exact for Download');
+});
+
+test('bundled JavaScript is inert: script elements are removed and counted, never loaded', async () => {
+  const bundle = await readHtmlBundle(zip([
+    MANIFEST,
+    { name: 'index.html', data: '<html><head><script src="app.js"></script><script type="module" src="m.mjs"></script></head><body><p>x</p><script>document.body.innerHTML="pwned"</script><svg><script>alert(1)</script></svg></body></html>' },
+    { name: 'app.js', data: 'alert(1)' },
+    { name: 'm.mjs', data: 'export {}' },
+  ]));
+  const created: string[] = [];
+  const renderer = jsdomRenderer(bundle, undefined, created);
+  const page = renderer.compilePage('index.html');
+  assert.equal(page.inertScripts, 4);
+  assert.ok(!/<script/i.test(page.html), page.html);
+  assert.ok(!page.html.includes('app.js') && !page.html.includes('m.mjs'));
+  assert.equal(created.length, 0, 'no blob: URL is ever created for a script');
+  assert.ok(page.html.includes(HTML_BUNDLE_CSP));
+  assert.match(HTML_BUNDLE_CSP, /default-src 'none'/);
+  assert.ok(!/script-src/.test(HTML_BUNDLE_CSP), 'CSP never allows scripts');
+});
+
+test('hostile HTML, CSS and SVG compile to an inert page with no remote or executable URL', async () => {
+  const hostile = `<!doctype html><html><head>
+<meta http-equiv="refresh" content="0;url=https://evil.example/r"><base href="https://evil.example/">
+<link rel="stylesheet" href="https://evil.example/x.css"><link rel="preload" href="app.js" as="script"><link rel="icon" href="favicon.ico">
+<style>@import url("https://evil.example/i.css"); body{background:url("javascript:alert(1)")} p{background-image:url(//evil.example/p.png)} </style>
+</head><body onload="alert(1)">
+<img src="x.png" onerror="alert(1)" srcset="https://evil.example/s.png 2x"><img src="i.svg">
+<a href="javascript:alert(1)">js</a><a href=" JaVaScRiPt:alert(1)">js2</a><a href="data:text/html,<script>alert(1)</script>">data</a>
+<a href="https://evil.example/" target="_top">ext</a><a href="page2.html#s" ping="https://evil.example/ping">p2</a>
+<iframe src="https://evil.example/f"></iframe><object data="x.svg"></object><embed src="x.svg"><frameset></frameset><portal src="https://evil.example"></portal>
+<form action="https://evil.example/f"><input name="q" formaction="https://evil.example/g"><button>go</button></form>
+<svg onload="alert(1)"><a xlink:href="javascript:alert(1)"><text>svg</text></a><use href="other.svg#x"/><image href="https://evil.example/i.png"/>
+<foreignObject><iframe srcdoc="<script>alert(1)</script>"></iframe></foreignObject><animate attributeName="href" to="https://evil.example"/></svg>
+<div style="background:url('https://evil.example/d.png')" is="x-y">styled</div><template><script>alert(1)</script></template>
+<video poster="https://evil.example/v.png"></video><p id="s">end</p></body></html>`;
+  const bundle = await readHtmlBundle(zip([
+    MANIFEST,
+    { name: 'index.html', data: hostile },
+    { name: 'page2.html', data: '<p id="s">two</p>' },
+    { name: 'x.png', data: 'p' },
+    { name: 'i.svg', data: '<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>' },
+    { name: 'favicon.ico', data: 'i' },
+    { name: 'app.js', data: 'alert(1)' },
+  ]));
+  const page = jsdomRenderer(bundle).compilePage('index.html');
+  // Unavailable links keep the authored URL only as inert tooltip text (title); check the rest.
+  const titled = new JSDOM(page.html).window.document;
+  for (const el of Array.from(titled.querySelectorAll('[data-hb-unavailable]'))) {
+    assert.ok(!el.hasAttribute('href'));
+    el.removeAttribute('title');
+  }
+  const html = `<!doctype html>\n${titled.documentElement.outerHTML}`;
+  for (const needle of ['evil.example', 'javascript:', 'onload', 'onerror', '<iframe', '<object', '<embed', '<frameset', '<portal', '<form', 'formaction', '<base', 'refresh', '<animate', '<template', 'target=', 'ping=', ' is="', 'data:text/html']) {
+    assert.ok(!html.toLowerCase().includes(needle.toLowerCase()), `${needle} must not survive: ${html}`);
+  }
+  const doc = new JSDOM(page.html).window.document;
+  for (const a of Array.from(doc.querySelectorAll('a[href], area[href]'))) assert.match(a.getAttribute('href')!, /^about:srcdoc#/);
+  assert.equal(doc.querySelector('a[data-hb-page="page2.html"]')?.getAttribute('href'), `about:srcdoc#${htmlBundleNavHash('page2.html', 's')}`);
+  for (const el of Array.from(doc.querySelectorAll('[src]'))) assert.match(el.getAttribute('src')!, /^blob:/);
+  assert.equal(doc.querySelector('use')?.hasAttribute('href'), false, 'external <use> document is dropped');
+  assert.ok(page.missing.includes('other.svg'));
+  assert.ok(page.missing.some((m) => m.includes('evil.example')));
 });

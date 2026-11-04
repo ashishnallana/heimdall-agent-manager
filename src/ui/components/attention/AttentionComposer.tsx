@@ -1,7 +1,7 @@
 import { useRef, useState } from 'react';
 import { Button, Icon } from '@ui';
 import { useCreateArtifactMutation } from '../../api/endpoints';
-import { MAX_UPLOAD_BYTES } from '../ArtifactUpload';
+import { MAX_UPLOAD_BYTES, UPLOAD_TOO_LARGE_ERROR } from '../ArtifactUpload';
 import {
   artifactIdFromLink,
   artifactKindForFile,
@@ -55,7 +55,7 @@ export function AttentionComposer({
     const localId = `att_${counter.current}`;
     const name = artifactUploadName(file, 'attention-attachment');
     if (file.size > MAX_UPLOAD_BYTES) {
-      setAttachments((prev) => [...prev, { localId, name, status: 'error', id: '', link: '', error: 'File is too large' }]);
+      setAttachments((prev) => [...prev, { localId, name, status: 'error', id: '', link: '', error: UPLOAD_TOO_LARGE_ERROR }]);
       return;
     }
     setAttachments((prev) => [...prev, { localId, name, status: 'uploading', id: '', link: '', error: '' }]);

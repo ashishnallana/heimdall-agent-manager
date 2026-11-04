@@ -16,6 +16,13 @@
  * `children` (compose `Drawer.Body` / `Drawer.Footer`). `bottom` is a full-width
  * slide-up sheet (height-capped) for mobile inspector/detail surfaces.
  *
+ * `variant="sheet"` (with `side="bottom"`) is the mobile menu sheet from the
+ * conversation launcher: radius-xl top corners, a 36x4 grab handle, an 80%
+ * visible-height cap, the heavier unblurred `scrim`, safe-area bottom padding,
+ * `sheetIn` on open and the reverse (with the scrim fading) on close before it
+ * unmounts. `autoFocus={false}` lets content focus itself (a menu's checked
+ * row); `returnFocusRef` names where focus goes back to on close.
+ *
  * Accessibility (built in): portal; `role="dialog"` `aria-modal` `aria-labelledby`;
  * focus trapped and restored; Esc + backdrop close; background scroll locked.
  *
@@ -23,12 +30,15 @@
  *
  * Escape hatch: `className` merges onto the panel.
  */
-import React, { useCallback, useId, useRef } from 'react';
+import React, { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import type { OpenChangeHandler, RootClassNameProps } from '../types';
 import { IconButton } from '../primitives/IconButton';
 import { ModalBody, ModalFooter } from './Modal';
 import { useDialogA11y } from './useDialogA11y';
+
+/** Fallback unmount delay for the sheet exit when no `animationend` arrives. */
+export const DRAWER_SHEET_EXIT_FALLBACK_MS = 300;
 
 export type DrawerSize = 'sm' | 'md' | 'lg';
 export type DrawerSide = 'left' | 'right' | 'bottom';
@@ -72,6 +82,12 @@ export interface DrawerProps
   hideHeader?: boolean;
   /** On side='bottom', expand to full viewport height instead of max-h-[calc(var(--app-viewport-height)*0.85)]. */
   fullHeight?: boolean;
+  /** `sheet`: the bottom menu sheet (handle, scrim, safe-area padding, enter/exit motion). Only with side='bottom'. Default `default`. */
+  variant?: 'default' | 'sheet';
+  /** Move focus to the panel's first focusable on open. Default true. */
+  autoFocus?: boolean;
+  /** Where focus returns on close (default: the element focused when it opened). */
+  returnFocusRef?: React.RefObject<HTMLElement | null>;
   children?: React.ReactNode;
 }
 
@@ -88,6 +104,9 @@ const DrawerBase: React.FC<DrawerProps> = ({
   side = 'right',
   hideHeader = false,
   fullHeight = false,
+  variant = 'default',
+  autoFocus = true,
+  returnFocusRef,
   className,
   children,
   ...rest
@@ -96,23 +115,49 @@ const DrawerBase: React.FC<DrawerProps> = ({
   const titleId = useId();
 
   const close = useCallback(() => onOpenChange(false), [onOpenChange]);
-  useDialogA11y(open, close, panelRef);
-
-  if (!open) return null;
+  useDialogA11y(open, close, panelRef, { autoFocus, returnFocusRef });
 
   const isBottom = side === 'bottom';
-  const sideClass = isBottom
-    ? (fullHeight ? 'h-full max-h-full w-full rounded-none border-t-0' : SIDE_CLASS.bottom)
-    : SIDE_CLASS[side];
+  const isSheet = isBottom && variant === 'sheet' && !fullHeight;
+
+  // A sheet stays mounted while it plays its exit. Derived while rendering (not in
+  // an effect) so the sheet never unmounts for one commit and remounts.
+  const [closing, setClosing] = useState(false);
+  const [prevOpen, setPrevOpen] = useState(open);
+  if (prevOpen !== open) {
+    setPrevOpen(open);
+    setClosing(!open && isSheet);
+  }
+  useEffect(() => {
+    if (!closing) return;
+    const timer = setTimeout(() => setClosing(false), DRAWER_SHEET_EXIT_FALLBACK_MS);
+    return () => clearTimeout(timer);
+  }, [closing]);
+
+  if (!open && !closing) return null;
+
+  const sideClass = isSheet
+    ? // radius-xl top, 80% of the visible height (REQ-MODAL-2), safe-area bottom padding.
+      'mt-auto w-full max-h-[calc(var(--app-viewport-height)*0.8)] border-t rounded-t-[var(--radius-xl)] pb-[env(safe-area-inset-bottom)] ' +
+      (open ? 'animate-sheet-in' : 'animate-sheet-out')
+    : isBottom
+      ? (fullHeight ? 'h-full max-h-full w-full rounded-none border-t-0' : SIDE_CLASS.bottom)
+      : SIDE_CLASS[side];
 
   const accessibleLabel = typeof title === 'string' ? title : (typeof title === 'number' ? String(title) : (rest['aria-label'] || 'Drawer'));
 
   return createPortal(
     <div
       // REQ-MODAL-2: `app-viewport-height`, not `inset-0`. See the SIDE_CLASS note above.
-      className={['fixed inset-x-0 top-0 app-viewport-height z-modal flex bg-backdrop backdrop-blur-sm', isBottom ? 'items-end' : '']
+      className={[
+        'fixed inset-x-0 top-0 app-viewport-height z-modal flex',
+        isSheet ? `bg-scrim ${open ? 'animate-fade-in' : 'animate-fade-out pointer-events-none'}` : 'bg-backdrop backdrop-blur-sm',
+        isBottom ? 'items-end' : '',
+      ]
         .filter(Boolean)
         .join(' ')}
+      data-state={isSheet ? (open ? 'open' : 'closing') : undefined}
+      aria-hidden={open ? undefined : true}
       onMouseDown={(e) => {
         if (e.target === e.currentTarget) close();
       }}
@@ -125,6 +170,10 @@ const DrawerBase: React.FC<DrawerProps> = ({
         aria-labelledby={hideHeader ? undefined : titleId}
         aria-label={hideHeader ? accessibleLabel : rest['aria-label']}
         tabIndex={-1}
+        onAnimationEnd={(e) => {
+          rest.onAnimationEnd?.(e);
+          if (!open && e.target === e.currentTarget) setClosing(false);
+        }}
         className={[
           'flex flex-col overflow-hidden border-subtle bg-surface text-primary shadow-overlay outline-none',
           isBottom ? '' : SIZE_W[size],
@@ -134,6 +183,9 @@ const DrawerBase: React.FC<DrawerProps> = ({
           .filter(Boolean)
           .join(' ')}
       >
+        {isSheet ? (
+          <span aria-hidden="true" className="mx-auto mb-1 mt-2 block h-1 w-9 flex-none rounded-[var(--radius-pill)] bg-strong" />
+        ) : null}
         {!hideHeader && (
           <div className="flex items-start justify-between gap-3 px-5 pt-4 pb-3">
             <h2 id={titleId} className="text-title text-primary">

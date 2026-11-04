@@ -84,7 +84,7 @@ import {
   setBulkChainTitles,
   selectSearchChains,
 } from '../../store/searchTitleSlice';
-import { isVaultArmored } from '../../utils/vaultContent';
+import { isVaultArmored, maskVaultArmored } from '../../utils/vaultContent';
 import { VaultText } from '../vault/VaultText';
 import { batchDecryptTitles, type RawSearchItemInput } from '../../utils/vaultSearch';
 import { useFetchExperimentsQuery } from '../../api/endpoints/settings';
@@ -547,7 +547,8 @@ function looksLikeInternalId(value: string): boolean {
 }
 
 function displayAgentName(agentId: string, name?: string): string {
-  const trimmed = String(name || '').trim();
+  // Never paint ciphertext: a sealed name the vault could not open ("<token> #3") is masked.
+  const trimmed = maskVaultArmored(String(name || '').trim());
   if (trimmed && trimmed !== agentId && !looksLikeInternalId(trimmed)) return trimmed;
   return 'Unnamed agent';
 }
@@ -1241,10 +1242,16 @@ function RouteOutlet({
           : 'min-w-0 min-h-0 flex-1 overflow-auto overflow-x-hidden bg-canvas'
       }
     >
+      {/* Two-pane list/detail pages take no vertical padding here: the shell-top-spacer
+          already clears the top-left cluster above them and PageShell owns the rest
+          (header top, banded body bottom), so the title sits right under the spacer and
+          the panels run down to the status bar (T14). Other routes (Home, forms, mobile)
+          keep their padding. */}
       <section
+        data-debug-id="shell-route-frame"
         className={
           isDesktopTwoPaneRoute
-            ? 'mx-auto flex h-full min-h-0 w-full max-w-6xl min-w-0 flex-1 flex-col overflow-hidden px-0 py-2 sm:px-4 sm:py-4 lg:px-5 lg:py-5 [&>*]:max-w-full [&>*]:h-full [&>*]:min-h-0 [&>*]:flex-1'
+            ? 'mx-auto flex h-full min-h-0 w-full max-w-6xl min-w-0 flex-1 flex-col overflow-hidden px-0 sm:px-4 lg:px-5 [&>*]:max-w-full [&>*]:h-full [&>*]:min-h-0 [&>*]:flex-1'
             : 'mx-auto flex min-h-full w-full max-w-6xl min-w-0 flex-col items-start overflow-x-hidden px-0 py-2 sm:px-4 sm:py-4 lg:px-5 lg:py-5 [&>*]:max-w-full'
         }
       >
@@ -1892,22 +1899,9 @@ function AuthenticatedShell({ user }: { user: AuthUser }) {
     };
   }, []);
 
-  // Clamp any rogue window scroll back to the origin. The app owns the full viewport
-  // (body is position: fixed), so a non-zero window offset can only come from a browser
-  // heuristic -- e.g. mobile WebKit scrolling the document to reveal a focused element or
-  // a control under the keyboard accessory bar -- and it permanently hides the top chrome.
-  useEffect(() => {
-    const clampWindowScroll = () => {
-      if (window.scrollY !== 0 || window.scrollX !== 0) {
-        window.scrollTo(0, 0);
-      }
-    };
-    window.addEventListener('scroll', clampWindowScroll, { passive: true });
-    clampWindowScroll();
-    return () => {
-      window.removeEventListener('scroll', clampWindowScroll);
-    };
-  }, []);
+  // No window-scroll clamp here. The body is position: fixed and the shell is placed at the
+  // visible region's origin (appViewportHeight.ts), so a WebKit reveal pan cannot hide the top
+  // chrome. Resetting window scroll would fight that pan and is a prohibited scroll reset.
 
   const actionsAccess = useActionsAccess();
   const primary = filterActionsNavEntries(NAV_ROUTES.filter((item) => item.group === 'primary'), actionsAccess);
@@ -1917,7 +1911,7 @@ function AuthenticatedShell({ user }: { user: AuthUser }) {
   const hideTopLeftCluster = isMobile && isWorkspaceRoute && isCurrentAuxPaneOpen;
   const showBrand = !isWorkspaceRoute || !isEffectiveCollapsed;
   // REQ-MAC-CHROME-1: 0 everywhere except the windowed macOS hidden title bar.
-  const { insetLeft: rawControlsInset, insetRight: controlsInsetRight } = useWindowChrome();
+  const { insetLeft: rawControlsInset } = useWindowChrome();
   const controlsInset = isMobile ? 0 : rawControlsInset;
   const topLeftClusterWidth = computeTopLeftClusterWidth(isMobile, showBrand, controlsInset);
   const chromeHeight = topChromeHeight(isMobile);
@@ -2138,14 +2132,18 @@ function AuthenticatedShell({ user }: { user: AuthUser }) {
 
       <div className="flex min-w-0 flex-1 flex-col h-full min-h-0 overflow-hidden">
         {/* The fixed top-left cluster floats over the content. On the conversation
-            workspace the top-left chat header reserves its space; other pages get a
-            top bar in BOTH sidebar states (so the page never shifts when the sidebar
-            toggles). */}
+            workspace the top-left chat header reserves its space. Other pages draw no
+            top bar: an invisible spacer reserves the cluster's row in BOTH sidebar
+            states, so page content sits at the same y whether the sidebar is open or
+            closed (and is never covered by the cluster). In a desktop window without
+            a native title bar it is also the content column's drag region and keeps
+            pages clear of the window controls. */}
         {!isWorkspaceRoute ? (
           <div
-            data-debug-id="shell-top-bar"
-            className="window-drag flex shrink-0 items-center justify-end gap-2 border-b border-subtle bg-canvas px-3"
-            style={{ height: chromeHeight, paddingRight: controlsInsetRight ? controlsInsetRight + 12 : undefined }}
+            aria-hidden="true"
+            data-debug-id="shell-top-spacer"
+            className="window-drag shrink-0"
+            style={{ height: chromeHeight }}
           />
         ) : null}
         <RouteOutlet

@@ -1,6 +1,7 @@
 import { heimdallApi } from '../heimdallApi';
 import { cookieJsonFetch } from '../cookieFetch';
-import { isVaultArmored, decryptVaultText, getActiveVaultKey } from '../../utils/vaultContent';
+import { containsVaultArmored, isVaultArmored, decryptVaultLabel, getActiveVaultKey } from '../../utils/vaultContent';
+import type { VaultKeyring } from '../../utils/vaultKeyring';
 
 // UI: consolidated sidebar tree from GET /api/v1/agents/live — EVERY project
 // (alphabetical, even with nothing live) -> the chains with >=1 live agent ->
@@ -93,6 +94,31 @@ function normalizeLiveProject(raw: any): LiveProject {
   };
 }
 
+// Open a sealed label in place; a token that cannot be opened stays armored so the
+// render layer masks it. Instance names may be "<sealed agent name> #3".
+async function openLabel(value: string, key: VaultKeyring): Promise<string> {
+  if (!isVaultArmored(value) && !containsVaultArmored(value)) return value;
+  try {
+    return await decryptVaultLabel(value, key);
+  } catch {
+    return value;
+  }
+}
+
+/** Decrypt project names, chain titles and agent/member display names of the tree. */
+export async function decryptLiveProjects(projects: LiveProject[], key: VaultKeyring): Promise<LiveProject[]> {
+  return Promise.all(projects.map(async (p) => ({
+    ...p,
+    name: await openLabel(p.name, key),
+    chains: await Promise.all((p.chains || []).map(async (c) => ({
+      ...c,
+      title: await openLabel(c.title, key),
+      liveAgents: await Promise.all((c.liveAgents || []).map(async (a) => ({ ...a, displayName: await openLabel(a.displayName, key) }))),
+      members: await Promise.all((c.members || []).map(async (m) => ({ ...m, displayName: await openLabel(m.displayName, key) }))),
+    }))),
+  })));
+}
+
 export const agentsLiveApi = heimdallApi.injectEndpoints({
   endpoints: (build) => ({
     // The whole projects->live-chains->agents tree in one query. Tagged AgentsLive, not
@@ -109,28 +135,7 @@ export const agentsLiveApi = heimdallApi.injectEndpoints({
           const isUnlocked = Boolean(state?.vault?.isUnlocked);
           const activeKey = getActiveVaultKey();
           if (isUnlocked && activeKey) {
-            projects = await Promise.all(
-              projects.map(async (p) => {
-                let name = p.name;
-                if (isVaultArmored(name)) {
-                  try {
-                    name = await decryptVaultText(name, activeKey);
-                  } catch {}
-                }
-                const chains = await Promise.all(
-                  (p.chains || []).map(async (c) => {
-                    let title = c.title;
-                    if (isVaultArmored(title)) {
-                      try {
-                        title = await decryptVaultText(title, activeKey);
-                      } catch {}
-                    }
-                    return { ...c, title };
-                  }),
-                );
-                return { ...p, name, chains };
-              }),
-            );
+            projects = await decryptLiveProjects(projects, activeKey);
           }
           return { data: projects };
         } catch (error: any) {
