@@ -74,65 +74,22 @@ function useReducedMotion(): boolean {
 // where the composer text was (measured before the insert) to its slot just under the
 // top of the list. The strip above it keeps the faded, lightly blurred tail of the
 // previous message (its last line and action row).
-// REQ-PIN-1 rev4 (user QA round 2): the default travel is ~550ms on a visibly curved
-// path, Y on PIN_EASE and X on PIN_EASE_X (both start slow, see below); the
-// history moves with the bubble on the Y curve as ONE animation. The 'snappy' variant is
-// the earlier ~320ms straight travel on the Y curve. Transforms only (WAAPI, so it runs on
-// the compositor; rAF where WAAPI is missing).
-export type PinTravel = 'curved' | 'snappy';
+// REQ-PIN-1 rev4 (user QA round 2): the travel is ~550ms on a visibly curved path, Y on
+// PIN_EASE and X on PIN_EASE_X (both start slow, see below); the history moves with the
+// bubble on the Y curve as ONE animation. Transforms only (WAAPI, so it runs on the
+// compositor; rAF where WAAPI is missing).
 export const PIN_TRAVEL_MS = 550;
-export const PIN_SNAPPY_TRAVEL_MS = 320;
 export const PIN_SETTLE_MS = PIN_TRAVEL_MS;
 export const PIN_ACTIVITY_DELAY_MS = 200;
 // User direction 2026-11-04 13:04: the Y travel (and the history, on the same curve so the
 // bubble stays in its slot) STARTS SLOW. The earlier strong ease-out [0.2, 0.8, 0.2, 1] moved
 // ~12% of the distance in the first 16ms frame, so one late first frame on a phone showed
-// the bubble already well along its path; this ease-in-out moves ~0.2% there.
+// the bubble already well along its path; this ease-in-out moves ~0.2% there. X starts
+// later still, so the path bends.
 export type PinEaseCurve = [number, number, number, number];
 export const PIN_EASE: PinEaseCurve = [0.4, 0, 0.2, 1];
 export const PIN_EASE_X: PinEaseCurve = [0.45, 0, 0.25, 1];
-/** Per-list easing override (the composer demo's `?ease=` / `?easeX=` tuning). */
-export type PinEase = { y?: PinEaseCurve; x?: PinEaseCurve };
 const bezierCss = (ease: PinEaseCurve) => `cubic-bezier(${ease.join(', ')})`;
-// DEV-ONLY (composer demo `?debug=layout`, user QA round 4): measurements of each send
-// travel and a playback-rate override, so the preview can show where the bubble starts.
-// Nothing in the app passes `pinDebug`; remove it with the demo's LayoutDebug before the PR.
-export type PinDebugPoint = { x: number; y: number };
-export type PinDebugEvent = {
-  phase: 'start' | 'settle';
-  at: number;
-  /** The composer text origin captured in the render that added the row (null: fallback). */
-  origin: PinDebugPoint | null;
-  /** Where the bubble text should appear at t=0, in viewport px (final + offsets). */
-  computedStart: PinDebugPoint;
-  /** Where the bubble text rests once settled (measured after the scrollTop jump). */
-  final: PinDebugPoint;
-  scrollBefore: number;
-  scrollAfter: number;
-  scrollHeight: number;
-  clientHeight: number;
-  pinOffset: number;
-  tail: number;
-  spacer: number;
-  inset: number;
-  history: number;
-  rowX: number;
-  rowY: number;
-  duration: number;
-  reducedMotion: boolean;
-  animations: Animation[];
-};
-/** One layout or scroll change on the pin path (QA round 5: proves what moved mid-gesture). */
-export type PinDebugLog = { at: number; kind: 'scrollTop' | 'spacer' | 'inset' | 'load-older' | 'gesture'; detail: string };
-export type PinDebugHooks = { playbackRate?: number; onEvent?: (event: PinDebugEvent) => void; onLog?: (entry: PinDebugLog) => void };
-
-// Snappy is a straight path: X runs on the Y curve.
-export function pinTravelTiming(travel: PinTravel, ease?: PinEase): { duration: number; easeY: PinEaseCurve; easeX: PinEaseCurve } {
-  const easeY = ease?.y ?? PIN_EASE;
-  return travel === 'snappy'
-    ? { duration: PIN_SNAPPY_TRAVEL_MS, easeY, easeX: easeY }
-    : { duration: PIN_TRAVEL_MS, easeY, easeX: ease?.x ?? PIN_EASE_X };
-}
 // The visible tail: from the bubble up to the top of the previous message's last line,
 // so that line and its action row peek out, kept within PIN_TAIL_PX..PIN_TAIL_MAX_PX.
 export const PIN_TAIL_PX = 48;
@@ -330,9 +287,6 @@ export default function ChatMessageList({
   bottomInset = 0,
   pinOnSend = false,
   pinOriginRef,
-  pinTravel = 'curved',
-  pinEase,
-  pinDebug,
 }: {
   conversationKey: string;
   messages: ChatMessage[];
@@ -384,12 +338,6 @@ export default function ChatMessageList({
    * top). Without it the bubble starts at the left of the list, just under the dock top.
    */
   pinOriginRef?: RefObject<HTMLElement | null>;
-  /** REQ-PIN-1 rev4: the send travel variant, curved ~550ms (default) or snappy ~320ms. */
-  pinTravel?: PinTravel;
-  /** Overrides the send-travel curves (PIN_EASE / PIN_EASE_X); the app leaves it unset. */
-  pinEase?: PinEase;
-  /** DEV-ONLY: travel measurements and a playback-rate override (composer demo). */
-  pinDebug?: PinDebugHooks;
 }) {
   const isMobile = useIsMobile();
   const isUnlocked = useSelector(selectIsVaultUnlocked);
@@ -458,12 +406,6 @@ export default function ChatMessageList({
   // How far the exchange reaches past the view (0 for a short reply): the pin position
   // is this far above the end of the scroll range.
   const pinOverflowRef = useRef(0);
-  const pinTravelRef = useRef(pinTravel);
-  pinTravelRef.current = pinTravel;
-  const pinEaseRef = useRef(pinEase);
-  pinEaseRef.current = pinEase;
-  const pinDebugRef = useRef(pinDebug);
-  pinDebugRef.current = pinDebug;
   // The resolved slot (pinOffsetFor) and where the tail strip starts (the scroller's top
   // padding), measured at each send.
   const [pinOffset, setPinOffset] = useState(PIN_TAIL_PX);
@@ -484,19 +426,13 @@ export default function ChatMessageList({
   const deferredSizeRef = useRef(false);
   const userScrolling = useCallback(() => gestureRef.current.touching
     || performance.now() - gestureRef.current.lastScroll < PIN_SCROLL_IDLE_MS, []);
-  const debugLog = useCallback((kind: PinDebugLog['kind'], detail: string) => {
-    pinDebugRef.current?.onLog?.({ at: performance.now(), kind, detail });
-  }, []);
-  // Every programmatic scrollTop write on this list goes through here, tagged for the
-  // debug log, so a write during a gesture is visible on a device.
-  // The scroll event a programmatic write raises is not the reader's gesture.
+  // Every programmatic scrollTop write on this list goes through here: the scroll event
+  // it raises is not the reader's gesture.
   const programmaticScrollUntilRef = useRef(0);
-  const writeScrollTop = useCallback((node: HTMLElement, top: number, tag: string) => {
-    const before = node.scrollTop;
+  const writeScrollTop = useCallback((node: HTMLElement, top: number) => {
     programmaticScrollUntilRef.current = performance.now() + 50;
     node.scrollTop = top;
-    if (pinDebugRef.current) debugLog('scrollTop', `${tag}: ${Math.round(before)} → ${Math.round(node.scrollTop)}${userScrolling() ? ' DURING GESTURE' : ''}`);
-  }, [debugLog, userScrolling]);
+  }, []);
   const setPinIndex = useCallback((index: number) => {
     pinIndexRef.current = index;
     setPinIndexState(index);
@@ -596,7 +532,6 @@ export default function ChatMessageList({
     }
     const current = parseFloat(spacer.style.height) || 0;
     if (height < current && !force && userScrolling()) {
-      if (!deferredSizeRef.current && pinDebugRef.current) debugLog('spacer', `shrink ${current} → ${height} deferred (gesture)`);
       deferredSizeRef.current = true;
       // The visibility check moves no layout, so it need not wait for the gesture.
       updateJump();
@@ -604,24 +539,21 @@ export default function ChatMessageList({
     }
     deferredSizeRef.current = false;
     pinOverflowRef.current = overflow;
-    if (height !== current || spacer.style.height === '') {
-      spacer.style.height = `${height}px`;
-      if (pinDebugRef.current) debugLog('spacer', `${current} → ${height}${force ? ' (send)' : ''}`);
-    }
+    if (height !== current || spacer.style.height === '') spacer.style.height = `${height}px`;
     // The live-inset spacer only reaches past the exchange spacer (the end of a long reply
     // stays reachable above an expanded composer); see the bottom-inset element below.
     const inset = node.querySelector<HTMLElement>('[data-chat-bottom-inset="fixed"]');
     if (inset) inset.style.setProperty('--chat-turn-spacer', `${height}px`);
     applyPinFade();
     updateJump();
-  }, [applyPinFade, debugLog, updateJump, userScrolling]);
+  }, [applyPinFade, updateJump, userScrolling]);
 
   // REQ-PIN-1/1b/6: pin the just-sent row at `index`. Runs in a layout effect, before
   // the first paint of the new row: the scroll position jumps to the end of the range
   // (which the exchange spacer makes the pin position), and transforms put the history
   // back where it was and the bubble back where the composer text was. Both then ease to
   // zero together as one motion: the history and the bubble's Y on one curve, the
-  // bubble's X on its own curve so the path bends (curved travel).
+  // bubble's X on its own curve so the path bends.
   const pinRow = useCallback((index: number) => {
     const node = scrollRef.current;
     const content = contentRef.current;
@@ -651,9 +583,8 @@ export default function ChatMessageList({
     const fromScroll = node.scrollTop;
     sizeTurnSpacer(true);
     const inset = restingInsetRef.current.value;
-    writeScrollTop(node, node.scrollHeight - node.clientHeight, 'send pin');
+    writeScrollTop(node, node.scrollHeight - node.clientHeight);
     travelRef.current = true;
-    let debug: PinDebugEvent | null = null;
     applyPinFade();
     const settle = () => {
       cancelAnimationFrame(pinFrameRef.current);
@@ -667,7 +598,6 @@ export default function ChatMessageList({
       resetPinnedRowStyle(content);
       applyPinFade();
       updateJump();
-      if (debug) pinDebugRef.current?.onEvent?.({ ...debug, phase: 'settle', at: performance.now(), scrollAfter: node.scrollTop, animations: [] });
       setActivityHeld(true);
       clearTimeout(activityTimerRef.current);
       activityTimerRef.current = setTimeout(() => setActivityHeld(false), PIN_ACTIVITY_DELAY_MS);
@@ -678,24 +608,13 @@ export default function ChatMessageList({
     const fromX = start ? start.left - bubble.left : 0;
     // Without a composer origin, start just under the dock top (behind the composer).
     const fromY = (start ? start.top : node.getBoundingClientRect().top + node.clientHeight - inset) - bubble.top;
-    const { duration, easeY, easeX } = pinTravelTiming(pinTravelRef.current, pinEaseRef.current);
-    if (pinDebugRef.current) {
-      debug = {
-        phase: 'start', at: performance.now(), origin: start ? { x: start.left, y: start.top } : null,
-        computedStart: { x: bubble.left + fromX, y: bubble.top + fromY }, final: { x: bubble.left, y: bubble.top },
-        scrollBefore: fromScroll, scrollAfter: node.scrollTop, scrollHeight: node.scrollHeight, clientHeight: node.clientHeight,
-        pinOffset: offset, tail, spacer: turnSpacerRef.current?.offsetHeight ?? 0, inset, history,
-        rowX: fromX, rowY: fromY - history, duration, reducedMotion: reduceMotionRef.current, animations: [],
-      };
-    }
+    const duration = PIN_TRAVEL_MS;
     if (reduceMotionRef.current) {
-      if (debug) pinDebugRef.current?.onEvent?.(debug);
       settle();
       setActivityHeld(false);
       return;
     }
     if (Math.abs(history) < 1 && Math.abs(fromX) < 1 && Math.abs(fromY) < 1) {
-      if (debug) pinDebugRef.current?.onEvent?.(debug);
       settle();
       return;
     }
@@ -712,23 +631,20 @@ export default function ChatMessageList({
     // `transform` (QA round 5: the individual `translate` property is not composited in
     // every WebKit, so at 1x a busy main thread could hold X back while Y ran).
     const specs: RowAnimationSpec[] = [
-      { target: 'row', keyframes: [{ transform: `translate3d(0, ${rowY}px, 0)` }, { transform: 'translate3d(0, 0, 0)' }], options: { duration, easing: bezierCss(easeY) } },
-      { target: 'inner', keyframes: [{ transform: `translate3d(${rowX}px, 0, 0)` }, { transform: 'translate3d(0, 0, 0)' }], options: { duration, easing: bezierCss(easeX) } },
+      { target: 'row', keyframes: [{ transform: `translate3d(0, ${rowY}px, 0)` }, { transform: 'translate3d(0, 0, 0)' }], options: { duration, easing: bezierCss(PIN_EASE) } },
+      { target: 'inner', keyframes: [{ transform: `translate3d(${rowX}px, 0, 0)` }, { transform: 'translate3d(0, 0, 0)' }], options: { duration, easing: bezierCss(PIN_EASE_X) } },
     ];
     if (typeof content.animate === 'function' && typeof row.animate === 'function') {
-      const contentAnimation = content.animate(contentFrames, { duration, easing: bezierCss(easeY) });
+      const contentAnimation = content.animate(contentFrames, { duration, easing: bezierCss(PIN_EASE) });
       const rows = specs.map((spec) => pinTargetOf(row, spec.target).animate(spec.keyframes, spec.options));
       pinAnimationsRef.current = { content: contentAnimation, rows, rowEl: row, specs };
       contentAnimation.onfinish = settle;
-      const rate = pinDebugRef.current?.playbackRate;
-      if (rate && rate !== 1) [contentAnimation, ...rows].forEach((a) => { a.playbackRate = rate; });
-      if (debug) pinDebugRef.current?.onEvent?.({ ...debug, animations: [contentAnimation, ...rows] });
       return;
     }
     const apply = (elapsed: number) => {
       const progress = Math.min(1, elapsed / duration);
-      const remainingY = 1 - cubicBezierAt(easeY, progress);
-      const remainingX = 1 - cubicBezierAt(easeX, progress);
+      const remainingY = 1 - cubicBezierAt(PIN_EASE, progress);
+      const remainingX = 1 - cubicBezierAt(PIN_EASE_X, progress);
       content.style.transform = `translate3d(0, ${history * remainingY}px, 0)`;
       const pinned = content.querySelector<HTMLElement>('[data-chat-pin-row="true"]');
       if (pinned) {
@@ -838,7 +754,7 @@ export default function ChatMessageList({
       // above them. Never scroll to the bottom for this.
       if (grew && node && lastKey === prevLastKey && firstKey !== prevFirstKey) {
         if (pinIndexRef.current >= 0) setPinIndex(pinIndexRef.current + count - prevCount);
-        writeScrollTop(node, node.scrollTop + node.scrollHeight - prevScrollHeight, 'older-page prepend');
+        writeScrollTop(node, node.scrollTop + node.scrollHeight - prevScrollHeight);
         return;
       }
       // Only the user's OWN send moves the list (user QA round 3: inbound messages,
@@ -926,12 +842,11 @@ export default function ChatMessageList({
     const observer = new IntersectionObserver((entries) => {
       if (!didInitialScrollRef.current && messages.length > 0) return;
       if (!entries.some((entry) => entry.isIntersecting)) return;
-      if (pinDebugRef.current) debugLog('load-older', `sentinel in view at scrollTop ${Math.round(root.scrollTop)}`);
       onLoadOlder();
     }, { root, rootMargin: LOAD_OLDER_ROOT_MARGIN });
     observer.observe(sentinel);
     return () => observer.disconnect();
-  }, [debugLog, hasMore, loadingOlder, onLoadOlder, messages.length, paginationCursor]);
+  }, [hasMore, loadingOlder, onLoadOlder, messages.length, paginationCursor]);
 
   // REQ-FROST-1: when the overlay grows (multi-line draft, attachment tray), keep a
   // reader who was at the bottom pinned there instead of letting the overlay cover it.
@@ -939,12 +854,11 @@ export default function ChatMessageList({
   // overlays it (see the bottom-inset element).
   useLayoutEffect(() => {
     if (pinEnabled) {
-      if (pinDebugRef.current) debugLog('inset', `live ${bottomInset}, resting ${restingInsetRef.current.value} (no layout change)`);
       updateJump();
       return;
     }
     if (stickyRef.current && didInitialScrollRef.current) scrollToBottom('auto');
-  }, [bottomInset, debugLog, pinEnabled, scrollToBottom, updateJump]);
+  }, [bottomInset, pinEnabled, scrollToBottom, updateJump]);
 
   // Revealing the held activity line adds content below the bubble without a resize.
   useLayoutEffect(() => { if (pinEnabled) updateJump(); }, [activityHeld, pinEnabled, updateJump]);
@@ -1002,7 +916,6 @@ export default function ChatMessageList({
 
   const onTouchStart = () => {
     gestureRef.current.touching = true;
-    if (pinDebugRef.current) debugLog('gesture', 'touch start');
   };
   const onTouchEnd = () => {
     gestureRef.current.touching = false;

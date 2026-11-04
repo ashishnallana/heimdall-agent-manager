@@ -33,15 +33,6 @@
  *                       collapsed pill, focused field, a draft, the owned runtime status
  *                       menu open, or two queued attachments (default empty)
  *   ?layout=phone|desktop  phone column (default) or a desktop-width conversation
- *   ?sendAnim=curved|snappy  send travel: curved ~550ms (default) or snappy ~320ms
- *   ?ease=<preset>|a,b,c,d   Y (and history) travel curve: inout (default, 0.4,0,0.2,1),
- *                       inout2 (0.45,0,0.25,1), slow (0.55,0,0.35,1), out (the old strong
- *                       ease-out 0.2,0.8,0.2,1), linear, or four cubic-bezier numbers
- *   ?easeX=<preset>|a,b,c,d  X curve of the curved travel (default 0.45,0,0.25,1); a later
- *                       X start bends the path more (e.g. slow)
- *   ?debug=layout       DEV QA: colour, outline and label every height/scroll element, with
- *                       a live HUD and travel markers (composerLayoutDebug.tsx)
- *   ?slow=10            with debug=layout, run the send travel 10x slower
  * A sent message containing "long" gets a reply taller than the viewport.
  * The header "…" menu applies the same presets in place (`composer-demo-preset-*`).
  *
@@ -53,8 +44,7 @@ import ReactDOM from 'react-dom/client';
 import { Provider } from 'react-redux';
 import { combineReducers, configureStore } from '@reduxjs/toolkit';
 import { Icon, Menu, runtimeStatusToTone } from '@ui';
-import ChatMessageList, { type PinEase, type PinEaseCurve, type PinTravel } from '../components/chat/ChatMessageList';
-import { layoutDebugEnabled, useLayoutDebug } from './composerLayoutDebug';
+import ChatMessageList from '../components/chat/ChatMessageList';
 import {
   MessageComposerActions,
   MessageComposerInput,
@@ -163,21 +153,6 @@ const AGENT_REPLY = `Got it (demo reply, nothing was sent). Your message stays p
 const LONG_AGENT_REPLY = Array.from({ length: 14 }, (_, i) => `${i + 1}. A long demo reply line, so the exchange outgrows the viewport and you scroll through it normally.`).join('\n\n');
 
 const PRESETS = new URLSearchParams(window.location.search);
-const LAYOUT_DEBUG = layoutDebugEnabled();
-const SEND_ANIM: PinTravel = PRESETS.get('sendAnim') === 'snappy' ? 'snappy' : 'curved';
-const EASE_PRESETS: Record<string, PinEaseCurve> = {
-  inout: [0.4, 0, 0.2, 1], inout2: [0.45, 0, 0.25, 1], slow: [0.55, 0, 0.35, 1], out: [0.2, 0.8, 0.2, 1], linear: [0, 0, 1, 1],
-};
-function easeFromUrl(key: string): PinEaseCurve | undefined {
-  const raw = PRESETS.get(key)?.trim();
-  if (!raw) return undefined;
-  if (EASE_PRESETS[raw]) return EASE_PRESETS[raw];
-  const parts = raw.split(',').map(Number);
-  // cubic-bezier needs x1/x2 in [0, 1]; anything else falls back to the default.
-  return parts.length === 4 && parts.every(Number.isFinite) && parts[0] >= 0 && parts[0] <= 1 && parts[2] >= 0 && parts[2] <= 1
-    ? (parts as PinEaseCurve) : undefined;
-}
-const SEND_EASE: PinEase | undefined = PRESETS.has('ease') || PRESETS.has('easeX') ? { y: easeFromUrl('ease'), x: easeFromUrl('easeX') } : undefined;
 
 const timeFormatter = new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' });
 
@@ -437,8 +412,6 @@ function ComposerDemo() {
     }, 900);
   }, []);
 
-  const layoutDebug = useLayoutDebug(LAYOUT_DEBUG, send);
-
   const submit = (event: FormEvent) => {
     event.preventDefault();
     send(draft);
@@ -480,7 +453,6 @@ function ComposerDemo() {
       }
     >
       {PRESETS.get('kbd') === '1' ? <KeyboardReadout /> : null}
-      {layoutDebug.overlay}
       {/* Phone-width column so the demo reads the same on a desktop preview; `?layout=desktop`
           widens it to the conversation page's max width. */}
       <div className={`flex h-full w-full flex-col sm:border-x sm:border-subtle ${desktop ? 'max-w-[calc(56rem+3.5rem)]' : 'max-w-[440px]'}`}>
@@ -508,9 +480,6 @@ function ComposerDemo() {
             bottomInset={composerDockHeight}
             pinOnSend
             pinOriginRef={textareaRef}
-            pinTravel={SEND_ANIM}
-            pinEase={SEND_EASE}
-            pinDebug={layoutDebug.hooks}
             wrapperClassName="relative min-h-0 min-w-0 max-w-full flex-1 overflow-hidden overflow-x-hidden"
             scrollClassName="chat-scrollbar h-full min-h-0 max-w-full space-y-3 overflow-y-auto overflow-x-hidden rounded-none bg-canvas px-1 py-3 pt-16"
           />

@@ -6,7 +6,7 @@ import { createRoot } from 'react-dom/client';
 import { Provider } from 'react-redux';
 import { configureStore } from '@reduxjs/toolkit';
 import { JSDOM } from 'jsdom';
-import ChatMessageList, { PIN_TAIL_PX, PIN_TAIL_MAX_PX, pinOffsetFor, pinTailFor, pinSpacerFor, pinFadeFor, PIN_FADE_RANGE_PX, PIN_TRAVEL_MS, PIN_SNAPPY_TRAVEL_MS, PIN_SETTLE_MS, PIN_ACTIVITY_DELAY_MS, PIN_EASE, PIN_EASE_X, PIN_SCROLL_IDLE_MS, JUMP_THRESHOLD_PX, cubicBezierAt, restingInsetFor, pinTravelTiming } from '../src/ui/components/chat/ChatMessageList.tsx';
+import ChatMessageList, { PIN_TAIL_PX, PIN_TAIL_MAX_PX, pinOffsetFor, pinTailFor, pinSpacerFor, pinFadeFor, PIN_FADE_RANGE_PX, PIN_TRAVEL_MS, PIN_SETTLE_MS, PIN_ACTIVITY_DELAY_MS, PIN_EASE, PIN_EASE_X, PIN_SCROLL_IDLE_MS, JUMP_THRESHOLD_PX, cubicBezierAt, restingInsetFor } from '../src/ui/components/chat/ChatMessageList.tsx';
 import { useComposerDockInset } from '../src/ui/components/chat/MessageComposer.tsx';
 
 // REQ-PIN-1..6: send pin-to-top. JSDOM has no layout, so the fixture models one: a 600px
@@ -138,9 +138,8 @@ const scrollTo = async (scroll: HTMLElement, top: number) => {
   await act(async () => { scroll.dispatchEvent(new (scroll.ownerDocument.defaultView as any).Event('scroll')); });
 };
 
-test('pin timing (REQ-PIN-1 rev4): curved ~550ms by default, snappy ~320ms, no overshoot', () => {
+test('pin timing (REQ-PIN-1 rev4): curved ~550ms, no overshoot', () => {
   assert.ok(PIN_TRAVEL_MS >= 500 && PIN_TRAVEL_MS <= 600, 'curved travel ~550ms');
-  assert.ok(PIN_SNAPPY_TRAVEL_MS >= 300 && PIN_SNAPPY_TRAVEL_MS <= 350, 'snappy travel ~320ms');
   assert.equal(PIN_SETTLE_MS, PIN_TRAVEL_MS, 'bubble and list settle together');
   assert.ok(PIN_ACTIVITY_DELAY_MS >= 150 && PIN_ACTIVITY_DELAY_MS <= 250);
   assert.deepEqual(PIN_EASE, [0.4, 0, 0.2, 1]);
@@ -157,16 +156,6 @@ test('pin timing (REQ-PIN-1 rev4): curved ~550ms by default, snappy ~320ms, no o
   // phone covers almost none of the distance (the old ease-out covered ~12% in 16ms).
   for (const ease of [PIN_EASE, PIN_EASE_X]) assert.ok(cubicBezierAt(ease, 16 / PIN_TRAVEL_MS) < 0.01, 'slow start');
   for (const x of [0.25, 0.5]) assert.ok(cubicBezierAt(PIN_EASE_X, x) < cubicBezierAt(PIN_EASE, x) - 0.03, 'X lags Y, so the path curves');
-});
-
-test('pinTravelTiming: the pinEase override replaces each curve; snappy stays straight', () => {
-  assert.deepEqual(pinTravelTiming('curved'), { duration: PIN_TRAVEL_MS, easeY: PIN_EASE, easeX: PIN_EASE_X });
-  assert.deepEqual(pinTravelTiming('snappy'), { duration: PIN_SNAPPY_TRAVEL_MS, easeY: PIN_EASE, easeX: PIN_EASE });
-  const y: [number, number, number, number] = [0.2, 0.8, 0.2, 1];
-  const x: [number, number, number, number] = [0.55, 0, 0.35, 1];
-  assert.deepEqual(pinTravelTiming('curved', { y, x }), { duration: PIN_TRAVEL_MS, easeY: y, easeX: x });
-  assert.deepEqual(pinTravelTiming('curved', { x }), { duration: PIN_TRAVEL_MS, easeY: PIN_EASE, easeX: x });
-  assert.deepEqual(pinTravelTiming('snappy', { y, x }), { duration: PIN_SNAPPY_TRAVEL_MS, easeY: y, easeX: y });
 });
 
 test('the tail keeps the previous last line and action row, below any floating header', () => {
@@ -226,8 +215,8 @@ test('own send pins the bubble at max scroll: transform-only travel with the tai
   });
 });
 
-for (const travel of ['curved', 'snappy'] as const) {
-  test(`REQ-PIN-1 rev4 (${travel}): the bubble starts at the composer text (read before the insert); Y and the list share one curve`, async () => {
+{
+  test('REQ-PIN-1 rev4: the bubble starts at the composer text (read before the insert); Y and the list share one curve', async () => {
     await withList(async ({ dom, q, render, list, geometry, frame, settle }) => {
       const input = dom.window.document.createElement('textarea');
       input.style.padding = '0';
@@ -239,7 +228,7 @@ for (const travel of ['curved', 'snappy'] as const) {
       // the start must be the position read before that commit.
       function Host({ messages, moveInput }: { messages: any[]; moveInput: boolean }) {
         React.useLayoutEffect(() => { if (moveInput) inputTop = 700; });
-        return list(messages, { pinOriginRef: origin, pinTravel: travel });
+        return list(messages, { pinOriginRef: origin });
       }
       await render(React.createElement(Host, { messages: history, moveInput: false }));
       const scroll = geometry();
@@ -264,8 +253,7 @@ for (const travel of ['curved', 'snappy'] as const) {
       assert.ok(yLeft > 0.05 && yLeft < 0.95, 'mid-travel');
       assert.ok(Math.abs(mid.rowY / (start.rowY || 1) - yLeft) < 1e-6 || start.rowY === 0, 'bubble Y on the list\'s curve');
       const xLeft = mid.x / start.x;
-      if (travel === 'snappy') assert.ok(Math.abs(xLeft - yLeft) < 1e-6, 'snappy: straight path');
-      else assert.ok(xLeft - yLeft > 0.05, 'curved: X lags Y, so the path bends');
+      assert.ok(xLeft - yLeft > 0.05, 'X lags Y, so the path bends');
       await settle();
       assert.equal(row.style.transform, '', 'bubble at rest in its slot');
       assert.equal(inner.style.transform, '', 'no X offset left');
