@@ -603,9 +603,9 @@ pty_host_bridge_identity :: proc() -> string {
 	return strings.clone("default")
 }
 
-// pty_host_dial connects to the daemon unix socket, returning the fd or (-1,false).
+// pty_host_dial connects to the daemon unix socket, returning the fd or (INVALID_SOCKET,false).
 pty_host_dial :: proc(socket_path: string) -> (local_socket.Socket, bool) {
-	if !pty_host_test_socket_allowed(socket_path) do return -1, false
+	if !pty_host_test_socket_allowed(socket_path) do return local_socket.INVALID_SOCKET, false
 	return local_socket.dial(strings.trim_prefix(socket_path, "unix:"))
 }
 
