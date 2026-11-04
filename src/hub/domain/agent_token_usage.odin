@@ -13,6 +13,9 @@ import "core:strings"
 // Upper bound for any counter; larger (or negative/non-integer) values are
 // rejected so a misbehaving bridge cannot poison the lifetime totals.
 AGENT_TOKEN_USAGE_MAX :: 1_000_000_000_000
+// Upper bound for updated_at_ms, an epoch-millisecond timestamp (~1.8e12 in
+// 2026), which the counter cap above would wrongly reject.
+AGENT_TOKEN_TIMESTAMP_MAX :: 1_000_000_000_000_000
 // context_source value for a figure the bridge estimated from tool traffic.
 AGENT_TOKEN_ESTIMATE_SOURCE :: "estimate"
 // FALLBACK thresholds only. The bridge's shipped config
@@ -47,15 +50,15 @@ Agent_Token_Usage :: struct {
 }
 
 @(private = "file")
-token_int :: proc(obj: json.Object, key: string, required: bool) -> (value: i64, present: bool, ok: bool) {
+token_int :: proc(obj: json.Object, key: string, required: bool, max_value: i64 = AGENT_TOKEN_USAGE_MAX) -> (value: i64, present: bool, ok: bool) {
 	raw, has := obj[key]
 	if !has || raw == nil do return 0, false, !required
 	#partial switch v in raw {
 	case json.Integer:
-		if v < 0 || v > AGENT_TOKEN_USAGE_MAX do return 0, true, false
+		if v < 0 || v > json.Integer(max_value) do return 0, true, false
 		return i64(v), true, true
 	case json.Float:
-		if v < 0 || v > f64(AGENT_TOKEN_USAGE_MAX) || v != f64(i64(v)) do return 0, true, false
+		if v < 0 || v > f64(max_value) || v != f64(i64(v)) do return 0, true, false
 		return i64(v), true, true
 	}
 	return 0, true, false
@@ -95,7 +98,7 @@ agent_token_usage_from_json :: proc(raw: string) -> (Agent_Token_Usage, bool) {
 	if u.reported_window, _, ok = token_int(obj, "reported_window", false); !ok do return {}, false
 	if u.output_tokens_total, u.has_output_total, ok = token_int(obj, "output_tokens_total", false); !ok do return {}, false
 	if u.compactions, _, ok = token_int(obj, "compactions", false); !ok do return {}, false
-	if u.updated_at_ms, _, ok = token_int(obj, "updated_at_ms", false); !ok do return {}, false
+	if u.updated_at_ms, _, ok = token_int(obj, "updated_at_ms", false, AGENT_TOKEN_TIMESTAMP_MAX); !ok do return {}, false
 	if run, present, ok = token_int(obj, "run_count", false); !ok do return {}, false
 	if present {
 		if run > i64(max(i32)) do return {}, false
