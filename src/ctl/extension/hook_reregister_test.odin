@@ -1,6 +1,7 @@
 package extension
 
 import "core:os"
+import "core:sys/posix"
 import "core:strings"
 import "core:testing"
 
@@ -224,4 +225,76 @@ hook_debug_log_keeps_stdout_empty :: proc(t: ^testing.T) {
 	hook_debug_append(path, line)
 	data, err := os.read_entire_file(path, context.temp_allocator)
 	testing.expect(t, err == nil && strings.count(string(data), "\n") == 1)
+}
+
+@(private = "file")
+dbg_send_ok :: proc(endpoint, token, method, params: string, timeout_ms: int) -> (string, bool) {
+	return `{"ok":true}`, true
+}
+
+@(private = "file")
+dbg_send_fail :: proc(endpoint, token, method, params: string, timeout_ms: int) -> (string, bool) {
+	return "", false
+}
+
+// DEBUG (remove before merge): drive hook_run_logged with the env var set. Two
+// invocations append exactly two JSON lines (usage + POST outcome), return ""
+// (the CLI prints nothing for ""), and write no hook marker to fd 1/2 (both are
+// redirected to files for the duration; the unique session id must not appear).
+@(test)
+hook_debug_log_hook_invocations_append_jsonl_and_stay_silent :: proc(t: ^testing.T) {
+	log_path := "/tmp/ham_hook_debug_integration.jsonl"
+	out_path := "/tmp/ham_hook_debug_integration.out"
+	err_path := "/tmp/ham_hook_debug_integration.err"
+	os.remove(log_path)
+	defer os.remove(log_path)
+	defer os.remove(out_path)
+	defer os.remove(err_path)
+	os.set_env(HOOK_DEBUG_LOG_ENV, log_path)
+	defer os.unset_env(HOOK_DEBUG_LOG_ENV)
+
+	out_fd := posix.open(strings.clone_to_cstring(out_path, context.temp_allocator), {.WRONLY, .CREAT, .TRUNC}, {.IRUSR, .IWUSR})
+	err_fd := posix.open(strings.clone_to_cstring(err_path, context.temp_allocator), {.WRONLY, .CREAT, .TRUNC}, {.IRUSR, .IWUSR})
+	testing.expect(t, out_fd >= 0 && err_fd >= 0)
+	saved_out := posix.dup(1)
+	saved_err := posix.dup(2)
+	posix.dup2(out_fd, 1)
+	posix.dup2(err_fd, 2)
+
+	raw := `{"hook_event_name":"Stop","session_id":"dbgmark_s1","transcript_path":"/nonexistent/dbgmark.jsonl","prompt":"SECRET_PROMPT"}`
+	env := Hook_Env{endpoint = "unix:/tmp/x.sock", token = "tok", ts = "2026-10-22T06:00:00Z"}
+	res1 := hook_run_logged("claude", raw, env, dbg_send_ok)
+	res2 := hook_run_logged("claude", raw, env, dbg_send_fail)
+
+	posix.dup2(saved_out, 1)
+	posix.dup2(saved_err, 2)
+	posix.close(saved_out)
+	posix.close(saved_err)
+	posix.close(out_fd)
+	posix.close(err_fd)
+
+	testing.expect_value(t, res1, "")
+	testing.expect_value(t, res2, "")
+	for p in ([]string{out_path, err_path}) {
+		d, _ := os.read_entire_file(p, context.temp_allocator)
+		testing.expect(t, !strings.contains(string(d), "dbgmark"), p)
+		testing.expect(t, !strings.contains(string(d), "SECRET_PROMPT"), p)
+	}
+	data, err := os.read_entire_file(log_path, context.temp_allocator)
+	testing.expect(t, err == nil)
+	text := string(data)
+	testing.expect(t, !strings.contains(text, "SECRET_PROMPT"), text)
+	lines := strings.split_lines(strings.trim_right(text, "\n"), context.temp_allocator)
+	testing.expect_value(t, len(lines), 2)
+	if len(lines) == 2 {
+		for l in lines {
+			testing.expect(t, strings.contains(l, `"provider":"claude"`), l)
+			testing.expect(t, strings.contains(l, `"hook_event":"Stop"`), l)
+			testing.expect(t, strings.contains(l, `"session_id":"dbgmark_s1"`), l)
+			testing.expect(t, strings.contains(l, `"usage_ok":false`), l)
+			testing.expect(t, strings.contains(l, `"event_posted":true`), l)
+		}
+		testing.expect(t, strings.contains(lines[0], `"event_post_ok":true`), lines[0])
+		testing.expect(t, strings.contains(lines[1], `"event_post_ok":false`), lines[1])
+	}
 }
