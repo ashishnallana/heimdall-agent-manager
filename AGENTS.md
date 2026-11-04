@@ -141,7 +141,7 @@ Records: [src/hub/domain](src/hub/domain), auth contracts: [src/contracts/auth.o
   [docs/desktop-auth.md](docs/desktop-auth.md)); Bridges use enrolled Bridge credentials; agents use
   per-instance tokens through the local Bridge. Owner scoping is enforced by
   [service/ownership](src/hub/service/ownership/ownership.odin). Never widen access by substituting
-  one identity for another; shells, artifacts, conversations and tasks each have their own ownership
+  one identity for another, and never assume token values or derive credentials from identifiers; shells, artifacts, conversations and tasks each have their own ownership
   checks. Fleet roles are agent work/review roles, not human access grants.
 - **Memory.** Types: `fact`, `habit`, `episode`, `expertise`, `skill`. Targeting lists agent, project,
   template and Bridge IDs (all non-empty dimensions must match); `template` is a dimension, not a
@@ -241,6 +241,8 @@ provider, so preserve the native-prompt fallback when a permission hook cannot d
 - **Socket lifetime across threads:** closing a socket on one thread while another blocks reading it has
   caused the same defect five times; read [docs/socket-lifetime.md](docs/socket-lifetime.md) before
   copying any stream-teardown pattern.
+- **Terminal transport:** keep socket ownership and viewer backpressure rules intact when changing pane/shell
+  transport ([docs/pane-transport.md](docs/pane-transport.md)).
 - **Odin test binaries under `/tmp` get SIGKILLed** on managed hosts with endpoint security (first run of
   a never-seen binary dies with exit 137); build into `$HOME/.cache/heimdall-tests/` instead
   ([section 3](#3-build-run-and-test)).
@@ -251,7 +253,7 @@ provider, so preserve the native-prompt fallback when a permission hook cannot d
   a stale hash still builds where the old deps are in the store and only fails on a fresh deploy, so a
   local `nix build` will not catch it.
 - **Bridge tests spawning children:** they start real processes (`setsid sh -c`, `git`, `ps`); kill them
-  with `bridge_shell_test_kill_pid`, which only group-kills a provably-own session leader, never the
+  with `bridge_shell_test_kill_pid` ([src/bridge/shell_common.odin](src/bridge/shell_common.odin)), which only group-kills a provably-own session leader, never the
   runner's group.
 
 ## 8. Further reading
