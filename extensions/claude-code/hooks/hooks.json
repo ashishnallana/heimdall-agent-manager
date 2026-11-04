@@ -103,6 +103,17 @@
         ]
       }
     ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -x \"${HEIMDALL_CTL_BIN:-}\" ] || exit 0; exec \"$HEIMDALL_CTL_BIN\" extension hook claude",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
     "Notification": [
       {
         "hooks": [

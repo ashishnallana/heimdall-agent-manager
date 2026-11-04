@@ -21,6 +21,7 @@ refresh_test_commit :: proc(path, refresh_path, api, bridge_id: string, cred: Br
 }
 @(test)
 refresh_local_persistence_failure_never_reexchanges_spent_token :: proc(t: ^testing.T) {
+    sync.mutex_lock(&bridge_test_config_mutex); defer sync.mutex_unlock(&bridge_test_config_mutex)
     refresh_test_exchanges = 0; refresh_test_commits = 0
     recovery: Bridge_Refresh_Recovery
     budget: Bridge_Operation_Budget
@@ -36,6 +37,7 @@ refresh_local_persistence_failure_never_reexchanges_spent_token :: proc(t: ^test
 
 @(test)
 refresh_pending_pair_survives_disk_restart_and_preserves_parent_budget :: proc(t: ^testing.T) {
+    sync.mutex_lock(&bridge_test_config_mutex); defer sync.mutex_unlock(&bridge_test_config_mutex)
     context.allocator = runtime.heap_allocator()
     path := fmt.tprintf("%s/pending-refresh-%d/rotation.json", os.temp_dir(context.temp_allocator), time.to_unix_nanoseconds(time.now()))
     pending := Bridge_Refresh_Pending{version=1,key="refresh:api:b",api_base="api",bridge_id="b",first_ms=1000,
@@ -75,6 +77,7 @@ refresh_test_transport_failure :: proc(api, token, request_id: string, timeout_m
 // retried, bounded, with the same request id.
 @(test)
 refresh_unknown_outcome_retries_instead_of_parking :: proc(t: ^testing.T) {
+    sync.mutex_lock(&bridge_test_config_mutex); defer sync.mutex_unlock(&bridge_test_config_mutex)
     context.allocator = runtime.heap_allocator()
     for sent in ([]bool{false, true}) {
         key := "refresh:unknown:sent" if sent else "refresh:unknown:unsent"
@@ -113,6 +116,7 @@ refresh_test_commit_ok :: proc(path, refresh_path, api, bridge_id: string, cred:
 
 @(test)
 refresh_lost_reply_is_recovered_by_a_retry_with_the_same_request_id :: proc(t: ^testing.T) {
+    sync.mutex_lock(&bridge_test_config_mutex); defer sync.mutex_unlock(&bridge_test_config_mutex)
     context.allocator = runtime.heap_allocator()
     refresh_test_lost_exchanges = 0
     refresh_test_request_ids = make([dynamic]string)
@@ -140,6 +144,7 @@ refresh_lost_reply_is_recovered_by_a_retry_with_the_same_request_id :: proc(t: ^
 // for both; a refused (Unauthenticated) receipt must stay stopped.
 @(test)
 refresh_restart_after_retriable_terminal_receipt_retries :: proc(t: ^testing.T) {
+    sync.mutex_lock(&bridge_test_config_mutex); defer sync.mutex_unlock(&bridge_test_config_mutex)
     context.allocator = runtime.heap_allocator()
     dir := fmt.tprintf("%s/.cache/heimdall-tests/refresh-journal-%d", os.get_env("HOME", context.temp_allocator), time.to_unix_nanoseconds(time.now()))
     defer os.remove_all(dir)
@@ -170,6 +175,7 @@ refresh_restart_after_retriable_terminal_receipt_retries :: proc(t: ^testing.T) 
 
 @(test)
 refresh_request_id_is_durable_and_scoped :: proc(t: ^testing.T) {
+    sync.mutex_lock(&bridge_test_config_mutex); defer sync.mutex_unlock(&bridge_test_config_mutex)
     context.allocator = runtime.heap_allocator()
     dir := fmt.tprintf("%s/.cache/heimdall-tests/refresh-request-%d", os.get_env("HOME", context.temp_allocator), time.to_unix_nanoseconds(time.now()))
     defer os.remove_all(dir)
@@ -183,6 +189,7 @@ refresh_request_id_is_durable_and_scoped :: proc(t: ^testing.T) {
 
 @(test)
 refresh_200_with_an_unusable_body_is_a_protocol_error_not_a_timeout :: proc(t: ^testing.T) {
+    sync.mutex_lock(&bridge_test_config_mutex); defer sync.mutex_unlock(&bridge_test_config_mutex)
     for body in ([]string{"{}", "", "{\"data\":", "<html>"}) {
         _, ok, err, unknown := bridge_refresh_response_classify(httpc.Response{status = 200, body = transmute([]byte)body}, true, "http://localhost")
         testing.expect(t, !ok && unknown && err.class == .retriable)

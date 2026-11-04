@@ -9,10 +9,16 @@ import project "odin_test:hub/service/project"
 
 // Wake delivery (plan §2.5 / §4). A UoW never talks to a bridge: it queues
 // run[]/stop[] entries on the Effects list and flush_wakes sends ONE wake_agent
-// command per (bridge × chain) after COMMIT. The bridge's wake path kills and
-// re-bootstraps an instance it already has a launch record for, and does a full
-// launch for one it has never seen (JIT) — one launch path for every restart
-// reason (§4c).
+// command per (bridge × chain) after COMMIT. For a LIVE holder the entry is a
+// nudge (deliver="nudge"): the bridge keeps the process, refreshes TASK.md and
+// tells the agent to run `lease next` (T8: no re-bootstrap per attempt or
+// review round). Otherwise the bridge re-bootstraps an instance it has a launch
+// record for, and does a full launch for one it has never seen (JIT) — one
+// launch path for every restart reason (§4c).
+
+// WAKE_DELIVER_NUDGE marks a run[] entry for a live child (see
+// agent.Wake_Agent_Run_Entry.deliver).
+WAKE_DELIVER_NUDGE :: "nudge"
 
 // effect_wake_lease queues the run[] entry that delivers `lease` to its holder:
 // the enriched descriptor the bridge needs for the agent-keyed bootstrap plus
@@ -57,6 +63,9 @@ effect_wake_lease :: proc(svc: ^Service, u: ^Uow, lease: domain.Task_Lease, task
 		lease_id          = lease.lease_id,
 		pack_json         = build_pack_json(svc, chain, task, lease, inst),
 		permission_mode   = permission_mode,
+		// A live child keeps its process: the bridge nudges it to run
+		// `lease next` (grant_in_uow left its generation unchanged).
+		deliver           = WAKE_DELIVER_NUDGE if wake_reuses_live_child(inst, false) else "",
 	}
 	key := effects_key(&u.effects, bridge_id, string(chain.chain_id))
 	entries := u.effects.runs[key]

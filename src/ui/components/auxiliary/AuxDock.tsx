@@ -302,7 +302,11 @@ export function AuxDock({
   const width = dragWidth ?? storedWidth ?? AUX_DEFAULT_WIDTH;
   const animating = dragWidth === null;
   const containerClass = isMobile
-    ? `fixed inset-0 z-[70] flex flex-col bg-canvas transition-transform duration-200 ease-out motion-reduce:transition-none ${
+    ? // REQ-VIEWPORT-ORIGIN-1: was `fixed inset-0`, whose bottom edge is the LAYOUT viewport's
+      // (behind the soft keyboard) and whose top ignored the visible region's origin, so an aux
+      // sub-agent chat's composer sat under the keyboard. The sheet is the visible region; its
+      // contents (AgentChatPane) size from this box, with no second correction of their own.
+      `fixed inset-x-0 top-0 app-viewport-height z-[70] flex flex-col bg-canvas transition-transform duration-200 ease-out motion-reduce:transition-none ${
         shown ? 'translate-x-0' : 'translate-x-full'
       }`
     : isMaximized

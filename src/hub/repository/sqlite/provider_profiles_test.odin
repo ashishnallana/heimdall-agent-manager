@@ -539,3 +539,40 @@ test_profiles_reconfiguration_commits_account_selection_atomically :: proc(t: ^t
 	_, stored, _ = iface.agent_save_instance(&repo, saved)
 	testing.expect(t, !stored, "old runtime cannot overwrite the moved profile")
 }
+
+// The bridge reports the default profile under its effective id (== provider). That
+// report must keep the PATH-resolved binary_path; only a custom profile is blanked.
+@(test)
+test_discovery_report_keeps_default_profile_binary_path :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	conn, ok := tmpl_clone_migrated(t)
+	if !ok do return
+	defer close(&conn)
+	testing.expect(t, exec(&conn, "INSERT INTO bridges(bridge_id,owner_user_id,created_at,updated_at) VALUES('path-b','owner','','');"))
+	impl: Provider_Repo_SQLite
+	repo := new_provider_repository(&impl, &conn)
+	svc := provider.new_provider_service(&repo)
+	testing.expect_value(
+		t,
+		provider.apply_profiles_report(&svc, "path-b", []domain.Bridge_Provider_Profile{{profile_id = "codex_one", provider = "codex", enabled = true, state = "ok"}}).code,
+		domain.Error_Code.None,
+	)
+	report := []domain.Bridge_Provider_Status {
+		{bridge_id = "path-b", profile_id = "claude", provider = "claude", binary_path = "/home/u/.linuxbrew/bin/claude", state = "present"},
+		{bridge_id = "path-b", profile_id = "codex_one", provider = "codex", binary_path = "/private/bin", state = "present"},
+	}
+	testing.expect_value(t, provider.apply_discovery_report(&svc, "path-b", report).code, domain.Error_Code.None)
+	statuses, _ := repo.list_status(repo.ctx, "path-b")
+	seen := 0
+	for s in statuses {
+		switch s.profile_id {
+		case "claude":
+			seen += 1
+			testing.expect_value(t, s.binary_path, "/home/u/.linuxbrew/bin/claude")
+		case "codex_one":
+			seen += 1
+			testing.expect_value(t, s.binary_path, "")
+		}
+	}
+	testing.expect_value(t, seen, 2)
+}

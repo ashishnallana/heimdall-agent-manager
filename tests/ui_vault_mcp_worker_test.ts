@@ -232,3 +232,18 @@ test('coordinator messages require dedicated signed consent and seal as user-mes
     await assert.rejects(transformMcpWorkerJob({ ...job, payload: JSON.stringify({ body }) }, f.keyring));
   }
 });
+
+test('instance reads open a sealed agent name carrying the native run counter and fail closed on malformed armor', async () => {
+  const f = await mcpWorkerFixture(Date.now(), 'mcp:chains mcp:instances:read');
+  const token = JSON.parse(f.job.payload).chain.title;
+  const read = async (display_name: string) => {
+    const job = { ...f.job, tool: 'instances.get', operation: 'read' as const, payload: JSON.stringify({ records_kind: 'instance', records: [{ owner_user_id: f.job.owner, agent_instance_id: 'inst_label', display_name }] }) };
+    job.digest = await mcpJobDigest(job);
+    await verifyMcpWorkerJob(job, f.identity, f.chain, job.resource, f.now);
+    return JSON.parse(await transformMcpWorkerJob(job, f.keyring)).records[0].display_name;
+  };
+  assert.equal(await read(token), 'worker secret title');
+  assert.equal(await read(`${token} #3`), 'worker secret title #3');
+  assert.equal(await read('coordinator #7'), 'coordinator #7');
+  for (const bad of [`${token.slice(0, -8)} #3`, `${token} #3 vault:v2:zz`, 'vault:v2:not-a-token #3']) await assert.rejects(read(bad), `malformed label must fail closed: ${bad.slice(0, 24)}`);
+});

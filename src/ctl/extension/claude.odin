@@ -8,10 +8,13 @@ package extension
 //   PreToolUse          → tool.start
 //   PostToolUse         → tool.end (+ file.edit for Edit / MultiEdit / Write)
 //   PostToolUseFailure  → tool.end {status:error}
+//                         (every tool.end carries pre-clip metrics; tool.end and
+//                         Stop carry transcript usage when readable)
 //   SubagentStart/Stop  → subagent.start / subagent.stop
 //   Stop                → activity {state:idle}
 //   Notification        → notification
 //   PermissionRequest   → permission.request (sent with agent.extension.permission)
+//   PreCompact          → compaction {phase:pre, trigger}
 //
 // Payload facts come from the T1 spike against Claude Code 2.1.295: every hook
 // fired inside a subagent carries top-level agent_id/agent_type; SubagentStart
@@ -26,7 +29,8 @@ import contracts "odin_test:contracts"
 
 CLAUDE_PROVIDER :: "claude"
 CLAUDE_EXT_VERSION :: "0.1.0"
-CLAUDE_CAPABILITIES :: [?]string{"activity", "subagents", "permissions", "file_edits", "session_id"}
+// "usage" = this provider emits usage.context_tokens (ham.ext.v1).
+CLAUDE_CAPABILITIES :: [?]string{"activity", "subagents", "permissions", "file_edits", "session_id", "usage"}
 
 // Strings inside tool input / response are clipped so one event stays well
 // under contracts.EXT_EVENT_MAX_BYTES (256KB) even with a 64KB diff.
@@ -48,6 +52,7 @@ Claude_Hook :: enum {
 	Stop,
 	Notification,
 	Permission_Request,
+	Pre_Compact,
 }
 
 claude_hook_from_name :: proc(name: string) -> Claude_Hook {
@@ -63,6 +68,7 @@ claude_hook_from_name :: proc(name: string) -> Claude_Hook {
 	case "Stop":               return .Stop
 	case "Notification":       return .Notification
 	case "PermissionRequest":  return .Permission_Request
+	case "PreCompact":         return .Pre_Compact
 	}
 	return .Unknown
 }
@@ -147,6 +153,7 @@ claude_map_hook :: proc(raw: string, ts: string, permission_timeout_ms := 0, per
 		}
 		pb_int(&p, "background_running", running)
 		eb := ext_event_begin("activity", ts, root, CLAUDE_PROVIDER, CLAUDE_EXT_VERSION)
+		ext_event_finish_usage(&eb, CLAUDE_PROVIDER, root, true)
 		append(&out.events, ext_event_end(&eb, pb_done(&p)))
 
 	case .Pre_Tool_Use:
@@ -165,6 +172,8 @@ claude_map_hook :: proc(raw: string, ts: string, permission_timeout_ms := 0, per
 
 	case .Post_Tool_Use:
 		tool := json_get_string(root, "tool_name")
+		// Measured on the native values, before clipping and dropped keys.
+		metrics := tool_metrics(root["tool_input"], root["tool_response"])
 		input := json_clip(root["tool_input"], CLAUDE_TOOL_STRING_MAX)
 		// Whole-file fields duplicate the diff; drop them from tool.response.
 		response := json_clip(root["tool_response"], CLAUDE_TOOL_STRING_MAX,
@@ -180,10 +189,15 @@ claude_map_hook :: proc(raw: string, ts: string, permission_timeout_ms := 0, per
 		}
 		eb := ext_event_begin("tool.end", ts, root, CLAUDE_PROVIDER, CLAUDE_EXT_VERSION)
 		ext_event_tool(&eb, root, input, response)
+		ext_event_metrics(&eb, metrics)
+		ext_event_finish_usage(&eb, CLAUDE_PROVIDER, root, true)
 		append(&out.events, ext_event_end(&eb, pb_done(&p)))
 		if ev, ok := claude_file_edit_event(root, ts); ok do append(&out.events, ev)
 
 	case .Post_Tool_Use_Failure:
+		// A failed call has no tool_response; the error text is what the
+		// model receives instead.
+		metrics := tool_metrics(root["tool_input"], root["error"])
 		input := json_clip(root["tool_input"], CLAUDE_TOOL_STRING_MAX)
 		p := pb_make()
 		pb_str(&p, "status", "error")
@@ -191,7 +205,12 @@ claude_map_hook :: proc(raw: string, ts: string, permission_timeout_ms := 0, per
 		if json_get_bool(root, "is_interrupt") do pb_bool(&p, "is_interrupt", true)
 		eb := ext_event_begin("tool.end", ts, root, CLAUDE_PROVIDER, CLAUDE_EXT_VERSION)
 		ext_event_tool(&eb, root, input, nil)
+		ext_event_metrics(&eb, metrics)
+		ext_event_finish_usage(&eb, CLAUDE_PROVIDER, root, true)
 		append(&out.events, ext_event_end(&eb, pb_done(&p)))
+
+	case .Pre_Compact:
+		append(&out.events, ext_compaction_event(ts, root, CLAUDE_PROVIDER, CLAUDE_EXT_VERSION, "pre"))
 
 	case .Subagent_Start:
 		eb := ext_event_begin("subagent.start", ts, root, CLAUDE_PROVIDER, CLAUDE_EXT_VERSION)

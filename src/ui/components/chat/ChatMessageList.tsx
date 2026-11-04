@@ -139,6 +139,7 @@ export default function ChatMessageList({
   formatTimestamp = () => EMPTY_TIMESTAMP,
   getDeliveryStatus = () => EMPTY_DELIVERY,
   agentIsWorking = false,
+  agentActivity,
   children,
   wrapperClassName = 'relative min-h-0 min-w-0 max-w-full flex-1 overflow-hidden overflow-x-hidden',
   scrollClassName = 'chat-scrollbar h-full min-h-0 max-w-full space-y-[22px] overflow-y-auto overflow-x-hidden rounded-none bg-canvas px-1 py-4 sm:space-y-4 sm:rounded-[18px] sm:px-4 sm:py-4',
@@ -166,6 +167,8 @@ export default function ChatMessageList({
   formatTimestamp?: (unixMs: number) => ChatTimestamp;
   getDeliveryStatus?: (message: ChatMessage) => ChatDeliveryStatus;
   agentIsWorking?: boolean;
+  /** Replaces the default working mark at the scrollable conversation tail. */
+  agentActivity?: ReactNode;
   /**
    * Transient conversation-tail content (e.g. live tools) scrolls with messages.
    * The composer stays outside this slot so keyboard resizing keeps it reachable.
@@ -500,13 +503,13 @@ export default function ChatMessageList({
               </div>
             );
           })}
-          {agentIsWorking && (
+          {agentActivity ?? (agentIsWorking && (
             <div data-debug-id={`${debugPrefix}-working-indicator`} className="msg flex min-w-0 max-w-full justify-start">
               <div className="flex w-full flex-col items-start py-1">
                 <WorkingRings size={18} label="The agent is working" />
               </div>
             </div>
-          )}
+          ))}
           {children}
         </div>
         {bottomInset > 0 ? (

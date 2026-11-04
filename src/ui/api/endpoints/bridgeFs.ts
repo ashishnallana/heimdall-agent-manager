@@ -12,9 +12,24 @@ import type { WireError } from '../wireError';
 import { decryptVaultText, getActiveVaultKey, isVaultArmored } from '../../utils/vaultContent';
 import type { FsReadFileResult } from './projectFs';
 
-// size / modified_at (RFC3339 UTC) are sent by every current bridge; optional so
-// older bridges and existing fixtures stay valid.
-export type BridgeFsEntry = { name: string; is_dir: boolean; hidden: boolean; has_git: boolean; size?: number; modified_at?: string };
+// Hover hint for a listing entry whose name_lossy flag is set (shared by every
+// fs browser so the wording stays the same).
+export const LOSSY_NAME_HINT = 'This name is not valid UTF-8, so it cannot be opened here. Rename it on the host to use it.';
+
+export type BridgeFsEntry = {
+  name: string;
+  is_dir: boolean;
+  hidden: boolean;
+  has_git: boolean;
+  // size / modified_at (RFC3339 UTC) are sent by every current bridge; optional so
+  // older bridges and existing fixtures stay valid.
+  size?: number;
+  modified_at?: string;
+  // The on-disk name is not valid UTF-8: `name` is display-only (U+FFFD for each
+  // undecodable byte) and does not name the entry, so it must not be opened,
+  // navigated into, renamed or deleted through a path built from it.
+  name_lossy?: boolean;
+};
 export type BridgeFsListResult = {
   ok: boolean;
   path: string;

@@ -99,6 +99,28 @@
         ]
       }
     ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if [ -n \"$HEIMDALL_CTL_BIN\" ]; then \"$HEIMDALL_CTL_BIN\" extension hook codex; fi",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if [ -n \"$HEIMDALL_CTL_BIN\" ]; then \"$HEIMDALL_CTL_BIN\" extension hook codex; fi",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
     "Interrupt": [
       {
         "hooks": [

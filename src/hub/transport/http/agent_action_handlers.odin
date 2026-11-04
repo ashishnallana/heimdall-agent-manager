@@ -366,6 +366,42 @@ agent_action_chat_send_to_agent_handler :: proc(ctx: rawptr, req: Request) -> Re
 	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req), 201)
 }
 
+// agent_action_chat_previous_context_handler stores the rollover handoff the
+// bridge forwards on an instance's behalf (identity is the verified instance
+// auth, never the payload). The row is inbound and unread in the caller's own
+// conversation and is NOT notified to the agent; only the owner's UI gets the
+// message_created hint. Idempotent on params.request_id: a retry returns the
+// original message with created=false.
+agent_action_chat_previous_context_handler :: proc(ctx: rawptr, req: Request) -> Response {
+	h := (^Agent_Action_Handlers)(ctx)
+	auth, inst, ok, resp := require_instance_action_auth(h, req)
+	if !ok do return resp
+	params := json_object_raw(req.body, "params")
+	input := content_service.Previous_Context_Input{
+		request_id = json_string(params, "request_id"),
+		body = json_string(params, "body"),
+		metadata_json = json_object_raw(params, "metadata"),
+	}
+	msg, created, err := content_service.store_previous_context(h.content, auth, inst.agent_instance_id, input)
+	if err.code != .None do return respond_error(err, req.request_id)
+	if created && h.event_bus != nil {
+		if conv, conv_ok, _ := content_service.get_conversation_by_instance(h.content, auth, inst.agent_instance_id); conv_ok do publish_chat_message_created(h.event_bus, conv, msg)
+	}
+	b := strings.builder_make()
+	strings.write_string(&b, "{\"accepted\":true,\"created\":")
+	strings.write_string(&b, "true" if created else "false")
+	strings.write_string(&b, ",\"message_id\":\"")
+	contracts.write_json_string(&b, msg.message_id)
+	strings.write_string(&b, "\",\"conversation_id\":\"")
+	contracts.write_json_string(&b, msg.conversation_id)
+	strings.write_string(&b, "\",\"message_type\":\"")
+	contracts.write_json_string(&b, msg.message_type)
+	strings.write_string(&b, "\",\"created_at\":\"")
+	contracts.write_json_string(&b, msg.created_at)
+	strings.write_string(&b, "\"}")
+	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req), 201 if created else 200)
+}
+
 // agent_action_conversation_set_title_handler lets an agent rename ITS OWN bound
 // conversation (T3/REQ-3). Marks title_source="agent" so the nudge engine stops.
 agent_action_conversation_set_title_handler :: proc(ctx: rawptr, req: Request) -> Response {
@@ -1321,7 +1357,9 @@ agent_action_start_success_handler :: proc(ctx: rawptr, req: Request) -> Respons
 		unread, unread_err := content_service.list_agent_inbox_messages(h.content, auth, inbox_filter)
 		if unread_err.code == .None {
 			for msg in unread {
-				if msg.direction == "user_to_agent" && msg.read_at == "" {
+				// A previous_context handoff is the agent's own note, read via the
+				// rollover prompt; announcing it as "from User" would be false.
+				if msg.direction == "user_to_agent" && msg.read_at == "" && msg.message_type != content_service.MESSAGE_TYPE_PREVIOUS_CONTEXT {
 					content_service.notify_agent_message(h.content, conv, "user_to_agent", "user", msg.message_id)
 					break
 				}

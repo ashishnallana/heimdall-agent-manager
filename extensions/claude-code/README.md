@@ -7,6 +7,8 @@ Heimdall instead of terminal screen-scraping:
 - **Session**: the current Claude session id and transcript (`SessionStart`, `SessionEnd`, also across `/clear`).
 - **Tools and subagents**: every tool call (`PreToolUse`, `PostToolUse`, `PostToolUseFailure`) and every subagent's lifetime (`SubagentStart`, `SubagentStop`), with tool calls attributed to the subagent that made them.
 - **File edits**: a unified diff for each `Edit` / `MultiEdit` / `Write`, capped at 64KB. Binary files are skipped.
+- **Token estimates**: each `tool.end` carries `metrics` (native tool input/response bytes measured before clipping, and `est_tokens` = bytes/4). `tool.end` and `Stop` also carry `usage.context_tokens` from the last assistant `message.usage` in the session transcript; only the last 64 KiB of the transcript is read, and `usage` is left out when it cannot be read.
+- **Compaction**: `PreCompact` (manual `/compact` or auto) emits a `compaction` event `{phase:"pre", trigger}` so Heimdall resets its context accounting. `custom_instructions` is never forwarded.
 - **Permissions**: `PermissionRequest` is shown in Heimdall so you can allow or deny it there. The terminal prompt stays up the whole time, and whichever answer comes first wins.
 
 The plugin is only hook configuration. Every hook runs

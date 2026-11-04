@@ -85,7 +85,10 @@ async function readable(raw: Record<string, unknown>, fields: string[], textFiel
       try { return new TextDecoder('utf-8', { fatal: true }).decode(opened.bytes); }
       finally { opened.bytes.fill(0); }
     };
-    if (value.startsWith('vault:v2:')) out[key] = await open(value);
+    // Whole token only on an exact match: "<token> #3" (sealed agent name plus the
+    // native run counter) is opened through the embedded path.
+    const whole = findVaultTokens(value);
+    if (whole.length === 1 && whole[0] === value) out[key] = await open(value);
     else if (value.includes('vault:v2:')) {
       if (replaceVaultTokens(value, '').includes('vault:v2:')) throw new Error('Malformed MCP envelope');
       const tokens = new Map<string, string>();

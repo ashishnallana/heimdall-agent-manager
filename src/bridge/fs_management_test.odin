@@ -19,6 +19,7 @@ import "core:strings"
 import "core:sync"
 import "core:testing"
 import "core:time"
+import "core:unicode/utf8"
 import base64 "core:encoding/base64"
 import json "core:encoding/json"
 import "core:path/filepath"
@@ -1385,4 +1386,194 @@ test_bridge_fs_is_within_root_windows_separators :: proc(t: ^testing.T) {
 		testing.expect(t, !bridge_fs_is_within_root(`D:\Users\ashis\x`, root), "other drive rejected")
 		testing.expect(t, bridge_fs_is_within_root(`C:\Windows`, `C:\`), "drive root contains children")
 	}
+}
+
+// --- non-UTF-8 names and strict JSON escapes --------------------------------
+//
+// Host file names are arbitrary bytes. core:encoding/json writes an undecodable byte
+// as `\xNN`, which strict JSON (the browser's JSON.parse) rejects, so one such name
+// broke the whole listing. Note that json.DEFAULT_SPECIFICATION is JSON5, which DOES
+// accept `\x`: round-tripping through it proves nothing here, so these tests check
+// every escape against strict JSON with fs_test_strict_json_escapes.
+
+// fs_test_strict_json_escapes reports whether every backslash escape in `data` is a
+// strict-JSON escape (\" \\ \/ \b \f \n \r \t \uXXXX) and no raw control byte or
+// invalid UTF-8 appears. Valid for marshaller output, where backslashes only occur
+// inside strings.
+@(private = "file")
+fs_test_strict_json_escapes :: proc(data: string) -> bool {
+	if !utf8.valid_string(data) do return false
+	i := 0
+	for i < len(data) {
+		c := data[i]
+		if c < 0x20 do return false
+		if c != '\\' {
+			i += 1
+			continue
+		}
+		if i + 1 >= len(data) do return false
+		switch data[i + 1] {
+		case '"', '\\', '/', 'b', 'f', 'n', 'r', 't':
+			i += 2
+		case 'u':
+			if i + 5 >= len(data) do return false
+			for k in 2..=5 {
+				h := data[i + k]
+				if !((h >= '0' && h <= '9') || (h >= 'a' && h <= 'f') || (h >= 'A' && h <= 'F')) do return false
+			}
+			i += 6
+		case:
+			return false
+		}
+	}
+	return true
+}
+
+@(test)
+fs_utf8_lossy_replaces_only_invalid_bytes :: proc(t: ^testing.T) {
+	valid := "plain \"q\" \\ \t \x01 \u2764 \U0001F600 \uFFFD.txt"
+	out, lossy := bridge_utf8_lossy(valid)
+	testing.expect_value(t, out, valid)
+	testing.expect(t, !lossy, "valid UTF-8 (even a literal U+FFFD) is not lossy")
+	delete(out)
+
+	bad, bad_lossy := bridge_utf8_lossy("a\xb1\xc4\xf2b")
+	testing.expect_value(t, bad, "a\uFFFD\uFFFD\uFFFDb")
+	testing.expect(t, bad_lossy, "invalid bytes are lossy")
+	delete(bad)
+
+	// A truncated multi-byte sequence and an encoded surrogate are invalid too.
+	trunc, trunc_lossy := bridge_utf8_lossy("x\xe2\x82")
+	testing.expect(t, trunc_lossy, "truncated sequence is lossy")
+	testing.expect(t, utf8.valid_string(trunc), "lossy output is valid UTF-8")
+	delete(trunc)
+	surr, surr_lossy := bridge_utf8_lossy("\xed\xa0\x80")
+	testing.expect(t, surr_lossy, "encoded surrogate is lossy")
+	testing.expect(t, utf8.valid_string(surr), "lossy output is valid UTF-8")
+	delete(surr)
+}
+
+@(test)
+fs_json_repair_rewrites_only_hex_escapes :: proc(t: ^testing.T) {
+	// The marshaller's invalid-byte escape becomes U+FFFD.
+	fixed := bridge_json_repair_invalid_utf8(`{"name":"a\xb1\xC4z"}`)
+	testing.expect_value(t, fixed, `{"name":"a\ufffd\ufffdz"}`)
+	delete(fixed)
+	// An escaped backslash followed by a literal "x41" is text, not an escape.
+	text := `{"name":"C:\\x41 \\\xb1 \"\x\" end\\"}`
+	kept := bridge_json_repair_invalid_utf8(text)
+	testing.expect_value(t, kept, `{"name":"C:\\x41 \\\ufffd \"\x\" end\\"}`)
+	delete(kept)
+	// Valid JSON with no \x passes through byte for byte.
+	clean := `{"a":"\\","b":"\u0001\n\"","c":"😀"}`
+	same := bridge_json_repair_invalid_utf8(clean)
+	testing.expect_value(t, same, clean)
+	delete(same)
+}
+
+@(test)
+fs_wire_json_valid_utf8_names_round_trip_exactly :: proc(t: ^testing.T) {
+	names := [?]string{
+		"spaces in name.txt",
+		"quote \" and backslash \\ and \\x41.txt",
+		"ctrl \x01\x1f\x7f \t\n\r\b\f.txt",
+		"emoji \U0001F600 heart \u2764 replacement \uFFFD.txt",
+	}
+	for name in names {
+		entries := [1]Bridge_Fs_Entry{{name = name, size = 1, modified_at = "2026-11-03T00:00:00Z"}}
+		out := bridge_fs_list_result_json("cmd_rt", Bridge_Fs_List_Result{ok = true, path = "/p", root = "/p", entries = entries[:]})
+		defer delete(out)
+		testing.expectf(t, fs_test_strict_json_escapes(out), "strict JSON for %q: %s", name, out)
+		testing.expectf(t, strings.contains(out, `"name_lossy":false`), "name_lossy false for valid name: %s", out)
+		wire: Bridge_Fs_List_Result_Wire
+		err := json.unmarshal_string(out, &wire, .JSON, context.temp_allocator)
+		testing.expectf(t, err == nil, "strict unmarshal %q: %v", name, err)
+		if !testing.expect_value(t, len(wire.entries), 1) do continue
+		testing.expect_value(t, wire.entries[0].name, name)
+		testing.expect(t, !wire.entries[0].name_lossy, "valid name not lossy")
+	}
+}
+
+@(test)
+fs_list_non_utf8_name_is_lossy_and_strict_json :: proc(t: ^testing.T) {
+	root := fs_test_make_root(t, "nonutf8")
+	defer fs_test_cleanup(root)
+	fs_test_seed_file(t, root, "bad_\xb1\xc4\xf2.txt", "x")
+	fs_test_seed_dir(t, root, "dir_\xff")
+	fs_test_seed_file(t, root, "ok \"q\" \\ \x01 \U0001F600.txt", "y")
+
+	res := bridge_fs_list_dir("", true, "", 200, root)
+	defer bridge_fs_list_result_delete(&res)
+	testing.expect(t, res.ok, "list ok")
+	if !testing.expect_value(t, len(res.entries), 3) do return
+
+	out := bridge_fs_list_result_json("cmd_nonutf8", res)
+	defer delete(out)
+	testing.expectf(t, fs_test_strict_json_escapes(out), "listing must be strict JSON: %s", out)
+	testing.expect_value(t, strings.count(out, `"name_lossy":true`), 2)
+
+	wire: Bridge_Fs_List_Result_Wire
+	err := json.unmarshal_string(out, &wire, .JSON, context.temp_allocator)
+	testing.expectf(t, err == nil, "strict unmarshal: %v", err)
+	if !testing.expect_value(t, len(wire.entries), 3) do return
+	saw_dir, saw_file, saw_ok := false, false, false
+	for e in wire.entries {
+		switch e.name {
+		case "dir_\uFFFD":
+			saw_dir = true
+			testing.expect(t, e.is_dir, "lossy dir keeps is_dir")
+			testing.expect(t, e.name_lossy, "lossy dir flagged")
+		case "bad_\uFFFD\uFFFD\uFFFD.txt":
+			saw_file = true
+			testing.expect(t, !e.is_dir, "lossy file is a file")
+			testing.expect(t, e.name_lossy, "lossy file flagged")
+		case "ok \"q\" \\ \x01 \U0001F600.txt":
+			saw_ok = true
+			testing.expect(t, !e.name_lossy, "valid name not flagged")
+		}
+	}
+	testing.expect(t, saw_dir && saw_file && saw_ok, "all three entries present with expected names")
+}
+
+@(test)
+fs_wire_json_repairs_non_utf8_paths_in_any_frame :: proc(t: ^testing.T) {
+	// Paths (not just names) reach other frames — read/stat results, vcs file
+	// lists — and all go through bridge_wire_json.
+	r := Bridge_Fs_Read_File_Result{ok = false, path = "/home/u/\xb1\xc4\xf2", error_code = "path_not_found", message = "Path does not exist"}
+	out := bridge_fs_read_file_result_json("cmd_read_bad", r)
+	defer delete(out)
+	testing.expectf(t, fs_test_strict_json_escapes(out), "read frame strict JSON: %s", out)
+	wire: Bridge_Fs_Read_Result_Wire
+	err := json.unmarshal_string(out, &wire, .JSON, context.temp_allocator)
+	testing.expectf(t, err == nil, "strict unmarshal: %v", err)
+	testing.expect_value(t, wire.path, "/home/u/\uFFFD\uFFFD\uFFFD")
+}
+
+// Every fs command resolves its path through bridge_fs_resolve_within; on a long-lived
+// bridge any intermediate it leaks is retained once per command (riverwood OOM, T4b).
+@(test)
+test_fs_resolve_within_frees_intermediates :: proc(t: ^testing.T) {
+	root := fs_test_make_root(t, "resolve_leak")
+	defer fs_test_cleanup(root)
+	sub := strings.concatenate({root, "/sub"})
+	defer delete(sub)
+	_ = os.make_directory_all(sub)
+
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	{
+		context.allocator = mem.tracking_allocator(&track)
+		// existing path, relative path, not-yet-existing tail, and an escape attempt
+		for req in ([]string{sub, "sub", "sub/new/deeper", "../outside"}) {
+			canonical, _ := bridge_fs_resolve_within(req, root)
+			delete(canonical)
+		}
+		for p in ([]string{sub, "/definitely/not/here/x"}) {
+			c := bridge_fs_canonicalize_existing(p)
+			delete(c)
+		}
+	}
+	testing.expect_value(t, len(track.allocation_map), 0)
+	testing.expect_value(t, len(track.bad_free_array), 0)
 }

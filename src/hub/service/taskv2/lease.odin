@@ -47,9 +47,13 @@ grant_in_uow :: proc(svc: ^Service, u: ^Uow, req: Grant_Request) -> (domain.Task
 	// Matcher callers deliberately skip a failed grant and keep their outer
 	// transaction. Isolate ALL grant writes, including consumption receipts,
 	// so a skipped candidate cannot leave a lease, event or attempt behind.
+	// A holder the OUTER unit of work is stopping (its own `lease handoff`,
+	// re-granted at once) asked for a fresh context: the grant must launch,
+	// never nudge. Read here — the nested unit has its own (empty) effects.
+	stopping := effect_has_stop(u, req.instance.bridge_id, string(req.task.chain_id), req.instance.agent_instance_id)
 	nested, nok, nerr := begin_uow(svc)
 	if !nok do return {}, false, nerr
-	lease, ok, err := grant_attempt_in_uow(svc, &nested, req)
+	lease, ok, err := grant_attempt_in_uow(svc, &nested, req, stopping)
 	if !ok {
 		_, _ = end_uow(svc, &nested, false)
 		return {}, false, err
@@ -68,7 +72,7 @@ grant_in_uow :: proc(svc: ^Service, u: ^Uow, req: Grant_Request) -> (domain.Task
 }
 
 @(private = "file")
-grant_attempt_in_uow :: proc(svc: ^Service, u: ^Uow, req: Grant_Request) -> (domain.Task_Lease, bool, domain.Domain_Error) {
+grant_attempt_in_uow :: proc(svc: ^Service, u: ^Uow, req: Grant_Request, stopping: bool) -> (domain.Task_Lease, bool, domain.Domain_Error) {
 	task := req.task
 	if task.workflow_run_id != "" {
 		wf, ok, err := workflow_context(svc, task.workflow_run_id, task.owner_user_id)
@@ -139,7 +143,9 @@ grant_attempt_in_uow :: proc(svc: ^Service, u: ^Uow, req: Grant_Request) -> (dom
 	if req.kind == domain.LEASE_KIND_WORK && pre.last_release != .Handoff do attempt_no += 1
 	lease.attempt_no = attempt_no
 
+ model_changed := false
  if req.delivery!=domain.LEASE_DELIVERY_INLINE && (domain.profile_effective_id(inst.provider,inst.provider_profile)!=lease.provider_profile || inst.provider!=provider || inst.model!=model) {
+  model_changed = true
   updated:=inst
   updated.provider=provider;updated.provider_profile=lease.provider_profile;updated.model=model
   stored,changed,e:=iface.agent_save_instance(svc.agents,updated)
@@ -198,20 +204,25 @@ grant_attempt_in_uow :: proc(svc: ^Service, u: ^Uow, req: Grant_Request) -> (dom
 		json_str(&rt, "ended_at", "")
 		_, _ = save_facet_verbatim(svc, refolded, view.attempt_no, FACET_RUNTIME, json_end(&rt), FACET_WRITER_HUB, u)
 	}
-	// A wake grant replaces the child, unlike inline delivery or an inbox nudge.
+	// A wake grant to an instance that is not running launches a new child.
 	// Persist its generation in the grant transaction, before any bridge effect.
-	// All re-deliveries of this lease then reuse this generation.
+	// All re-deliveries of this lease then reuse this generation. A LIVE
+	// instance on the same provider/model keeps its process and generation: the
+	// bridge nudges it to run `lease next` instead (no re-bootstrap per attempt
+	// or review round; see wake_reuses_live_child).
 	if saved.delivery == domain.LEASE_DELIVERY_WAKE {
 		current, found, read_err := iface.agent_get_instance(svc.agents, inst.agent_instance_id)
 		if !found do return {}, false, read_err
-		current.run_count += 1
-		current.runtime_status = "launching"
-		current.startup_status = "starting"
-		current.activity_status = "unknown"
-		current.started_at = now
-		current.stopped_at = ""
-		current.updated_at = now
-		if _, stored, store_err := iface.agent_save_instance(svc.agents, current); !stored do return {}, false, store_err
+		if !wake_reuses_live_child(current, model_changed || stopping) {
+			current.run_count += 1
+			current.runtime_status = "launching"
+			current.startup_status = "starting"
+			current.activity_status = "unknown"
+			current.started_at = now
+			current.stopped_at = ""
+			current.updated_at = now
+			if _, stored, store_err := iface.agent_save_instance(svc.agents, current); !stored do return {}, false, store_err
+		}
 	}
 	set_instance_pointer(svc, u, inst.agent_instance_id, string(task.task_id), .Work if req.kind == domain.LEASE_KIND_WORK else .Review)
 	arm_lease_timers(svc, saved)
@@ -225,9 +236,16 @@ grant_attempt_in_uow :: proc(svc: ^Service, u: ^Uow, req: Grant_Request) -> (dom
 
 // release_in_uow is the SHARED release path for submit / block / handoff (M2 adds
 // the verbs on top): delete the lease, append `event_kind`, refold, close the
-// attempt row, clear the pointer, stop the holder (fresh context per attempt),
-// arm idle_ttl for the released instance. Callers then run match_chain.
-release_in_uow :: proc(svc: ^Service, u: ^Uow, lease: domain.Task_Lease, actor: Actor, event_kind: string, payload_json: string, outcome: string, stop_holder := true) -> (domain.Task, bool, domain.Domain_Error) {
+// attempt row, clear the pointer, arm idle_ttl for the released instance.
+// Callers then run match_chain (after_chain_change), which also stops the
+// instances whose tasks all finished (stop_finished_instances_in_uow).
+//
+// The holder keeps its process by default: an agent is not stopped or
+// re-bootstrapped per attempt or review round, only when its task completes
+// (or its context rolls over on the bridge). stop_holder=true is for the
+// agent's own `lease handoff` (it asked for a fresh context window) and for a
+// dispatch failure on a live-but-broken child.
+release_in_uow :: proc(svc: ^Service, u: ^Uow, lease: domain.Task_Lease, actor: Actor, event_kind: string, payload_json: string, outcome: string, stop_holder := false) -> (domain.Task, bool, domain.Domain_Error) {
 	task, tok, terr := iface.taskchain_get_task(svc.repo, lease.task_id)
 	if !tok do return {}, false, terr
 	if deleted, derr := iface.taskchain_delete_lease(svc.repo, lease.lease_id); !deleted {
@@ -244,9 +262,6 @@ release_in_uow :: proc(svc: ^Service, u: ^Uow, lease: domain.Task_Lease, actor: 
 		// The lease system never stops (or idles out) a chain coordinator — a
 		// solo coordinator keeps its process and pulls its next task (REQ-SOLO-2a).
 		if holder_is_coordinator(svc, task.chain_id, lease.holder_instance_id) do return refolded, true, domain.Domain_Error{}
-		// Fresh context per attempt: the holder is stopped (the next grant, even
-		// to the same instance, re-bootstraps it). stop_holder=false is for a
-		// caller that continues the same process inline.
 		if stop_holder {
 			effect_stop(u, inst.bridge_id, string(task.chain_id), inst.agent_instance_id)
 		}
@@ -255,10 +270,103 @@ release_in_uow :: proc(svc: ^Service, u: ^Uow, lease: domain.Task_Lease, actor: 
 	return refolded, true, domain.Domain_Error{}
 }
 
+// expiry_stops_holder: which expiries end the holder's process. Idle grace (the
+// agent went quiet holding a lease) and a request_changes that drops the other
+// review leases release the lease but keep the process: neither is a reason
+// to re-bootstrap (the agent is healthy; the matcher may hand it work again,
+// delivered as a nudge). Every other reason (lost heartbeat, hard cap,
+// replaced, dependency added, chain closed, cancelled, user stop, grant never
+// confirmed) still stops a live holder.
+expiry_stops_holder :: proc(reason: string) -> bool {
+	return reason != EXPIRE_IDLE && reason != EXPIRE_CHANGES_REQUESTED
+}
+
+// wake_reuses_live_child: a wake grant keeps the instance's running process
+// (and its generation) when the process is live, was not stopped by a person,
+// and nothing demands a new child (`needs_new_child`: the grant changes its
+// provider/model, or this unit of work is stopping it). Otherwise the grant
+// launches a new child (run_count bump + full bootstrap on the bridge).
+wake_reuses_live_child :: proc(inst: domain.Agent_Instance, needs_new_child: bool) -> bool {
+	return !needs_new_child && instance_is_live(inst) && inst.stopped_by == ""
+}
+
+// ---- instance lifetime: stop when the task completes (T8) ----------------------
+// An instance's "tasks" are the tasks it is the latest work holder of and the
+// tasks it reviewed. It is stopped only when all of them are done or
+// cancelled and it holds no lease; until then it keeps its process between
+// attempts and review rounds (waiting for review, blocked, re-granted).
+
+Instance_Task_Work :: struct {
+	open:     bool, // involved in a task that is not done/cancelled
+	finished: bool, // involved in at least one done/cancelled task
+}
+
+// chain_instance_work folds the chain's tasks into per-instance involvement.
+// The map lives in the temp allocator.
+chain_instance_work :: proc(svc: ^Service, chain: domain.Task_Chain) -> (map[string]Instance_Task_Work, bool) {
+	work := make(map[string]Instance_Task_Work, context.temp_allocator)
+	tasks, terr := iface.taskchain_list_tasks_by_chain(svc.repo, chain.chain_id, chain.owner_user_id)
+	if terr.code != .None do return work, false
+	note :: proc(work: ^map[string]Instance_Task_Work, id: string, terminal: bool) {
+		if id == "" do return
+		w := work[id]
+		if terminal do w.finished = true
+		else do w.open = true
+		work[id] = w
+	}
+	for t in tasks {
+		terminal := t.state == .Done || t.state == .Cancelled
+		note(&work, last_attempt_holder(svc, t), terminal)
+		reviews, rerr := iface.taskchain_list_reviews_by_task(svc.repo, t.task_id, t.owner_user_id)
+		if rerr.code != .None do return work, false
+		for r in reviews do if r.reviewer_kind == "agent" do note(&work, r.reviewer_instance_id, terminal)
+	}
+	return work, true
+}
+
+// instance_has_open_work: true when the instance is still involved in an
+// unfinished task of its chain (or the read failed — never stop on doubt).
+instance_has_open_work :: proc(svc: ^Service, chain: domain.Task_Chain, instance_id: string) -> bool {
+	work, ok := chain_instance_work(svc, chain)
+	if !ok do return true
+	return work[instance_id].open
+}
+
+// stop_finished_instances_in_uow stops every live, lease-free, non-coordinator
+// fleet instance of the chain whose tasks are all done or cancelled. Runs at
+// the end of after_chain_change, after the matcher, so an instance the matcher
+// just re-granted holds a lease and is kept.
+stop_finished_instances_in_uow :: proc(svc: ^Service, u: ^Uow, chain: domain.Task_Chain) {
+	if svc.agents == nil || u == nil do return
+	insts, ierr := iface.agent_list_instances_by_chain(svc.agents, chain.owner_user_id, string(chain.chain_id))
+	if ierr.code != .None do return
+	candidates := make([dynamic]domain.Agent_Instance, context.temp_allocator)
+	for inst in insts {
+		if !instance_is_live(inst) && !instance_is_pending(inst) do continue
+		if is_coordinator(svc, chain, inst.agent_instance_id) do continue
+		if _, held, _ := iface.taskchain_get_lease_by_holder(svc.repo, inst.agent_instance_id); held do continue
+		if effect_has_stop(u, inst.bridge_id, string(chain.chain_id), inst.agent_instance_id) do continue
+		if !instance_is_fleet_member(svc, chain, inst) do continue
+		append(&candidates, inst)
+	}
+	if len(candidates) == 0 do return
+	work, ok := chain_instance_work(svc, chain)
+	if !ok do return
+	for inst in candidates {
+		w := work[inst.agent_instance_id]
+		if !w.finished || w.open do continue
+		// A reviewer whose agent still owes a review the matcher could not place
+		// (e.g. its bridge was offline) stays under the idle TTL (REQ-TV2-3a).
+		if agent_owes_review_in_chain(svc, chain.chain_id, chain.owner_user_id, inst.agent_id) do continue
+		effect_stop(u, inst.bridge_id, string(chain.chain_id), inst.agent_instance_id)
+	}
+}
+
 // expire_lease_in_uow ends a lease the holder did not release: TTL, hard cap,
 // idle, instance lost, grant unconfirmed, replaced, dep_added, chain closed.
 // Work expiries are what the budget counts (fold rule); review expiries just
-// free the reviewer. The holder is stopped unless it is already gone.
+// free the reviewer. The holder is stopped unless it is already gone or the
+// reason keeps it running (expiry_stops_holder).
 // Result: Gone = the lease row no longer exists (someone released it first —
 // the timer-vs-verb race, a no-op for the caller), Failed = a write failed and
 // the caller must ROLL BACK (review S2: never commit "lease gone, no event").
@@ -300,9 +408,12 @@ expire_lease_in_uow :: proc(svc: ^Service, u: ^Uow, lease: domain.Task_Lease, re
 	now := platform.clock_now(svc.clock)
 	mark_instance_idle(svc, u, lease.holder_instance_id, now)
 	if coordinator do return .Expired // never stopped, may re-pull at once (no recent-expiry window)
-	note_recent_expiry(svc, lease.holder_instance_id, to_ms(now))
+	stops := expiry_stops_holder(reason)
+	// A holder that keeps its process may pull again at once; only a holder
+	// being stopped is refused an inline grant from its old process.
+	if stops do note_recent_expiry(svc, lease.holder_instance_id, to_ms(now))
 	if inst, iok, _ := iface.agent_get_instance(svc.agents, lease.holder_instance_id); iok {
-		if reason != EXPIRE_INSTANCE_LOST && (instance_is_live(inst) || instance_is_pending(inst)) {
+		if stops && reason != EXPIRE_INSTANCE_LOST && (instance_is_live(inst) || instance_is_pending(inst)) {
 			effect_stop(u, inst.bridge_id, string(task.chain_id), inst.agent_instance_id)
 		}
 		arm_idle_ttl(svc, inst.agent_instance_id, fleet_idle_ttl(svc, task.chain_id, task.owner_user_id, inst.agent_id), now)
@@ -627,6 +738,8 @@ on_bridge_hello :: proc(svc: ^Service, bridge_id: string, active_instance_ids: [
 		if chain.kind != domain.CHAIN_KIND_MIXED_WORK do continue
 		if is_coordinator(svc, chain, id) do continue
 		if !instance_is_fleet_member(svc, chain, inst) do continue
+		// Waiting for review, blocked, or between attempts: keep it (T8).
+		if instance_has_open_work(svc, chain, id) do continue
 		effect_stop(&u, inst.bridge_id, inst.chain_id, id)
 	}
 	ok_all := true

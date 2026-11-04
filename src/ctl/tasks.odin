@@ -185,9 +185,10 @@ resolve_task_id :: proc(transport: Ctl_Transport, args: []string) -> string {
 
 print_task_chains_help :: proc(action: string) {
 	_ = action
-	fmt.println("usage: ham-ctl task-chains <list|coordinated|create|show|update|members|fleet|directory|add-agent|publish|graph|depend|remove-dependency|scope|complete|reopen|archive|unarchive|pin|unpin>")
+	fmt.println("usage: ham-ctl task-chains <list|coordinated|create|show|update|members|fleet|token-usage|directory|add-agent|publish|graph|depend|remove-dependency|scope|complete|reopen|archive|unarchive|pin|unpin>")
 	fmt.println("  coordinated [--agent-id <instance_id>]  list chains an agent coordinates (default: your own instance)")
 	fmt.println("  fleet <list|set>                        manage chain fleet capacities")
+	fmt.println("  token-usage [<chain-id>]                per-agent + chain total token usage (JSON)")
     fmt.println("  graph [<chain-id>]                     read dependencies (with ids), scope and current work_revision")
     fmt.println("  depend [<chain-id>] --item task:ID|workflow_run:ID --on task:ID|workflow_run:ID")
     fmt.println("  remove-dependency [<chain-id>] --dependency ID --reason TEXT")
@@ -196,6 +197,19 @@ print_task_chains_help :: proc(action: string) {
     fmt.println("  [<chain-id>] may also be given as --chain ID; graph/depend/remove-dependency/scope default to your chain.")
     fmt.println("  Same verbs and flags in agent mode (`ham-ctl task-chain --help`); Hub enforces owner/coordinator.")
     fmt.println("All chains are mixed_work. Completing a batch does not complete the chain.")
+}
+
+// ctl_task_chain_token_usage: `task-chain token-usage [<chain-id>]` (T10) prints
+// the hub's per-agent + chain-total token usage (GET .../token-usage) as JSON.
+// The chain defaults to --chain, then (agent mode) the caller's own chain.
+ctl_task_chain_token_usage :: proc(transport: Ctl_Transport, tokens: []string, args: []string) {
+	chain_id := pos(tokens, 0)
+	if chain_id == "" do chain_id = resolve_chain_id(transport, args)
+	if chain_id == "" {
+		fmt.println("usage: ham-ctl task-chain token-usage <chain-id>")
+		os.exit(1)
+	}
+	ctl_tasks_request(transport, {method = .GET, path = ctl_api("task-chains", chain_id, "token-usage")})
 }
 
 ctl_task_chains_fleet_command :: proc(transport: Ctl_Transport, tokens: []string, args: []string) {
@@ -292,6 +306,11 @@ ctl_task_chains_command :: proc(cmd: []string, args: []string) {
 
 	if action == "fleet" || action == "fleets" {
 		ctl_task_chains_fleet_command(transport, cmd[idx + 1:], args)
+		return
+	}
+
+	if action == "token-usage" || action == "usage" {
+		ctl_task_chain_token_usage(transport, cmd[idx + 1:], args)
 		return
 	}
 

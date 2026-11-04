@@ -113,6 +113,9 @@ ham-ctl task-chain directory remove dir_18d7a123bc45de67
 ham-ctl task-chain show chain_18d711c5384a0119
 ```
 
+### Token usage (`task-chain token-usage`)
+- `task-chain token-usage [<chain-id>]` — per-agent (with its instances) and chain-total token usage, JSON (defaults to your chain). Each `lifetime` is `{total_tokens, context_tokens, est_tool_tokens, output_tokens, runs}`: counted runs (added at each hub stop/restart) plus the latest run when not counted yet; `total_tokens` = context (sum of runs) + output. An agent's `context` is the highest current % of window among its live instances. `has_data:false` when nothing was reported. A context figure is the provider's (`context_source` = its usage source) or, when the provider reports none, an estimate (`context_source:"estimate"`, `estimated_context_tokens` = tool-traffic tokens × 1.5; `context_tokens` stays provider-only). `usage_supported:false` means the provider cannot report context; absent means unknown. `warn_pct` / `rollover_pct` come from the bridge's shipped config, per row.
+
 ### Fleet management (`task-chain fleet`)
 Configure and inspect agent concurrency caps and placement (fleets) for a task chain. Fleets allow tasks to be assigned to durable agent types (`agt_...`) instead of individual instances (`inst_...`). Heimdall dynamically routes or provisions worker and reviewer instances to satisfy fleet capacity and placement rules.
 

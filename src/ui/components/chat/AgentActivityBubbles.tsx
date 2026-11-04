@@ -18,19 +18,9 @@ import { replaceVaultTokens } from '../../utils/vaultCrypto.ts';
 import WorkingRings from './WorkingRings';
 import { agentActionLine } from './agentActionLabels';
 
-// Push-only, ephemeral activity row rendered just above the chat composer, for the
-// CURRENTLY-VIEWED instance only. It shows the agent's latest ham-ctl action the way
-// a tool call is shown (LiveToolActivity): the working rings, a verb in the accent
-// colour and the rest of the hub's id-free summary (composed hub-side in P1,
-// buffered in the transient slice in P2; verbs in agentActionLabels.ts).
-//
-// Animation: one line; each new action slides up in place of the previous one
-// (keyed by action id), and the last one collapses out when its lifetime ends.
-// Under prefers-reduced-motion it is a plain fade (see styles.css). Lifetime is
-// owned HERE (not redux): each action lives BUBBLE_LIFETIME_MS. On mount/open (Q2:
-// open-conversation replay ONLY) we replay buffered actions <5min old, staggered at
-// REPLAY_STAGGER_MS, "as if just arrived".
-
+// Unified conversation-tail status for the currently viewed instance. Action labels
+// retain their replay, freshness and vault handling; Working… fills the gaps while
+// the agent is busy. The logo stays mounted while only the status text transitions.
 const BUBBLE_LIFETIME_MS = 4000;
 const REPLAY_STAGGER_MS = 400;
 // Matches the CSS .agent-action-exit duration — how long an exiting row stays
@@ -83,14 +73,13 @@ function ActivityBubbleItem({ bubble }: { bubble: VisibleBubble }) {
       title={summary}
       className={`flex w-full min-w-0 items-center gap-2 overflow-hidden whitespace-nowrap text-xs ${bubble.phase === 'exiting' ? 'agent-action-exit' : 'agent-action-in'}`}
     >
-      <WorkingRings size={16} />
       <span className="shrink-0 font-medium text-accent">{line.verb}</span>
       {line.detail ? <span className="agent-action-detail min-w-0 flex-1 truncate text-muted">{line.detail}</span> : null}
     </div>
   );
 }
 
-export default function AgentActivityBubbles({ instanceId }: { instanceId: string }) {
+export default function AgentActivityBubbles({ instanceId, isWorking = false }: { instanceId: string; isWorking?: boolean }) {
   const dispatch = useDispatch();
   const buffer = useSelector((state: any) => selectAgentActivityBuffer(state, instanceId));
   // Ids already surfaced for this instance, persisted in redux so it survives
@@ -180,15 +169,22 @@ export default function AgentActivityBubbles({ instanceId }: { instanceId: strin
 
   // One line: the newest action still showing, else the last one on its way out.
   const current = visible.find((b) => b.phase !== 'exiting') || visible[0];
-  if (!current) return null;
+  if (!current && !isWorking) return null;
 
   return (
     <div
       data-debug-id="conversation-activity-bubbles"
-      aria-hidden="true"
-      className="mb-1 flex h-6 items-center overflow-hidden px-1"
+      role="status"
+      aria-live="polite"
+      aria-atomic="true"
+      className="msg flex min-w-0 max-w-full items-center gap-2 overflow-hidden py-1 text-xs"
     >
-      <ActivityBubbleItem key={current.id} bubble={current} />
+      <WorkingRings size={18} />
+      {current ? (
+        <ActivityBubbleItem key={current.id} bubble={current} />
+      ) : (
+        <span key="working" className="agent-action-in text-muted">Working…</span>
+      )}
     </div>
   );
 }

@@ -84,7 +84,8 @@ publish_conversation_changed :: proc(bus: ^events.User_Event_Bus, c: domain.Chat
 //   resource_changed resource=agent_instance change=<caller's change>
 //       summary = instance_changed_summary_json (status fields + display_name,
 //       bridge_id, provider, model, configuration_revision, run_count,
-//       started_at, current_task_id, current_task_role, chain_id, updated_at)
+//       started_at, current_task_id, current_task_role, chain_id, updated_at,
+//       token_usage?, token_usage_updated_at?, token_totals?, token_changed?)
 reconfiguration_summary_json :: proc(op: domain.Instance_Reconfiguration) -> string {
 	b := strings.builder_make()
 	strings.write_string(&b, "{\"reconfiguration_id\":\"")
@@ -104,7 +105,7 @@ publish_reconfiguration_changed :: proc(bus: ^events.User_Event_Bus, op: domain.
 	events.publish_resource_changed(bus, op.owner_user_id, "agent_instance_reconfiguration", op.agent_instance_id, change, summary)
 }
 
-instance_changed_summary_json :: proc(inst: domain.Agent_Instance) -> string {
+instance_changed_summary_json :: proc(inst: domain.Agent_Instance, token_changed := false) -> string {
 	b := strings.builder_make()
 	strings.write_string(&b, "{\"runtime_status\":\""); write_handler_json_string(&b, inst.runtime_status)
 	strings.write_string(&b, "\",\"startup_status\":\""); write_handler_json_string(&b, inst.startup_status)
@@ -121,15 +122,20 @@ instance_changed_summary_json :: proc(inst: domain.Agent_Instance) -> string {
 	strings.write_string(&b, "\",\"updated_at\":\""); write_handler_json_string(&b, inst.updated_at)
 	strings.write_string(&b, "\"")
 	write_last_error_json(&b, inst.last_error_json)
+	// Token snapshot + lifetime totals (T3r) in the API's shape, so clients patch
+	// their instance caches instead of refetching (T14). token_changed marks a
+	// status_changed event that also carries a token change (coalesced frame).
+	write_agent_instance_token_json(&b, inst)
+	if token_changed do strings.write_string(&b, ",\"token_changed\":true")
 	strings.write_string(&b, "}")
 	return strings.to_string(b)
 }
 
 // publish_instance_changed is the one helper for agent_instance hints: callers
 // pass the post-write row (re-read it when the writer does not return one).
-publish_instance_changed :: proc(bus: ^events.User_Event_Bus, inst: domain.Agent_Instance, change: string) {
+publish_instance_changed :: proc(bus: ^events.User_Event_Bus, inst: domain.Agent_Instance, change: string, token_changed := false) {
 	if bus == nil || inst.owner_user_id == "" || inst.agent_instance_id == "" do return
-	summary := instance_changed_summary_json(inst)
+	summary := instance_changed_summary_json(inst, token_changed)
 	defer delete(summary)
 	events.publish_resource_changed(bus, string(inst.owner_user_id), "agent_instance", inst.agent_instance_id, change, summary)
 }

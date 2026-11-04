@@ -72,7 +72,11 @@ mcp_chain_create_test :: proc(t:^testing.T,g:^App_Graph,h:^http.MCP_Control_Hand
 	i,instance_found,_:=iface.agent_get_instance(&g.repos.agents,id)
 	testing.expect(t,instance_found && i.agent_id=="agt_placement" && i.chain_id==string(chain_id) && id!="inst_placement_a" && id!="inst_placement_b")
 	conv,conversation_found,_:=iface.content_get_conversation(&g.repos.content,i.conversation_id)
-	testing.expect(t,conversation_found && conv.title==chain.title && i.display_name==chain.title)
+	// Native naming: the coordinator keeps "<agent name> #<n>" (instance and its
+	// conversation), never the caller's chain title, which stays on the chain.
+	testing.expectf(t,conversation_found && strings.has_prefix(i.display_name,"Synthetic placement #") && i.display_name!=chain.title && conv.title==i.display_name,"names: instance=%q conversation=%q",i.display_name,conv.title)
+	first_n:=mcp_chain_test_counter(i.display_name)
+	testing.expect(t,first_n>0)
 	members,_:=iface.taskchain_list_members_by_chain(&g.repos.taskchains,chain_id,owner)
 	testing.expect(t,len(members)==1 && members[0].role=="coordinator" && members[0].agent_id=="agt_placement" && members[0].agent_instance_id==id)
 	testing.expect(t,len(sink.commands)==1 && !sink.inside_transaction && strings.contains(sink.commands[0].body_json,id))
@@ -81,6 +85,9 @@ mcp_chain_create_test :: proc(t:^testing.T,g:^App_Graph,h:^http.MCP_Control_Hand
 	delete_key(&args,"provider");delete_key(&args,"provider_profile");delete_key(&args,"model")
 	default_result:=mcp_task_test_output(t,mcp_task_test_call(h,headers,"chains.create",args));if default_result==nil do return
 	testing.expect(t,default_result["coordinator_agent_instance_id"].(json.String)!=json.String(id) && len(sink.commands)==2)
+	// The per-agent counter advances for each fresh coordinator.
+	second,second_found,_:=iface.agent_get_instance(&g.repos.agents,string(default_result["coordinator_agent_instance_id"].(json.String)))
+	testing.expectf(t,second_found && mcp_chain_test_counter(second.display_name)==first_n+1,"counter: %q after #%d",second.display_name,first_n)
 	// Ambiguous dispatch returns committed IDs; it must not roll back or retry.
 	sink.fail=true
 	response:=mcp_task_test_call(h,headers,"chains.create",args)
@@ -135,7 +142,7 @@ mcp_chain_create_project_test :: proc(t:^testing.T,g:^App_Graph,h:^http.MCP_Cont
 	i,found,_:=iface.agent_get_instance(&g.repos.agents,inst_id)
 	testing.expect(t,found && i.project_id=="proj_mcp_owned" && i.project_path=="/srv/owned" && i.chain_id==chain_id)
 	conv,conv_found,_:=iface.content_get_conversation(&g.repos.content,i.conversation_id)
-	testing.expect(t,conv_found && conv.project_id=="proj_mcp_owned")
+	testing.expect(t,conv_found && conv.project_id=="proj_mcp_owned" && strings.has_prefix(i.display_name,"Synthetic placement #") && conv.title==i.display_name)
 	testing.expect(t,len(sink.commands)==commands_before+1 && strings.contains(sink.commands[len(sink.commands)-1].body_json,"/srv/owned"))
 	// Read visibility through the same projection chains.get/list relay.
 	got,code:=mcp.control_read(&h.control,view.owner,"chains.get",{chain_id=chain_id})
@@ -154,3 +161,9 @@ mcp_chain_create_project_test :: proc(t:^testing.T,g:^App_Graph,h:^http.MCP_Cont
 	testing.expect(t,allowed)
 }
 mcp_chain_test_str :: proc(row:json.Object,key:string)->string {s,_:=row[key].(json.String);return string(s)}
+mcp_chain_test_counter :: proc(name:string)->int {
+	hash:=strings.last_index(name," #");if hash<0 do return -1
+	n:=0
+	for c in name[hash+2:] {if c<'0' || c>'9' do return -1;n=n*10+int(c-'0')}
+	return n
+}

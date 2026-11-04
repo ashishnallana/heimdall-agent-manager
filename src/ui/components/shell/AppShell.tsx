@@ -84,7 +84,7 @@ import {
   setBulkChainTitles,
   selectSearchChains,
 } from '../../store/searchTitleSlice';
-import { isVaultArmored } from '../../utils/vaultContent';
+import { isVaultArmored, maskVaultArmored } from '../../utils/vaultContent';
 import { VaultText } from '../vault/VaultText';
 import { batchDecryptTitles, type RawSearchItemInput } from '../../utils/vaultSearch';
 import { useFetchExperimentsQuery } from '../../api/endpoints/settings';
@@ -547,7 +547,8 @@ function looksLikeInternalId(value: string): boolean {
 }
 
 function displayAgentName(agentId: string, name?: string): string {
-  const trimmed = String(name || '').trim();
+  // Never paint ciphertext: a sealed name the vault could not open ("<token> #3") is masked.
+  const trimmed = maskVaultArmored(String(name || '').trim());
   if (trimmed && trimmed !== agentId && !looksLikeInternalId(trimmed)) return trimmed;
   return 'Unnamed agent';
 }
@@ -1898,22 +1899,9 @@ function AuthenticatedShell({ user }: { user: AuthUser }) {
     };
   }, []);
 
-  // Clamp any rogue window scroll back to the origin. The app owns the full viewport
-  // (body is position: fixed), so a non-zero window offset can only come from a browser
-  // heuristic -- e.g. mobile WebKit scrolling the document to reveal a focused element or
-  // a control under the keyboard accessory bar -- and it permanently hides the top chrome.
-  useEffect(() => {
-    const clampWindowScroll = () => {
-      if (window.scrollY !== 0 || window.scrollX !== 0) {
-        window.scrollTo(0, 0);
-      }
-    };
-    window.addEventListener('scroll', clampWindowScroll, { passive: true });
-    clampWindowScroll();
-    return () => {
-      window.removeEventListener('scroll', clampWindowScroll);
-    };
-  }, []);
+  // No window-scroll clamp here. The body is position: fixed and the shell is placed at the
+  // visible region's origin (appViewportHeight.ts), so a WebKit reveal pan cannot hide the top
+  // chrome. Resetting window scroll would fight that pan and is a prohibited scroll reset.
 
   const actionsAccess = useActionsAccess();
   const primary = filterActionsNavEntries(NAV_ROUTES.filter((item) => item.group === 'primary'), actionsAccess);

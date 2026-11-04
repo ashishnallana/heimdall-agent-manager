@@ -20,7 +20,7 @@ codex plugin add heimdall@heimdall-codex
 
 `codex plugin marketplace upgrade <name>` applies to Git marketplaces; the tested local marketplace rejects that command.
 
-The package deliberately uses `.codex-plugin/plugin.json`. In the tested release, adding a portable root `plugin.json` hid all bundled hooks, including with the official `extensions["com.openai"].hooks` shape. Native inventory found all ten hooks only with the compatibility manifest alone. Do not add a root manifest without repeating that release gate. The Claude marketplace is separate and unchanged.
+The package deliberately uses `.codex-plugin/plugin.json`. In the tested release, adding a portable root `plugin.json` hid all bundled hooks, including with the official `extensions["com.openai"].hooks` shape. Native inventory found all ten hooks (`PreCompact`/`PostCompact` were subscribed later; repeat the inventory gate for them) only with the compatibility manifest alone. Do not add a root manifest without repeating that release gate. The Claude marketplace is separate and unchanged.
 
 | Signal | Verified boundary |
 | --- | --- |
@@ -34,7 +34,7 @@ Bash post callbacks supply stdout without an exit code, including for exit 7. Th
 
 Patch creates contain the new file text. Updates/moves provide explicitly partial native snippets without fabricated line offsets. Deletes provide operation metadata because no deleted preimage is available. No file snapshots are read from disk. Shell/MCP changes are not inferred.
 
-Manual compaction emitted pre/post compact callbacks but no `SessionStart(source=compact)` in the observed run. Generic notifications and a native tool-failure event are unavailable. Compaction alone does not imply an activity transition.
+Manual compaction emitted pre/post compact callbacks but no `SessionStart(source=compact)` in the observed run. Generic notifications and a native tool-failure event are unavailable. Compaction alone does not imply an activity transition: `PreCompact`/`PostCompact` emit a `compaction` event `{phase:"pre"|"post", trigger, model}` that only resets Heimdall's context accounting.
 
 Permission timeout, disconnect, cancellation, and no decision retain the native prompt; they never auto-allow. The permission hook budget is 330 seconds over the relay's 300-second maximum. Interrupt and session-end hooks use three seconds.
 

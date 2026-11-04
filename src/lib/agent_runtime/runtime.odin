@@ -25,6 +25,9 @@ Agent_Profile :: struct {
 	extra_args: []string,
 	startup_detection: cfg_lib.Startup_Detection_Config,
 	activity_detection: cfg_lib.Activity_Detection_Config,
+	// Launch-scoped line appended after the rendered prompt (bridge context
+	// rollover: tells a restarted agent to read its previous_context first).
+	starter_prompt_suffix: string,
 }
 
 
@@ -92,5 +95,8 @@ render_starter_prompt_for_agent :: proc(profile: Agent_Profile, daemon_url, agen
 	out, _ = strings.replace_all(out, "ham-ctl --token ", CTL_SHIM_INVOCATION + " --token ")
 	out, _ = strings.replace_all(out, "ham-ctl start-success", CTL_SHIM_INVOCATION + " agent start-success")
 	out = strings.concatenate({out, "\n\nHeimdall runtime: use `" + CTL_SHIM_INVOCATION + "` for CLI actions. Your agent token is `", agent_token, "` and your agent instance id is `", agent_instance_id, "`; they are also available in HEIMDALL_AGENT_TOKEN and HEIMDALL_AGENT_INSTANCE_ID."})
+	if suffix := strings.trim_space(profile.starter_prompt_suffix); suffix != "" {
+		out = strings.concatenate({out, "\n\n", suffix})
+	}
 	return out
 }

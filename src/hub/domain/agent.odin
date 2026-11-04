@@ -137,6 +137,18 @@ Agent_Instance :: struct {
 	extension_version: string,
 	extension_capabilities: string,
 	extension_last_seen_at: string,
+	// Token usage (T3r, migration 189). token_usage_json is the latest
+	// canonical bridge snapshot (agent_token_usage.odin), "" when none.
+	// has_token_totals is false while the token_total_* columns are NULL (no
+	// run counted yet); token_totals_last_run is the newest run_count added.
+	token_usage_json: string,
+	token_usage_updated_at: string,
+	has_token_totals: bool,
+	token_total_context_tokens: i64,
+	token_total_est_tool_tokens: i64,
+	token_total_output_tokens: i64,
+	token_runs_counted: int,
+	token_totals_last_run: int,
 	// permission_mode is this instance's override of the agent's mode: "" inherits
 	// (agents.permission_mode), "yolo" / "ask" override. agent_permission_mode is
 	// the owning agent's mode, read alongside the row. Both are always static
@@ -202,6 +214,8 @@ agent_instance_destroy :: proc(inst: ^Agent_Instance) {
 	if len(inst.extension_version) > 0 do delete(inst.extension_version)
 	if len(inst.extension_capabilities) > 0 do delete(inst.extension_capabilities)
 	if len(inst.extension_last_seen_at) > 0 do delete(inst.extension_last_seen_at)
+	if len(inst.token_usage_json) > 0 do delete(inst.token_usage_json)
+	if len(inst.token_usage_updated_at) > 0 do delete(inst.token_usage_updated_at)
 	inst^ = {}
 }
 

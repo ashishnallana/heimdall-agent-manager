@@ -6,6 +6,7 @@ package extension
 // shapes follow the hook docs / older Claude releases).
 
 import json "core:encoding/json"
+import "core:slice"
 import "core:strings"
 import "core:testing"
 import contracts "odin_test:contracts"
@@ -56,7 +57,8 @@ test_claude_session_start_maps_hello_and_session :: proc(t: ^testing.T) {
 	if len(evs) != 2 do return
 	testing.expect_value(t, evs[0].ev.kind, contracts.Ext_Event_Kind.Hello)
 	testing.expect_value(t, evs[0].ev.session_id, "cf4b17bd-aa1d-4d65-8f7d-63529dbb8b9f")
-	testing.expect_value(t, len(evs[0].ev.capabilities), 5)
+	testing.expect_value(t, len(evs[0].ev.capabilities), 6)
+	testing.expect(t, slice.contains(evs[0].ev.capabilities[:], "usage"), "claude declares the usage capability")
 	want := CLAUDE_CAPABILITIES
 	for c, i in want do if i < len(evs[0].ev.capabilities) do testing.expect_value(t, evs[0].ev.capabilities[i], c)
 	testing.expect_value(t, evs[1].ev.kind, contracts.Ext_Event_Kind.Session)
@@ -340,7 +342,7 @@ test_claude_permission_request_maps_permission_event :: proc(t: ^testing.T) {
 test_claude_unknown_or_malformed_hooks_map_to_nothing :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	defer free_all(context.temp_allocator)
-	m, err := claude_map_hook(`{"hook_event_name":"PreCompact","session_id":"s"}`, TS)
+	m, err := claude_map_hook(`{"hook_event_name":"FutureHook","session_id":"s"}`, TS)
 	testing.expect_value(t, err, Claude_Error.None)
 	testing.expect_value(t, len(m.events), 0)
 	_, err2 := claude_map_hook(`not json`, TS)
@@ -612,4 +614,80 @@ test_hook_run_auto_approves_ham_ctl_bash_without_bridge :: proc(t: ^testing.T) {
 	fake_reset(`{"ok":true,"data":{"decision":"deny"}}`, true)
 	_ = hook_run("claude", raw, ENV, fake_send)
 	testing.expect_value(t, fake_calls, 1)
+}
+
+@(test)
+test_claude_pre_compact_maps_to_compaction :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	defer free_all(context.temp_allocator)
+	raw := #load("testdata/claude/pre_compact_manual.json", string)
+	m, err := claude_map_hook(raw, TS)
+	testing.expect_value(t, err, Claude_Error.None)
+	testing.expect_value(t, m.hook, Claude_Hook.Pre_Compact)
+	testing.expect(t, !m.is_permission)
+	testing.expect_value(t, len(m.events), 1)
+	if len(m.events) != 1 do return
+	ev, perr := contracts.ext_parse_event(m.events[0])
+	testing.expect_value(t, perr, contracts.Ext_Error.None)
+	testing.expect_value(t, ev.kind, contracts.Ext_Event_Kind.Compaction)
+	testing.expect_value(t, ev.provider, "claude")
+	testing.expect_value(t, ev.session_id, "f2e44f82-9d3d-4735-9114-708882c87b12")
+	testing.expect_value(t, ev.compaction_phase, "pre")
+	testing.expect_value(t, ev.compaction_trigger, "manual")
+	testing.expect(t, !ev.has_usage && !ev.has_metrics)
+	// The user's /compact instructions are prompt text and never leave the hook.
+	testing.expect(t, !strings.contains(m.events[0], "custom_instructions"))
+	testing.expect(t, !strings.contains(m.events[0], "SECRET_NOTE"))
+	_, activity := contracts.ext_activity_for_event(ev)
+	testing.expect(t, !activity, "compaction is not an activity transition")
+
+	auto_m, _ := claude_map_hook(`{"hook_event_name":"PreCompact","session_id":"s","trigger":"auto"}`, TS)
+	testing.expect_value(t, len(auto_m.events), 1)
+	if len(auto_m.events) == 1 {
+		auto_ev, _ := contracts.ext_parse_event(auto_m.events[0])
+		testing.expect_value(t, auto_ev.compaction_trigger, "auto")
+	}
+
+	// Delivered as a bare event; stdout stays empty whether or not the bridge answers.
+	fake_reset(`{"ok":true,"data":{"accepted":1}}`, true)
+	testing.expect_value(t, hook_run("claude", raw, ENV, fake_send), "")
+	testing.expect_value(t, fake_calls, 1)
+	testing.expect_value(t, fake_method, "agent.extension.event")
+	testing.expect(t, strings.contains(fake_params, `"event":"compaction"`))
+	fake_reset("", false)
+	testing.expect_value(t, hook_run("claude", raw, ENV, fake_send), "")
+}
+
+@(test)
+test_contract_compaction_parse_and_unknown_kinds :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	defer free_all(context.temp_allocator)
+	ev, err := contracts.ext_parse_event(`{"schema":"ham.ext.v1","provider":"codex","event":"compaction","session_id":"s","payload":{"phase":"post","trigger":"auto","model":"m"}}`)
+	testing.expect_value(t, err, contracts.Ext_Error.None)
+	testing.expect_value(t, ev.kind, contracts.Ext_Event_Kind.Compaction)
+	testing.expect_value(t, ev.compaction_phase, "post")
+	testing.expect_value(t, ev.compaction_trigger, "auto")
+	testing.expect_value(t, contracts.ext_event_kind_name(ev.kind), "compaction")
+	k, ok := contracts.ext_event_kind_from_string("compaction")
+	testing.expect(t, ok && k == .Compaction)
+
+	// Missing payload still parses; fields stay empty.
+	bare, berr := contracts.ext_parse_event(`{"schema":"ham.ext.v1","provider":"claude","event":"compaction"}`)
+	testing.expect_value(t, berr, contracts.Ext_Error.None)
+	testing.expect_value(t, bare.compaction_phase, "")
+	testing.expect_value(t, bare.compaction_trigger, "")
+
+	// Unknown kinds are rejected per event, never a crash, and batches keep the rest.
+	_, uerr := contracts.ext_parse_event(`{"schema":"ham.ext.v1","provider":"claude","event":"compaction.v2"}`)
+	testing.expect_value(t, uerr, contracts.Ext_Error.Unknown_Event)
+	raws, serr := contracts.ext_split_events(`{"events":[{"schema":"ham.ext.v1","provider":"claude","event":"future.kind"},{"schema":"ham.ext.v1","provider":"claude","event":"compaction","payload":{"phase":"pre"}}]}`)
+	testing.expect_value(t, serr, contracts.Ext_Error.None)
+	testing.expect_value(t, len(raws), 2)
+	if len(raws) == 2 {
+		_, e0 := contracts.ext_parse_event(raws[0])
+		e1v, e1 := contracts.ext_parse_event(raws[1])
+		testing.expect_value(t, e0, contracts.Ext_Error.Unknown_Event)
+		testing.expect_value(t, e1, contracts.Ext_Error.None)
+		testing.expect_value(t, e1v.compaction_phase, "pre")
+	}
 }

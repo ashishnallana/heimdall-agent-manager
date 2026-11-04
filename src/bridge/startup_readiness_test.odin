@@ -71,6 +71,7 @@ startup_test_event :: proc(event: string, extra := "") -> string {
 
 @(test)
 startup_activation_is_catalog_driven :: proc(t: ^testing.T) {
+	sync.mutex_lock(&bridge_test_config_mutex); defer sync.mutex_unlock(&bridge_test_config_mutex)
 	context.allocator = context.temp_allocator
 	provider: Bridge_Catalog_Provider
 	err := json.unmarshal_string(`{"provider":"future-provider","base_args":["--load","/repo/extensions/native"],"starter_prompt":"First, run: {ctl_bin} agent start-success. Then read AGENTS.md for context.","extension":{"load_args":["--load"],"load_path_suffix":"extensions/native"}}`, &provider)
@@ -89,6 +90,7 @@ startup_activation_is_catalog_driven :: proc(t: ^testing.T) {
 
 @(test)
 startup_activation_rejects_unrelated_or_partial_arguments :: proc(t: ^testing.T) {
+	sync.mutex_lock(&bridge_test_config_mutex); defer sync.mutex_unlock(&bridge_test_config_mutex)
 	profile := Bridge_Provider_Profile{extension = Bridge_Catalog_Extension{load_args = []string{"--load"}, load_path_suffix = "extensions/native"}}
 	cases := [][]string{
 		{"--loader", "/repo/extensions/native"}, {"prefix--load", "/repo/extensions/native"},
@@ -107,6 +109,7 @@ startup_activation_rejects_unrelated_or_partial_arguments :: proc(t: ^testing.T)
 
 @(test)
 startup_profile_reaches_pty_argv_and_launch_fence :: proc(t: ^testing.T) {
+	sync.mutex_lock(&bridge_test_config_mutex); defer sync.mutex_unlock(&bridge_test_config_mutex)
 	context.allocator = context.temp_allocator
 	profile := Bridge_Provider_Profile{
 		name = "startup-profile", command = []string{"/fake/provider"}, model_flag = "--model",
@@ -135,6 +138,7 @@ startup_profile_reaches_pty_argv_and_launch_fence :: proc(t: ^testing.T) {
 
 @(test)
 startup_wake_launch_preserves_generation_and_legacy_default :: proc(t: ^testing.T) {
+	sync.mutex_lock(&bridge_test_config_mutex); defer sync.mutex_unlock(&bridge_test_config_mutex)
 	context.allocator = context.temp_allocator
 	command := bridge_wake_launch_command_json("cmd", "inst", "task", "worker", "future", "model", "agent", "name", "chain", "title", "coordinator", "project", "/project", run_count = 4)
 	count, found := bridge_provider_json_extract_int(command, "run_count")
@@ -146,6 +150,7 @@ startup_wake_launch_preserves_generation_and_legacy_default :: proc(t: ^testing.
 
 @(test)
 startup_only_main_hello_or_session_start :: proc(t: ^testing.T) {
+	sync.mutex_lock(&bridge_test_config_mutex); defer sync.mutex_unlock(&bridge_test_config_mutex)
 	cases := []struct {event, extra: string, want: bool}{
 		{"hello", "", true}, {"session", `,"payload":{"phase":"start"}`, true},
 		{"session", `,"payload":{"phase":"end"}`, false}, {"session", "", false},
@@ -307,6 +312,7 @@ startup_watchdog_still_expires_after_fallback :: proc(t: ^testing.T) {
 
 @(test)
 startup_duplicate_signals_cannot_reset_exhausted_launch :: proc(t: ^testing.T) {
+    sync.mutex_lock(&bridge_test_config_mutex); defer sync.mutex_unlock(&bridge_test_config_mutex)
     rec := startup_test_launch("startup_finite", "startup_finite")
     accepted, _ := bridge_startup_accept(rec, 1001)
     testing.expect(t, accepted)
@@ -338,6 +344,7 @@ startup_stop_before_response :: proc(rec: Bridge_Local_Agent_Token_Record, timeo
 }
 @(test)
 startup_typed_terminal_rejection_does_not_retry_and_late_stop_does_not_complete :: proc(t: ^testing.T) {
+    sync.mutex_lock(&bridge_test_config_mutex); defer sync.mutex_unlock(&bridge_test_config_mutex)
     context.allocator = runtime.heap_allocator()
     for class in ([]contracts.Bridge_Error_Class{.fatal, .recoverable}) {
         rec := startup_test_launch("typed-startup", "typed-startup")

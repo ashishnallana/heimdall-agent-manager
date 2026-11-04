@@ -5,6 +5,10 @@ Supersedes `docs/fsm_task_chain_engine.md` (never implemented) and the level‑t
 
 > **Not backward compatible.** The task API, ctl verbs, routes and UI hooks of the v1 task system are removed, not shimmed. Hub, bridge, `ham-ctl` and UI roll together.
 
+> **Changelog 2026‑11‑03 — context rollover follow‑up** (chain `chain_18e48415cb548531`, PR #9). Rollover no longer depends on a provider `usage` block or on extension events: a tool‑traffic estimate (×1.5, from `tool.end` metrics, e.g. Antigravity) drives `context_pct` until a provider figure arrives, idle seen by `pane_diff` advances an already‑pending rollover (Pi, with no usage or metrics source, still has no automatic threshold detection), the `usage` hello capability separates "unsupported" from "no signal yet", a provider‑reported window overrides the shipped map (with a >10 % mismatch warning), warn/rollover thresholds live only in `src/bridge/context_windows.json`, and the shipped alias/Pi‑Anthropic windows are a conservative 200K. Details and tests: `docs/transient-extension-signals.md`.
+>
+> **Changelog 2026‑11‑02 — agents live for their task, not per attempt** (chain `chain_18e446e7dfeddbac`, T8). Worker and reviewer agents are no longer stopped or re‑bootstrapped per attempt, lease or review round. Submit, block, review post, a review checkpoint and idle‑grace expiry release the lease and keep the process; only `lease handoff` (the agent asks for a fresh context) still stops it. A wake grant to a **live** instance on the same provider/model keeps its process and generation: the wake entry says `deliver:"nudge"`, the bridge rewrites `TASK.md` and types one line telling the agent to run `ham-ctl lease next`; a stopped or absent instance is still launched. An instance is stopped when every task it worked on (latest work holder, or reviewer) is done or cancelled and it holds no lease, at the end of `after_chain_change`; `idle_ttl` and the bridge‑hello orphan sweep spare instances whose tasks are still open (waiting for review, blocked). Context rollover on the bridge (T6) is the other stop.
+>
 > **Changelog 2026‑10‑25 — configured verification commands removed** (chain `chain_18e1adb88a5d89e9`, REQ‑TV2‑1/2). The brief keys `verify`, `auto_submit` and `require_independent_verify`, the verify‑gated submit (`--skip-verify`, `409 verify_*`), `ham-ctl verify [--independent]`, hub‑written `verify` facets and the independent‑verify gate are gone. For one release the hub and CLI accept and drop the old keys/flags with a `verify_removed` warning, and `ham-ctl verify` is a no‑op stub that prints JSON and never submits. Old `verify` facets stay as read‑only legacy history. Workers now choose and run checks appropriate to the change and report commands and outcomes in the submit summary; review verdicts are the gate and need no command evidence. The sections below describe the current behaviour; milestone rows in §8 are history.
 
 ---
@@ -79,21 +83,22 @@ Process‑wide `sqlite.tx_mutex`; every verb, timer fire and materialisation is 
 | Event | Action |
 |---|---|
 | publish chain/task, create/update on live chain, priority, dep add/remove | `match_chain` (dep added to a leased task → non‑counting expire first) |
-| lease released (submit/block/handoff) or expired | `match_chain`, arm `idle_ttl` |
+| lease released (submit/block/handoff) or expired | `match_chain`, arm `idle_ttl`; the holder keeps its process except on `lease handoff` and on expiries that end it (TTL heartbeat lost, hard cap, replaced, dep added, cancelled, chain closed, user stop, grant unconfirmed) — never on `idle` or `changes_requested` |
+| any chain change (end of `after_chain_change`, after `match_chain`) | `stop[]` every live, lease‑free, non‑coordinator fleet instance whose tasks (latest work holder or reviewer) are all `done|cancelled` |
 | review posted, fleet upserted/deleted, reopen | re‑evaluate gates, `match_chain` |
 | instance `done|cancelled` | workflow: `materialize_ready_stages`; ticket: `start_workflow` hook; both: `match_chain` |
 | `start-success(instance)` | confirm pending lease |
 | `on_instance_terminal` (one chokepoint for every death path) | `expire(instance_lost)` → `match_chain` (skipped while the bridge is offline: TTL decides) |
 | instance idle / busy | arm / cancel `idle_grace` |
-| bridge Online (hello) | re‑send unconfirmed grants; `stop[]` lease‑less fleet workers/reviewers of Active chains **on that bridge**; `match_chain` |
+| bridge Online (hello) | re‑send unconfirmed grants; `stop[]` lease‑less fleet workers/reviewers of Active chains **on that bridge** whose tasks are all done/cancelled; `match_chain` |
 | `chain_closed` | reclaim all leases |
 | hub boot | arm timers from columns; `match_chain` once per Active chain; heal lease‑less in‑progress rows |
 
 ### 3.3 Timers (`Timer_Service{clock, heap, fire_due}`)
-TTL 15 min (any `ham-ctl` call or bridge `busy` push is an implicit heartbeat, throttled to one write/30 s) · hard cap 60 min (not extendable) · `idle_grace` 5 min · `grant_unconfirmed` 180 s (re‑send once, then expire) · `idle_ttl` from the fleet row (stops stranded idle instances) · `ready_unclaimed` 10 min alert · `blocked_on human` 24 h re‑alert · clock‑jump extension only when a jump is detected. Columns are the truth; a fire whose deadline moved is a no‑op; the heap is rebuilt on boot.
+TTL 15 min (any `ham-ctl` call or bridge `busy` push is an implicit heartbeat, throttled to one write/30 s) · hard cap 60 min (not extendable) · `idle_grace` 5 min · `grant_unconfirmed` 180 s (re‑send once, then expire) · `idle_ttl` from the fleet row (stops an idle, lease‑free instance only when its tasks are all done or cancelled — never one waiting for review or blocked) · `ready_unclaimed` 10 min alert · `blocked_on human` 24 h re‑alert · clock‑jump extension only when a jump is detected. Columns are the truth; a fire whose deadline moved is a no‑op; the heap is rebuilt on boot.
 
 ### 3.4 Review gate (M2)
-`needed = fleet rows with role ∈ review_roles − approvals on this attempt`. Done ⇔ `needed = ∅ ∧ no request_changes this attempt ∧ (user approved if required)`. A verdict is the reviewer's judgment; it needs no command evidence. Any `request_changes` → Ready (new attempt, findings carried into `TASK.md`), other review leases expired. `review_rounds ≥ 3` → Backlog · blocked on human (oscillation guard). `review_roles = [] ∧ ¬requires_user_approval` → Done on submit. Author is **stopped** on submit (fresh context on changes).
+`needed = fleet rows with role ∈ review_roles − approvals on this attempt`. Done ⇔ `needed = ∅ ∧ no request_changes this attempt ∧ (user approved if required)`. A verdict is the reviewer's judgment; it needs no command evidence. Any `request_changes` → Ready (new attempt, findings carried into `TASK.md`), other review leases expired. `review_rounds ≥ 3` → Backlog · blocked on human (oscillation guard). `review_roles = [] ∧ ¬requires_user_approval` → Done on submit. The author and the reviewers keep their processes across submit, `request_changes` and re‑review (the matcher prefers the same author instance; a live instance is nudged, not relaunched); both are stopped when the task is done or cancelled and they hold no other lease.
 
 ### 3.5 Submit with reported checks
 Publish needs a non‑empty `goal` and ≥1 `acceptance` item; nothing else. The worker chooses and runs checks appropriate to the change and reports the exact commands and outcomes in `lease submit --summary` (and `--decision`). Nothing is executed or gated on a command. Hard rejects: empty summary, output that fails its contract; everything else truncated with `truncated:true`.
@@ -106,11 +111,11 @@ The agent never sees the chain kind or the workflow definition. Every launch wri
 
 | Verb | Purpose | Status |
 |---|---|---|
-| `ham-ctl lease next` | current lease + pack, or inline grant via the matcher (never wakes the caller; `none` for coordinators; `409 lease_lost` for 5 min after your lease expired) | ✅ M1 |
+| `ham-ctl lease next` | current lease + pack, or inline grant via the matcher (never wakes the caller; `none` for coordinators; `409 lease_lost` for 5 min after an expiry that stops you; not after an idle or `changes_requested` expiry, which keep your process) | ✅ M1 |
 | `ham-ctl lease heartbeat [--note "…"]` | extend TTL (≤ hard cap); note lands in the timeline | ✅ M1 |
-| `ham-ctl lease submit --summary "…" [--handoff-file f] [--output-file f]` | summary carries the checks you ran; releases + stops you; → In review / Done | ✅ M2 |
+| `ham-ctl lease submit --summary "…" [--handoff-file f] [--output-file f]` | summary carries the checks you ran; releases the lease (your process keeps running until your tasks are done); → In review / Done | ✅ M2 |
 | `ham-ctl lease block --waiting-on human\|task:T‑x --reason "…"` | → Backlog with `blocked_on`; `gave_up` ≡ block on human | ✅ M2 |
-| `ham-ctl lease handoff --summary "…" [--handoff-file f]` | release; same attempt continues with a fresh agent | ✅ M2 |
+| `ham-ctl lease handoff --summary "…" [--handoff-file f]` | release and stop you; same attempt continues with a fresh agent (a fresh launch even when re‑granted to the same instance) | ✅ M2 |
 | `ham-ctl review post [--task T‑x] --verdict approve\|request_changes [--findings-file f]` | reviewer verb (review lease) | ✅ M2 |
 | `ham-ctl task fetch <#event \| output:T‑x \| facet:T‑x:n:kind \| dir:… \| path>` | pull history/inputs on demand | ✅ M2 |
 | `ham-ctl task comment --task T‑x "…"` | event only, no protocol meaning, no wake | ✅ M2 |
@@ -125,7 +130,8 @@ Removed (404, no shim): `task status`, `task set_current`, `task vote`, `task nu
 ham-ctl lease next            # → lease ls_7f2a · T-42 · attempt 2/5 · TASK.md written
 # … edit, run the checks the change needs, git commit …
 ham-ctl lease submit --summary "evict cache on detach-to-zero; per-session 1 MiB cap; odin test src/bridge (cache tests) 12/12 pass"
-#   → In review (reviewer-a) · your process is stopped; next task arrives via a new launch
+#   → In review (reviewer-a) · your process keeps running; a new lease arrives as a one-line
+#     nudge ("run ham-ctl lease next"), and you are stopped once your tasks are done
 ```
 Reviewer:
 ```bash

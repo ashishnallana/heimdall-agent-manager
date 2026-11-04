@@ -5,8 +5,10 @@ import type { ChatMessage } from './types';
  */
 export function isAgentStartMessage(message: ChatMessage): boolean {
   if (message.messageType === 'agent_start' || message.messageType === 'agent_start_clubbed') return true;
-  // tool_activity bodies are generated counts; never sniff them for "started".
-  if (message.messageType === 'tool_activity') return false;
+  // tool_activity bodies are generated counts, and previous_context bodies are
+  // free-form agent handoffs that routinely mention a restart: never sniff
+  // either for "started"/"restart", or they get clubbed into start dividers.
+  if (message.messageType === 'tool_activity' || message.messageType === 'previous_context') return false;
   if (message.messageType === 'system') return true;
   const body = (message.body || '').toLowerCase();
   return (

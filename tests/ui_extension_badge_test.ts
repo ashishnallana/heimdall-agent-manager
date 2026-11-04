@@ -113,7 +113,9 @@ test('Codex tested-release package uses compatibility manifest without portable 
   assert.equal(manifest.name, 'heimdall');
   assert.equal(manifest.hooks, './hooks/hooks.json');
   const hookConfig = JSON.parse(fs.readFileSync(new URL('hooks/hooks.json', root), 'utf8'));
-  assert.equal(Object.keys(hookConfig.hooks).length, 10);
+  // 10 lifecycle hooks + PreCompact/PostCompact (compaction events, T1b).
+  assert.equal(Object.keys(hookConfig.hooks).length, 12);
+  assert.ok(hookConfig.hooks.PreCompact && hookConfig.hooks.PostCompact);
   for (const [event, groups] of Object.entries(hookConfig.hooks) as Array<[string, any[]]>) {
     const hook = groups[0].hooks[0];
     assert.match(hook.command, /HEIMDALL_CTL_BIN/);

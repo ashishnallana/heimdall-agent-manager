@@ -9,6 +9,7 @@ import contracts "odin_test:contracts"
 
 @(test)
 action_snapshot_candidate_rejects_partial_or_duplicate_rows :: proc(t: ^testing.T) {
+    sync.mutex_lock(&bridge_test_config_mutex); defer sync.mutex_unlock(&bridge_test_config_mutex)
     context.allocator = runtime.heap_allocator()
     valid := `{"snapshot":{"epoch":"e","revision":0,"etag":"W/\"e:0\""},"data":[{"id":"a","target_instance_id":"inst","state":"active","target_run_at":"2026-10-24T01:00:00Z","blackout_dates":[]}]}`
     metadata, queue, ok := action_snapshot_candidate(valid, 1000)
@@ -35,6 +36,7 @@ action_snapshot_candidate_rejects_partial_or_duplicate_rows :: proc(t: ^testing.
 
 @(test)
 action_snapshot_heartbeat_freshness_and_failed_budget_survive_reconnect :: proc(t: ^testing.T) {
+    sync.mutex_lock(&bridge_test_config_mutex); defer sync.mutex_unlock(&bridge_test_config_mutex)
     context.allocator = runtime.heap_allocator()
     sync.mutex_lock(&action_sched_test_mutex)
     defer sync.mutex_unlock(&action_sched_test_mutex)
@@ -71,6 +73,7 @@ snapshot_test_fetch :: proc(req: httpc.Request) -> (httpc.Response, httpc.Error)
 }
 @(test)
 action_sync_idle_day_has_only_initial_and_daily_get :: proc(t: ^testing.T) {
+    sync.mutex_lock(&bridge_test_config_mutex); defer sync.mutex_unlock(&bridge_test_config_mutex)
     context.allocator = runtime.heap_allocator()
     sync.mutex_lock(&action_sched_test_mutex)
     defer sync.mutex_unlock(&action_sched_test_mutex)
@@ -86,6 +89,7 @@ action_sync_idle_day_has_only_initial_and_daily_get :: proc(t: ^testing.T) {
 }
 @(test)
 action_sync_permanent_error_survives_invalidation_storm_and_operator_resume :: proc(t: ^testing.T) {
+    sync.mutex_lock(&bridge_test_config_mutex); defer sync.mutex_unlock(&bridge_test_config_mutex)
     context.allocator = runtime.heap_allocator()
     sync.mutex_lock(&action_sched_test_mutex)
     defer sync.mutex_unlock(&action_sched_test_mutex)
@@ -105,6 +109,7 @@ action_sync_permanent_error_survives_invalidation_storm_and_operator_resume :: p
 }
 @(test)
 action_sync_fetch_keeps_newer_wanted_revision_pending :: proc(t: ^testing.T) {
+    sync.mutex_lock(&bridge_test_config_mutex); defer sync.mutex_unlock(&bridge_test_config_mutex)
     context.allocator = runtime.heap_allocator()
     sync.mutex_lock(&action_sched_test_mutex)
     defer sync.mutex_unlock(&action_sched_test_mutex)
@@ -131,6 +136,7 @@ slot_test_resolve :: proc(due: Action_Queue_Item, now: i64) -> (string, bool) {
 }
 @(test)
 action_unknown_execute_cannot_repost_or_remint_after_lease_expiry :: proc(t: ^testing.T) {
+    sync.mutex_lock(&bridge_test_config_mutex); defer sync.mutex_unlock(&bridge_test_config_mutex)
     context.allocator = runtime.heap_allocator()
     sync.mutex_lock(&action_sched_test_mutex)
     defer sync.mutex_unlock(&action_sched_test_mutex)

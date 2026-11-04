@@ -1,6 +1,8 @@
 package extension
 
+import "core:fmt"
 import json "core:encoding/json"
+import "core:slice"
 import "core:strings"
 import "core:testing"
 import contracts "odin_test:contracts"
@@ -21,6 +23,7 @@ test_codex_actual_release_callbacks_satisfy_contract :: proc(t: ^testing.T) {
 	sources := make(map[string]bool)
 	children := make(map[string]bool)
 	edits := make(map[string]int)
+	compactions := make(map[string]int)
 	for row in rows {
 		root, _ := row.(json.Object)
 		b, _ := json.marshal(row)
@@ -28,7 +31,18 @@ test_codex_actual_release_callbacks_satisfy_contract :: proc(t: ^testing.T) {
 		testing.expect_value(t, err, Codex_Error.None)
 		name := json_get_string(root, "hook_event_name")
 		if name == "PreCompact" || name == "PostCompact" {
-			testing.expect_value(t, len(mapped.events), 0)
+			testing.expect_value(t, len(mapped.events), 1)
+			if len(mapped.events) != 1 do continue
+			ev, e := contracts.ext_parse_event(mapped.events[0])
+			testing.expect_value(t, e, contracts.Ext_Error.None)
+			testing.expect_value(t, ev.kind, contracts.Ext_Event_Kind.Compaction)
+			testing.expect_value(t, ev.provider, "codex")
+			testing.expect_value(t, ev.session_id, json_get_string(root, "session_id"))
+			testing.expect_value(t, ev.compaction_phase, "pre" if name == "PreCompact" else "post")
+			testing.expect_value(t, ev.compaction_trigger, json_get_string(root, "trigger"))
+			testing.expect(t, strings.contains(mapped.events[0], json_get_string(root, "model")))
+			events[contracts.ext_event_kind_name(ev.kind)] += 1
+			compactions[name] += 1
 			continue
 		}
 		testing.expect(t, len(mapped.events) > 0, name)
@@ -55,12 +69,13 @@ test_codex_actual_release_callbacks_satisfy_contract :: proc(t: ^testing.T) {
 		if name == "SessionStart" do sources[json_get_string(root, "source")] = true
 		if name == "PermissionRequest" && json_get_string(root, "agent_id") != "" do children[json_get_string(root, "agent_id")] = true
 	}
-	for name in ([]string{"hello", "session", "activity", "tool.start", "tool.end", "subagent.start", "subagent.stop", "permission.request", "file.edit"}) {
+	for name in ([]string{"hello", "session", "activity", "tool.start", "tool.end", "subagent.start", "subagent.stop", "permission.request", "file.edit", "compaction"}) {
 		testing.expect(t, events[name] > 0, name)
 	}
 	for source in ([]string{"startup", "clear", "resume", "fork"}) do testing.expect(t, sources[source], source)
 	testing.expect_value(t, len(children), 2)
 	for op in ([]string{"create","update","delete","move"}) do testing.expect_value(t, edits[op], 1)
+	testing.expect(t, compactions["PreCompact"] > 0 && compactions["PostCompact"] > 0)
 }
 
 @(test)
@@ -122,4 +137,45 @@ test_codex_confirmed_callback_markerless_update_and_mixed_native_summary :: proc
 	}
 	testing.expect_value(t, len(edits), 3)
 	for path in ([]string{"a.txt", "b.txt", "gone.txt"}) do testing.expect(t, edits[path], path)
+}
+
+@(private = "file", thread_local)
+codex_fake_calls: int
+@(private = "file", thread_local)
+codex_fake_params: string
+
+@(private = "file")
+codex_fake_send :: proc(endpoint, token, method, params: string, timeout_ms: int) -> (string, bool) {
+	codex_fake_calls += 1
+	codex_fake_params = params
+	return "", false
+}
+
+@(test)
+test_codex_compaction_hook_prints_nothing :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	defer free_all(context.temp_allocator)
+	env := Hook_Env{endpoint = "unix:/tmp/none.sock", token = "hlat_x", ts = TS}
+	for name in ([]string{"PreCompact", "PostCompact"}) {
+		codex_fake_calls = 0
+		raw := fmt.tprintf(`{{"session_id":"s","turn_id":"t","hook_event_name":"%s","model":"m","trigger":"auto"}}`, name)
+		testing.expect_value(t, hook_run("codex", raw, env, codex_fake_send), "")
+		testing.expect_value(t, codex_fake_calls, 1)
+		testing.expect(t, strings.contains(codex_fake_params, `"event":"compaction"`), name)
+		testing.expect(t, strings.contains(codex_fake_params, `"trigger":"auto"`), name)
+	}
+}
+
+@(test)
+test_codex_hello_declares_usage_capability :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	defer free_all(context.temp_allocator)
+	mapped, err := codex_map_hook(`{"session_id":"s1","hook_event_name":"SessionStart","source":"startup","cwd":"/w","model":"gpt-5"}`, TS)
+	testing.expect_value(t, err, Codex_Error.None)
+	testing.expect(t, len(mapped.events) > 0)
+	if len(mapped.events) == 0 do return
+	ev, perr := contracts.ext_parse_event(mapped.events[0])
+	testing.expect_value(t, perr, contracts.Ext_Error.None)
+	testing.expect_value(t, ev.kind, contracts.Ext_Event_Kind.Hello)
+	testing.expect(t, slice.contains(ev.capabilities[:], "usage"), "codex declares the usage capability")
 }

@@ -2456,10 +2456,9 @@ bridge_ws_process_frame :: proc(h: ^Bridge_Handlers, bridge_id: string, connecti
 		activity_status := json_string(text, "activity_status")
 		if h.agents != nil {
 			error_json, _ := jsonx.extract_raw_object(text, "error", true, context.temp_allocator)
-			if inst, applied, _ := bridge_apply_validated_status(h, bridge_id, connection_generation, instance_id, state_seq, runtime_status, activity_status, json_string(text, "launch_epoch", context.temp_allocator), error_json); applied {
-				publish_instance_changed(h.event_bus, inst, "status_changed")
-				domain.agent_instance_destroy(&inst)
-			}
+			inst, applied, _ := bridge_apply_validated_status(h, bridge_id, connection_generation, instance_id, state_seq, runtime_status, activity_status, json_string(text, "launch_epoch", context.temp_allocator), error_json)
+			token_changed := bridge_apply_token_usage_members(h, bridge_id, instance_id, text)
+			bridge_publish_status_frame_change(h, instance_id, &inst, applied, token_changed)
 		}
 		if h.agents != nil do agent_service.reconcile_instance_reconfigurations(h.agents, bridge_id)
 		current_runtime, current_activity, current_seq, got := bridge_runtime_service.runtime_instance_status(h.bridge_runtime_registry, bridge_id, connection_generation, instance_id)
@@ -2512,7 +2511,7 @@ bridge_ws_process_frame :: proc(h: ^Bridge_Handlers, bridge_id: string, connecti
 		mcp_bridge_result(h,bridge_id,text,connection_generation)
 	case "provider_profiles_report":
 		if err:=bridge_provider_profiles_frame(h,bridge_id,text);err.code!=.None do fmt.eprintln("provider profiles report:",err.message)
-	case "session_projects_result", "auto_update_config_result", "provider_profile_op_result", "command_result", "project_path_validation_result", "provider_discovery_report", "provider_model_discovery_report", "fs_list_dir_result", "fs_stat_result", "fs_make_dir_result", "fs_read_file_result", "fs_create_file_result", "fs_write_file_result", "fs_batch_write_result", "fs_move_result", "fs_delete_result", "vcs_capabilities_result", "vcs_status_result", "vcs_files_result", "vcs_diff_result", "vcs_log_result", "vcs_commit_diff_result", "vcs_show_file_result", "vcs_workspaces_result", "vcs_stage_result", "vcs_unstage_result", "vcs_revert_result", "vcs_save_file_result", "vcs_commit_result", "vcs_upload_result", "vcs_sync_result", "fs_find_files_result", "fs_grep_result", "shell_start_result", "shell_restart_result", "shell_list_result", "shell_logs_result", "shell_capture_result", "shell_set_port_result", "bridge_unseal_result", "task_chain_search_result", "taskv2_merge_worktree_result":
+	case "session_projects_result", "auto_update_config_result", "provider_profile_op_result", "command_result", "project_path_validation_result", "provider_discovery_report", "provider_model_discovery_report", "fs_list_dir_result", "fs_stat_result", "fs_make_dir_result", "fs_read_file_result", "fs_create_file_result", "fs_write_file_result", "fs_batch_write_result", "fs_move_result", "fs_delete_result", "vcs_capabilities_result", "vcs_status_result", "vcs_files_result", "vcs_diff_result", "vcs_log_result", "vcs_commit_diff_result", "vcs_show_file_result", "vcs_workspaces_result", "vcs_stage_result", "vcs_unstage_result", "vcs_revert_result", "vcs_save_file_result", "vcs_commit_result", "vcs_upload_result", "vcs_sync_result", "fs_find_files_result", "fs_grep_result", "shell_start_result", "shell_restart_result", "shell_list_result", "shell_logs_result", "shell_capture_result", "shell_set_port_result", "bridge_unseal_result", "task_chain_search_result", "taskv2_merge_worktree_result", "context_window_op_result":
 		if ext_err := bridge_extension_frame(h, bridge_id, type, text); ext_err.code != .None do fmt.eprintln("extension command result:", ext_err.message)
 		command_id := json_string(text, "command_id")
 		_ = bridge_runtime_service.runtime_command_result_for_connection(h.bridge_runtime_registry, bridge_id, connection_generation, command_id, text)
@@ -2737,6 +2736,44 @@ Bridge_Agent_Status_Report :: struct {
 // Serialize durable status writes with retirement. New connections do not finish
 // admission until the old state writer has drained; a delayed old frame cannot
 // save over the new generation's durable state.
+// bridge_apply_token_usage_members persists the optional token_usage snapshot
+// and adds a token_usage_final (the bridge's frozen usage of a run the hub
+// stopped or restarted) to the instance's lifetime totals once per run (T3r).
+// Reports whether anything was written: an unchanged snapshot (every status
+// frame repeats it) writes no row and announces nothing (T14).
+bridge_apply_token_usage_members :: proc(h: ^Bridge_Handlers, bridge_id, instance_id, text: string) -> (changed: bool) {
+	if h.agents == nil || instance_id == "" do return
+	usage_raw, _ := jsonx.extract_raw_object(text, "token_usage", true, context.temp_allocator)
+	final_raw, _ := jsonx.extract_raw_object(text, "token_usage_final", true, context.temp_allocator)
+	if usage_raw == "" && final_raw == "" do return
+	res, err := agent_service.apply_bridge_token_usage(h.agents, bridge_id, instance_id, usage_raw, final_raw)
+	if err.code != .None {
+		fmt.eprintln("token usage:", err.message)
+		return
+	}
+	return res.snapshot_saved || res.totals_added
+}
+
+// bridge_publish_status_frame_change announces one agent_instance_status frame
+// with at most ONE event (T14 coalescing). A status change publishes
+// status_changed; a token change on the same frame rides on it (summary
+// token_changed:true) instead of a second token_usage_changed event. The summary
+// carries the token snapshot and totals, so clients patch their caches from the
+// event rather than refetching. status_inst (owned, may be zero) is destroyed.
+bridge_publish_status_frame_change :: proc(h: ^Bridge_Handlers, instance_id: string, status_inst: ^domain.Agent_Instance, status_applied, token_changed: bool) {
+	defer if status_applied do domain.agent_instance_destroy(status_inst)
+	if !token_changed {
+		if status_applied do publish_instance_changed(h.event_bus, status_inst^, "status_changed")
+		return
+	}
+	// The status write's row predates the token write: re-read for the summary.
+	if h.agents == nil do return
+	if inst, found, _ := iface.agent_get_instance(h.agents.agents, instance_id); found {
+		publish_instance_changed(h.event_bus, inst, "status_changed" if status_applied else "token_usage_changed", token_changed = true)
+		domain.agent_instance_destroy(&inst)
+	}
+}
+
 bridge_apply_validated_status :: proc(h: ^Bridge_Handlers, bridge_id: string, generation: int, id: string, seq: int, status, activity: string, launch_epoch: string = "", error_json: string = "", changed: ^bool = nil) -> (domain.Agent_Instance, bool, domain.Domain_Error) {
 	c := project_service.bridge_runtime_connection_acquire(h.bridge_runtime_registry, bridge_id, generation)
 	if c == nil do return {}, false, domain.domain_error(.Bridge_Offline, "stale bridge generation")

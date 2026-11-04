@@ -65,7 +65,8 @@ rtv_rewind_sync :: proc(t: ^testing.T, conn: ^Conn) {
 	after_127 := false
 	rewound := 0
 	for name in migration_order {
-		if after_127 && strings.contains(name, "_extension_version_sync_") {
+		// Later catalog edits (e.g. the usage capability) must replay after the syncs: each sync hardcodes the etag of the catalog as it stood then.
+		if after_127 && (strings.contains(name, "_extension_version_sync_") || name == "198_extension_usage_capability.sql") {
 			testing.expect(t, exec(conn, strings.concatenate({"DELETE FROM schema_migrations WHERE version='", name, "';"}, context.temp_allocator)))
 			testing.expectf(t, !migration_applied(conn, name), "%s rewound", name)
 			rewound += 1

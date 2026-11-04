@@ -10,7 +10,9 @@ import "core:unicode/utf8"
 // forward a ciphertext placeholder as though it were a successfully read result.
 control_text :: proc(kr:^Vault_Keyring,text:string)->(string,bool) {
 	if kr==nil do return "",false
-	if is_armored(text) {
+	// Whole-token fast path only for exactly one token; "<token> #3" (a sealed
+	// agent name plus the native run counter) takes the embedded path below.
+	if is_armored(text) && token_end(text,0)==len(text) {
 		plain,result:=open(text,kr,context.temp_allocator)
 		if result!=.Ok || !utf8.valid_string(plain) {if plain!="" do crypto.zero_explicit(raw_data(plain),len(plain));return "",false}
 		return plain,true
