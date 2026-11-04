@@ -6,7 +6,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { providerBinaryPathView } from '../src/ui/components/providers/providerBinaryPath.ts';
+import { providerBinaryPathView } from '../src/ui/components/providers/providerBinaryPathView.ts';
 
 const read = (p: string) => fs.readFileSync(fileURLToPath(new URL(p, import.meta.url)), 'utf8');
 
