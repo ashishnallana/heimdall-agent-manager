@@ -6,7 +6,7 @@ import { createRoot } from 'react-dom/client';
 import { Provider } from 'react-redux';
 import { configureStore } from '@reduxjs/toolkit';
 import { JSDOM } from 'jsdom';
-import ChatMessageList, { PIN_TAIL_PX, PIN_TAIL_MAX_PX, pinOffsetFor, pinTailFor, pinSpacerFor, pinFadeFor, PIN_FADE_RANGE_PX, PIN_TRAVEL_MS, PIN_SNAPPY_TRAVEL_MS, PIN_SETTLE_MS, PIN_ACTIVITY_DELAY_MS, PIN_EASE, PIN_EASE_X, cubicBezierAt } from '../src/ui/components/chat/ChatMessageList.tsx';
+import ChatMessageList, { PIN_TAIL_PX, PIN_TAIL_MAX_PX, pinOffsetFor, pinTailFor, pinSpacerFor, pinFadeFor, PIN_FADE_RANGE_PX, PIN_TRAVEL_MS, PIN_SNAPPY_TRAVEL_MS, PIN_SETTLE_MS, PIN_ACTIVITY_DELAY_MS, PIN_EASE, PIN_EASE_X, PIN_SCROLL_IDLE_MS, JUMP_THRESHOLD_PX, cubicBezierAt, restingInsetFor } from '../src/ui/components/chat/ChatMessageList.tsx';
 import { useComposerDockInset } from '../src/ui/components/chat/MessageComposer.tsx';
 
 // REQ-PIN-1..6: send pin-to-top. JSDOM has no layout, so the fixture models one: a 600px
@@ -42,7 +42,10 @@ async function withList(run: (env: any) => Promise<void>) {
     requestAnimationFrame: (fn: FrameRequestCallback) => { frames.set(++nextFrame, fn); return nextFrame; },
     cancelAnimationFrame: (id: number) => frames.delete(id) });
   dom.window.matchMedia = (() => media) as any;
-  dom.window.HTMLElement.prototype.scrollTo = function (this: HTMLElement) { scrollToCalls++; };
+  dom.window.HTMLElement.prototype.scrollTo = function (this: HTMLElement, options?: ScrollToOptions) {
+    scrollToCalls++;
+    if (typeof options?.top === 'number') this.scrollTop = options.top;
+  };
   const scrollerOf = (el: Element | null) => el?.closest('[data-debug-id$="-scroll"]') as HTMLElement | null;
   const tail = { extra: 0 };
   const px = (el: HTMLElement | null) => parseFloat(el?.style.height ?? '') || 0;
@@ -82,10 +85,15 @@ async function withList(run: (env: any) => Promise<void>) {
     const scroll = q('pin-scroll')!;
     const height = () => lastRowBottom() + px(q('pin-pin-turn-spacer')) + px(q('pin-bottom-inset')) + 1;
     let top = VIEWPORT * 2;
+    let client = VIEWPORT;
+    // Programmatic scrollTop writes, for the "never during a gesture" checks.
+    const writes: number[] = [];
     Object.defineProperties(scroll, { scrollHeight: { configurable: true, get: height },
-      clientHeight: { configurable: true, value: VIEWPORT },
+      clientHeight: { configurable: true, get: () => client },
       scrollTop: { configurable: true, get: () => top,
-        set: (value: number) => { top = Math.max(0, Math.min(value, height() - VIEWPORT)); } } });
+        set: (value: number) => { writes.push(value); top = Math.max(0, Math.min(value, height() - client)); } },
+      writes: { configurable: true, value: writes },
+      setClientHeight: { configurable: true, value: (value: number) => { client = value; } } });
     return scroll;
   };
   const frame = async (ms: number) => { now += ms; await act(async () => {
@@ -114,7 +122,17 @@ const target = ROW_Y - OFFSET; // row top lands OFFSET under the top
 const INSET = 80;
 // Exchange spacer for a short reply: viewport - slot - (row + inset + anchor).
 const SPACER = VIEWPORT - OFFSET - (ROW_H + INSET + 1);
-const fade = (scroll: HTMLElement) => scroll.style.getPropertyValue('--chat-pin-fade');
+// REQ-PIN-3 rev3: the fade lives on fixed overlays outside the scroller (blur, then colour).
+const fade = (scroll: HTMLElement) => {
+  const overlay = scroll.ownerDocument.querySelector('[data-debug-id="pin-pin-tail-fade"]') as HTMLElement;
+  assert.equal(overlay.style.opacity, (scroll.ownerDocument.querySelector('[data-debug-id="pin-pin-tail-blur"]') as HTMLElement).style.opacity, 'blur and fade move together');
+  return overlay.style.opacity;
+};
+// Nothing on the scroller itself follows the scroll (no mask, no custom property).
+const scrollerUntouched = (scroll: HTMLElement) => {
+  assert.equal(scroll.dataset.chatPinTail, undefined, 'no mask toggled on the scroller');
+  assert.equal(scroll.style.getPropertyValue('--chat-pin-fade'), '', 'no per-scroll custom property on the scroller');
+};
 const scrollTo = async (scroll: HTMLElement, top: number) => {
   scroll.scrollTop = top;
   await act(async () => { scroll.dispatchEvent(new (scroll.ownerDocument.defaultView as any).Event('scroll')); });
@@ -177,8 +195,8 @@ test('own send pins the bubble at max scroll: transform-only travel with the tai
     assert.match(historyStart, /^translate3d\(0, -?\d+(\.\d+)?px, 0\)$/, 'history starts where it was, via transform only');
     assert.match(row.style.transform, /^translate3d\(-?0(px)?, -?\d+(\.\d+)?px, 0(px)?\)$/, 'bubble starts under the dock (no origin given: list left), via transform only');
     assert.equal(row.style.opacity, '', 'no fade-in');
-    assert.equal(scroll.dataset.chatPinTail, 'on', 'tail fade on during the travel (REQ-PIN-3 rev2)');
-    assert.equal(fade(scroll), '1');
+    assert.equal(fade(scroll), '1', 'tail fade on during the travel (REQ-PIN-3 rev2)');
+    scrollerUntouched(scroll);
     assert.equal(q('pin-pin-tail-blur')!.style.opacity, '1', 'tail blur on during the travel');
     await frame(16);
     await frame(60);
@@ -217,8 +235,11 @@ for (const travel of ['curved', 'snappy'] as const) {
       const row = q('pin-message-local_a')!;
       const content = q('pin-messages-container')!;
       const nums = (value: string) => (value.match(/-?\d+(\.\d+)?(?=px)/g) ?? []).map(Number);
+      const inner = row.firstElementChild as HTMLElement;
+      const axes = (value: string) => (value.match(/translate3d\(([^,]+),\s*([^,]+),/)?.slice(1) ?? ['0', '0']).map((v) => parseFloat(v) || 0);
       const at = () => {
-        const [x, y] = nums(row.style.transform);
+        const y = axes(row.style.transform)[1];
+        const x = axes(inner.style.transform)[0];
         const history = nums(content.style.transform)[0] ?? 0;
         return { x, y: y + history, history, rowY: y }; // the bubble's offset from its slot, on screen
       };
@@ -235,6 +256,7 @@ for (const travel of ['curved', 'snappy'] as const) {
       else assert.ok(xLeft - yLeft > 0.2, 'curved: X lags Y, so the path bends');
       await settle();
       assert.equal(row.style.transform, '', 'bubble at rest in its slot');
+      assert.equal(inner.style.transform, '', 'no X offset left');
       assert.equal(content.style.transform, '', 'list at rest');
       assert.equal(scroll.scrollTop, target);
     });
@@ -254,18 +276,19 @@ test('with WAAPI the list and the bubble (Y and X on their own curves) run on th
     await render(list([...history, msg('local_a', true, 'New question')]));
     const row = q('pin-message-local_a')!;
     assert.equal(calls.length, 3, 'the list, the bubble\'s Y and the bubble\'s X');
-    assert.deepEqual(calls.map((c) => c.el), [q('pin-messages-container'), row, row]);
+    assert.deepEqual(calls.map((c) => c.el), [q('pin-messages-container'), row, row.firstElementChild], 'Y on the row, X on its column');
     assert.deepEqual(calls.map((c) => c.timing.duration), [PIN_TRAVEL_MS, PIN_TRAVEL_MS, PIN_TRAVEL_MS]);
     assert.deepEqual(calls.map((c) => c.timing.easing), ['cubic-bezier(0.2, 0.8, 0.2, 1)', 'cubic-bezier(0.2, 0.8, 0.2, 1)', 'cubic-bezier(0.45, 0, 0.25, 1)']);
     assert.equal(calls[1].frames[1].transform, 'translate3d(0, 0, 0)');
-    assert.equal(calls[2].frames[1].translate, '0 0');
+    assert.match(String(calls[2].frames[0].transform), /^translate3d\(-?\d+(\.\d+)?px, 0, 0\)$/, 'X is a transform too (composited), not the translate property');
+    assert.equal(calls[2].frames[1].transform, 'translate3d(0, 0, 0)');
     assert.equal(row.style.zIndex, '1', 'the bubble draws above the list while it moves');
     assert.equal(fade(scroll), '1', 'tail on while travelling');
     // Mid-travel key swap: the re-mounted row picks up both animations in step.
     calls[0].anim.currentTime = 120;
     await render(list([...history, msg('srv_a', true, 'New question')]));
     assert.equal(calls.length, 5);
-    assert.deepEqual([calls[3].el, calls[4].el], [q('pin-message-srv_a'), q('pin-message-srv_a')]);
+    assert.deepEqual([calls[3].el, calls[4].el], [q('pin-message-srv_a'), q('pin-message-srv_a')!.firstElementChild]);
     assert.deepEqual([calls[3].anim.currentTime, calls[4].anim.currentTime], [120, 120], 'in step with the list');
     assert.ok(calls[1].anim.cancelled && calls[2].anim.cancelled, 'the old row\'s animations are dropped');
     await act(async () => { calls[0].anim.onfinish(); });
@@ -295,19 +318,104 @@ test('nothing pulls the view to the bottom: inbound rows and tail growth leave s
   });
 });
 
-test('composer collapse (inset change) keeps max scroll = the pin position', async () => {
-  await withList(async ({ q, render, list, geometry, settle }) => {
+test('REQ-PIN-2 rev3 (decouple): the composer and the keyboard overlay the list; no spacer or scrollTop change', async () => {
+  await withList(async ({ dom, q, render, list, geometry, settle }) => {
+    const viewport = new dom.window.EventTarget();
+    Object.defineProperty(dom.window, 'visualViewport', { configurable: true, value: viewport });
     await render(list(history));
     const scroll = geometry();
     await render(list([...history, msg('local_a', true)]));
     await settle();
-    await render(list([...history, msg('local_a', true)], { bottomInset: 40 }));
-    assert.equal(q('pin-pin-turn-spacer')!.style.height, SPACER + 40 + 'px', 'the spacer takes the inset back');
-    assert.equal(scroll.scrollHeight - scroll.clientHeight, target, 'no extra room behind the composer');
-    assert.equal(scroll.scrollTop, target);
-    await render(list([...history, msg('local_a', true)], { bottomInset: 140 }));
-    assert.equal(scroll.scrollHeight - scroll.clientHeight, target, 'a taller dock does not push the bubble up either');
-    assert.equal(scroll.scrollTop, target);
+    const spacer = q('pin-pin-turn-spacer')!;
+    const inset = q('pin-bottom-inset')!;
+    assert.equal(spacer.style.height, SPACER + 'px');
+    assert.equal(scroll.scrollHeight - scroll.clientHeight, target, 'resting composer: max scroll = the pin position');
+    const writes = (scroll as any).writes.length;
+    // The composer expands (focus, multi-line draft, attachments): it only overlays.
+    await render(list([...history, msg('local_a', true)], { bottomInset: 194 }));
+    assert.equal(spacer.style.height, SPACER + 'px', 'the exchange spacer ignores the live inset');
+    assert.equal(inset.style.height, INSET + 'px', 'the inset stays at the resting composer height');
+    assert.equal(inset.style.getPropertyValue('--chat-live-inset'), '194px', 'it only learns the live height');
+    assert.equal(inset.style.getPropertyValue('--chat-turn-spacer'), SPACER + 'px', 'which reaches past the spacer only for a long reply');
+    assert.match(inset.style.minHeight, /calc\(var\(--chat-live-inset.*--chat-turn-spacer/);
+    assert.equal(scroll.scrollTop, target, 'content does not move');
+    assert.equal(scroll.scrollHeight - scroll.clientHeight, target);
+    // The keyboard pans or resizes the visual viewport: nothing listens to it.
+    (scroll as any).setClientHeight(VIEWPORT - 300);
+    await act(async () => { viewport.dispatchEvent(new dom.window.Event('resize')); });
+    assert.equal(spacer.style.height, SPACER + 'px', 'no visualViewport-driven re-size');
+    (scroll as any).setClientHeight(VIEWPORT);
+    await render(list([...history, msg('local_a', true)], { bottomInset: INSET }));
+    assert.equal(spacer.style.height, SPACER + 'px', 'collapsing back changes nothing either');
+    assert.equal((scroll as any).writes.length, writes, 'no scrollTop write for any composer or keyboard change');
+    delete (dom.window as any).visualViewport;
+  });
+});
+
+test('the resting reference is the smallest settled inset (the collapsed pill), learnt once', () => {
+  assert.equal(restingInsetFor(0, 0), 0, 'no dock yet');
+  assert.equal(restingInsetFor(0, 194), 194, 'opened while expanded: provisional');
+  assert.equal(restingInsetFor(194, 78), 78, 'the first collapse sets it');
+  assert.equal(restingInsetFor(78, 194), 78, 'expanding never raises it');
+  assert.equal(restingInsetFor(78, 0), 78, 'a missing measurement keeps it');
+});
+
+test('QA round 5: jump-latest stays hidden at rest at the pin position and shows only above the threshold', async () => {
+  await withList(async ({ q, render, list, geometry, settle, observers, tail }) => {
+    await render(list(history));
+    const scroll = geometry();
+    await render(list([...history, msg('local_a', true)]));
+    await settle();
+    await render(list([...history, msg('local_a', true), msg('reply', false, 'Short answer')]));
+    tail.extra = 30;
+    await act(async () => { observers.forEach((cb: (entries: any[]) => void) => cb([])); });
+    await scrollTo(scroll, target);
+    assert.equal(q('pin-jump-latest-btn'), null, 'at rest after a short reply: the spacer is not unread content');
+    await scrollTo(scroll, target - (JUMP_THRESHOLD_PX - 10));
+    assert.equal(q('pin-jump-latest-btn'), null, 'a small scroll stays under the threshold');
+    await scrollTo(scroll, target - 300);
+    const jump = q('pin-jump-latest-btn');
+    assert.ok(jump, 'scrolled up past the threshold: offered');
+    await act(async () => jump!.click());
+    assert.equal(scroll.scrollTop, target, 'tapping it returns to the pin position');
+    assert.equal(q('pin-jump-latest-btn'), null, 'and hides it');
+    // A stale value never outlives a layout change: scrolled up, then the list moves back
+    // to the end with no scroll event (e.g. a clamp), and the next layout pass re-checks.
+    await scrollTo(scroll, target - 300);
+    assert.ok(q('pin-jump-latest-btn'));
+    scroll.scrollTop = target;
+    await act(async () => { observers.forEach((cb: (entries: any[]) => void) => cb([])); });
+    assert.equal(q('pin-jump-latest-btn'), null, 're-evaluated after layout changes');
+    tail.extra = 0;
+  });
+});
+
+test('QA round 5: no spacer shrink and no scrollTop write while the reader scrolls; the re-size lands when idle', async () => {
+  await withList(async ({ dom, q, render, list, geometry, settle, observers, tail }) => {
+    await render(list(history));
+    const scroll = geometry();
+    await render(list([...history, msg('local_a', true)]));
+    await settle();
+    const spacer = q('pin-pin-turn-spacer')!;
+    const writes = (scroll as any).writes.length;
+    const Touch = (dom.window as any).TouchEvent ?? dom.window.Event;
+    await act(async () => { scroll.dispatchEvent(new Touch('touchstart', { bubbles: true })); });
+    await scrollTo(scroll, target - 20);
+    const writesInGesture = (scroll as any).writes.length;
+    // Mid-gesture the exchange grows (activity / tool rows) and the scroller shrinks.
+    tail.extra = 60;
+    (scroll as any).setClientHeight(VIEWPORT - 100);
+    await act(async () => { observers.forEach((cb: (entries: any[]) => void) => cb([])); });
+    await render(list([...history, msg('local_a', true)], { bottomInset: 194 }));
+    assert.equal(spacer.style.height, SPACER + 'px', 'no shrink during the gesture');
+    assert.equal((scroll as any).writes.length, writesInGesture, 'no programmatic scrollTop write during the gesture');
+    await act(async () => { scroll.dispatchEvent(new Touch('touchend', { bubbles: true })); });
+    await sleep(PIN_SCROLL_IDLE_MS / 2);
+    assert.equal(spacer.style.height, SPACER + 'px', 'momentum may still be running');
+    await act(async () => { await sleep(PIN_SCROLL_IDLE_MS + 40); });
+    assert.equal(spacer.style.height, SPACER - 60 - 100 + 'px', 'the deferred re-size lands once idle');
+    assert.equal((scroll as any).writes.length - writes, 1, 'the only write was the reader\'s own scroll');
+    tail.extra = 0;
   });
 });
 
@@ -338,6 +446,14 @@ test('the composer dock inset never re-pins a send-pinned list to the bottom', a
     delete scroll.dataset.chatPinned;
     await act(async () => fire([{ borderBoxSize: [{ blockSize: 90 }] }]));
     assert.equal(top, 1100, 'an unpinned bottom reader is still followed');
+    // REQ-PIN-2 rev3: a decoupled (pinOnSend) list keeps its resting inset and is never scrolled.
+    const inset = dom.window.document.querySelector('[data-debug-id="h-bottom-inset"]') as HTMLElement;
+    inset.dataset.chatBottomInset = 'fixed';
+    top = 1100 - 600;
+    await act(async () => fire([{ borderBoxSize: [{ blockSize: 194 }] }]));
+    assert.equal(inset.style.height, '90px', 'height untouched');
+    assert.equal(inset.style.getPropertyValue('--chat-live-inset'), '194px', 'only the live height is published');
+    assert.equal(top, 500, 'no scrollTop write');
     await act(async () => root.unmount());
   } finally { Object.assign(globalThis, previous); dom.window.close(); }
 });
@@ -374,11 +490,11 @@ test('the tail mask and blur follow the scroll distance from the end', async () 
     await scrollTo(scroll, target - PIN_FADE_RANGE_PX / 2);
     assert.equal(fade(scroll), '0.5', 'half way through the fade range');
     assert.equal(blur.style.opacity, '0.5');
-    assert.equal(scroll.dataset.chatPinTail, 'on');
+    scrollerUntouched(scroll);
     await scrollTo(scroll, target - 400);
     assert.equal(fade(scroll), '0', 'history looks normal once scrolled up');
     assert.equal(blur.style.opacity, '0');
-    assert.equal(scroll.dataset.chatPinTail, undefined, 'mask removed entirely');
+    scrollerUntouched(scroll);
     await scrollTo(scroll, target);
     assert.equal(fade(scroll), '1', 'back on at the pin position');
   });
