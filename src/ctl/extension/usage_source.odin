@@ -39,8 +39,12 @@ usage_reader_for :: proc(provider: string) -> (Usage_Reader, bool) {
 ext_event_finish_usage :: proc(eb: ^Ext_Event_Builder, provider: string, root: json.Object, want_usage: bool) {
 	if !want_usage do return
 	reader, has_reader := usage_reader_for(provider)
-	if !has_reader do return
+	if !has_reader {
+		hook_debug_note_usage(false, false, {})
+		return
+	}
 	u, ok := reader(root)
+	hook_debug_note_usage(true, ok, u)
 	if ok {
 		ext_event_usage(eb, u, true)
 		return

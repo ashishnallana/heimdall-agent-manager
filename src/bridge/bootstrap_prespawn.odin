@@ -112,6 +112,11 @@ bridge_prespawn_env :: proc(run_dir, bridge_endpoint, agent_token, instance_id: 
 	append(&out, strings.concatenate({"HEIMDALL_AGENT_TOKEN=", agent_token}))
 	append(&out, strings.concatenate({"HEIMDALL_AGENT_INSTANCE_ID=", instance_id}))
 	append(&out, strings.concatenate({"HEIMDALL_CTL_BIN=", ctl_bin}))
+	// DEBUG (remove before merge): bridge HEIMDALL_EXTENSION_DEBUG=1 makes hooks log
+	// to <run_dir>/extension-debug.jsonl (see src/ctl/extension/hook_debug.odin).
+	if bridge_ext_debug_on() {
+		append(&out, strings.concatenate({"HEIMDALL_EXTENSION_DEBUG_LOG=", strings.trim_right(run_dir, "/"), "/extension-debug.jsonl"}))
+	}
 	return out[:]
 }
 

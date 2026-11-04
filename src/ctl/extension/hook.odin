@@ -153,7 +153,7 @@ hook_run :: proc(provider, raw: string, env: Hook_Env, send: Send_Proc) -> strin
 		if mapped.is_permission {
 			return relay_permission(env, send, timeout, codex_build_permission, raw, codex_permission_output_from_response)
 		}
-		_, _ = send(env.endpoint, env.token, "agent.extension.event", event_params(mapped.events[:]), EVENT_SOCKET_TIMEOUT_MS)
+		hook_send_event(env, send, event_params(mapped.events[:]))
 		return ""
 	case CLAUDE_PROVIDER:
 		timeout := env.permission_timeout_ms
@@ -166,7 +166,7 @@ hook_run :: proc(provider, raw: string, env: Hook_Env, send: Send_Proc) -> strin
 			if claude_permission_is_ham_ctl(raw, env.ctl_bin) do return claude_permission_output("allow", "")
 			return relay_permission(env, send, timeout, claude_build_permission, raw, claude_permission_output_from_response)
 		}
-		_, _ = send(env.endpoint, env.token, "agent.extension.event", event_params(mapped.events[:]), EVENT_SOCKET_TIMEOUT_MS)
+		hook_send_event(env, send, event_params(mapped.events[:]))
 		return ""
 	case ANTIGRAVITY_PROVIDER:
 		timeout := env.permission_timeout_ms
@@ -180,7 +180,7 @@ hook_run :: proc(provider, raw: string, env: Hook_Env, send: Send_Proc) -> strin
 			if out == "" do return `{"decision":"ask"}`
 			return out
 		}
-		_, _ = send(env.endpoint, env.token, "agent.extension.event", event_params(mapped.events[:]), EVENT_SOCKET_TIMEOUT_MS)
+		hook_send_event(env, send, event_params(mapped.events[:]))
 		return ""
 	}
 	return ""
