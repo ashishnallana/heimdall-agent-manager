@@ -263,18 +263,18 @@ The bridge is a flat Odin package (`package main`, [src/bridge](../src/bridge));
 | [bridgesvc](../src/lib/bridgesvc) | Platform-service model for bridge lifecycle (systemd/launchd/runit/Scheduled Task): setup, status, tray, uninstall engines. |
 | [config](../src/lib/config) | Shared config-file/environment helpers. |
 | [crashlog](../src/lib/crashlog) | Fatal-signal handler that writes a reason and backtrace to stderr, then re-raises. |
-| [httpc](../src/lib/httpc) | The only outbound HTTP/WebSocket client (libcurl); enforced by [scripts/check-http-boundary.sh](../scripts/check-http-boundary.sh). |
+| [httpc](../src/lib/httpc) | The outbound HTTP(S) client (libcurl) and the `wss://` WebSocket handshake/stream (`websocket_connect`); boundary enforced by [scripts/check-http-boundary.sh](../scripts/check-http-boundary.sh), which explicitly allows the plain-`ws://` handshake in `lib/ws`. |
 | [jsonx](../src/lib/jsonx) | Byte-preserving JSON reader and `find_value` helpers that cannot abort on hostile input. |
 | [local_socket](../src/lib/local_socket) | AF_UNIX stream sockets for same-machine IPC (ham-ctl→bridge, bridge↔pty-host), per-OS backends. |
 | [lockorder](../src/lib/lockorder) | Runtime check for the hub lock order `tx_mutex → state_mutex`. |
 | [metrics](../src/lib/metrics) | Allocation-disciplined Prometheus client and text exposition; process collector. |
 | [os_random](../src/lib/os_random) | OS CSPRNG that fails closed instead of panicking (credentials, PKCE, device codes). |
-| [tls_stream](../src/lib/tls_stream) | TLS client transport behind `lib/ws` (`wss://`): socat/openssl relay on Unix, SSPI on Windows. |
+| [tls_stream](../src/lib/tls_stream) | Legacy TLS client helpers (socat/openssl relay on Unix, SSPI on Windows) retained with tests; not the active `wss://` path, which goes through `httpc`. |
 | [tmux](../src/lib/tmux) | Small tmux pane-input helper (`send_text`); legacy, not the launch path. |
 | [tool_live](../src/lib/tool_live) | Bounded, volatile tracker and wire limits for live tool-activity state. |
 | [vault](../src/lib/vault) | The single Odin implementation of the passwordless-vault wire formats (v2 envelope, HKR2 keyring, signed statements, unseal v2, PTY v2 frames, control scopes); mirrored in TS by `src/ui/utils/vault*.ts`. |
 | [vcs](../src/lib/vcs) | VCS abstraction over git, jj and fig (`git.odin`, `jj.odin`, `fig.odin`). |
-| [ws](../src/lib/ws) | WebSocket framing, reader, server frames, and text-frame chunking for the bridge↔hub channel. |
+| [ws](../src/lib/ws) | WebSocket framing, reader, server frames and text-frame chunking for the bridge↔hub channel. `connect_with_bearer` sends `wss://` through `connect_tls_with_bearer` → `httpc.websocket_connect` (libcurl); plain `ws://` dials with `core:net` directly. |
 
 ---
 
@@ -324,8 +324,10 @@ Engine: [src/hub/service/taskv2](../src/hub/service/taskv2).
 - **Verbs.** `lease_next`, `lease_heartbeat` ([verbs.odin](../src/hub/service/taskv2/verbs.odin)); `lease_submit`, `lease_handoff`, `lease_block`,
   `lease_switch`, `review_post`, `user_review`, `task_reopen`, `task_hold`, `task_fetch` ([verbs_m2.odin](../src/hub/service/taskv2/verbs_m2.odin)).
   These are reached through `ham-ctl lease|review|task …` (see [src/ctl/taskv2_cmds.odin](../src/ctl/taskv2_cmds.odin)) and the MCP task tools.
-- **Review gate.** `evaluate_gate_in_uow` ([gate.odin](../src/hub/service/taskv2/gate.odin)) decides `done` vs `changes_requested` from the
-  required review pairs ([review_pairs.odin](../src/hub/service/taskv2/review_pairs.odin)) and user approval; three rounds of changes escalate to a human.
+- **Review gate.** `evaluate_gate_in_uow` ([gate.odin](../src/hub/service/taskv2/gate.odin)) evaluates the required review pairs
+  ([review_pairs.odin](../src/hub/service/taskv2/review_pairs.odin)) and user approval. `changes_requested` is a gate *result*, not a task state:
+  it records `EV_CHANGES_REQUESTED`, and the fold returns the task to `ready` (spending review-round budget), or parks it in `backlog`
+  with a human `oscillation` block after three rounds. Approval records `EV_APPROVED`, and the fold moves the task to `done`.
 - **Merge-back.** On done, `effect_merge_worktree` queues a `Merge_Effect`; `flush_merges` → `merge_job_run` → `run_merge`
   ([merge.odin](../src/hub/service/taskv2/merge.odin)) sends a merge command to the bridge that owns the task worktree
   (`task_worktree` in lease.odin names the per-task workdir and branch; bridge side: [agent_taskv2_vcs.odin](../src/bridge/agent_taskv2_vcs.odin)).
