@@ -86,3 +86,21 @@ test_agent_token_usage_estimate_fields :: proc(t: ^testing.T) {
 	_, ok = agent_token_usage_from_json(`{"tool_calls":3,"est_tokens_total":1,"context_source":"estimate","estimated_context_tokens":-1,"compactions":0,"updated_at_ms":9}`)
 	testing.expect(t, !ok)
 }
+
+// Regression (T15): the bridge stamps updated_at_ms with epoch milliseconds
+// (~1.8e12 today). The counter cap (1e12) used to reject that value, so every
+// real snapshot was dropped and the instance JSON token_usage stayed null.
+@(test)
+test_agent_token_usage_accepts_epoch_millisecond_timestamp :: proc(t: ^testing.T) {
+	// Verbatim shape of a live claude snapshot (T10b) with a real epoch-ms stamp.
+	raw := `{"tool_calls":4,"est_tokens_total":1257,"context_tokens":52162,"context_source":"claude_transcript","context_window":1000000,"window_source":"config","warn_pct":40,"rollover_pct":70,"context_pct":5,"usage_supported":true,"run_count":1,"compactions":0,"updated_at_ms":1793775000000}`
+	u, ok := agent_token_usage_from_json(raw)
+	testing.expect(t, ok, "a live snapshot with epoch-ms updated_at_ms is accepted")
+	testing.expect_value(t, u.updated_at_ms, i64(1793775000000))
+	testing.expect(t, strings.contains(agent_token_usage_json(u, context.temp_allocator), `"updated_at_ms":1793775000000`))
+	// Counters keep their cap; only the timestamp has a wider bound.
+	_, ok = agent_token_usage_from_json(`{"tool_calls":1,"est_tokens_total":1,"compactions":0,"updated_at_ms":-1}`)
+	testing.expect(t, !ok, "negative timestamp rejected")
+	_, ok = agent_token_usage_from_json(`{"tool_calls":1,"est_tokens_total":1,"compactions":0,"updated_at_ms":1000000000000000000}`)
+	testing.expect(t, !ok, "absurd timestamp rejected")
+}

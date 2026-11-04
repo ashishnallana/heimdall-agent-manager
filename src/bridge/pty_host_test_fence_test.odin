@@ -134,14 +134,38 @@ pty_host_test_fence_uses_containment_not_prefixes :: proc(t: ^testing.T) {
 
 @(test)
 pty_host_test_fence_resolves_symlink_aliases :: proc(t: ^testing.T) {
-	dir := fmt.tprintf("/tmp/ham-fence-link-%d", os.get_pid())
-	defer os.remove(dir)
-	// Symlink inside /tmp pointing at the real home: must be refused.
-	home, _ := os.lookup_env("HOME", context.temp_allocator)
-	if home != "" && os.is_dir(home) {
-		testing.expect(t, os.symlink(home, dir) == nil, "symlink setup")
-		testing.expect(t, !pty_host_test_socket_allowed(fmt.tprintf("%s/.local/share/heimdall/x.sock", dir)), "symlink into data dir must be refused")
-		testing.expect(t, !pty_host_test_socket_allowed(fmt.tprintf("%s/anything.sock", dir)), "symlink escaping /tmp must be refused")
+	// Independent of $HOME: the symlink target is a dedicated directory that is
+	// itself outside every allowed root (HOME may be under /tmp in isolated runs).
+	target: string
+	for base in ([]string{"/var/tmp", "/dev/shm", "/run/user"}) {
+		if !os.is_dir(base) do continue
+		// Skip a base the fence allows (e.g. TMPDIR=/var/tmp): it would not be "outside".
+		if pty_host_test_socket_allowed(fmt.tprintf("%s/ham-fence-probe.sock", base)) do continue
+		candidate := fmt.tprintf("%s/ham-fence-target-%d", base, os.get_pid())
+		if os.make_directory(candidate) == nil {
+			target = candidate
+			break
+		}
+	}
+	if target == "" {
+		fmt.eprintln("skip: no writable directory outside the fenced roots")
+		return
+	}
+	defer os.remove(target)
+	link := fmt.tprintf("/tmp/ham-fence-link-%d", os.get_pid())
+	defer os.remove(link)
+	if !testing.expect(t, os.symlink(target, link) == nil, "symlink setup") do return
+	// A path that is lexically inside /tmp but resolves outside it must be refused.
+	testing.expect(t, !pty_host_test_socket_allowed(fmt.tprintf("%s/anything.sock", link)), "symlink escaping /tmp must be refused")
+	testing.expect(t, !pty_host_test_socket_allowed(fmt.tprintf("%s/.local/share/heimdall/x.sock", link)), "symlink into a data-dir-shaped path must be refused")
+
+	// Control: a symlink to a real directory inside /tmp stays allowed.
+	inside := fmt.tprintf("/tmp/ham-fence-inside-%d", os.get_pid())
+	inside_link := fmt.tprintf("/tmp/ham-fence-inside-link-%d", os.get_pid())
+	defer os.remove(inside)
+	defer os.remove(inside_link)
+	if os.make_directory(inside) == nil && os.symlink(inside, inside_link) == nil {
+		testing.expect(t, pty_host_test_socket_allowed(fmt.tprintf("%s/ok.sock", inside_link)), "symlink within /tmp is allowed")
 	}
 }
 
