@@ -48,7 +48,7 @@ const actionsProps = { debugPrefix: 'conversation', mobile: false, provider: 'cl
 let lastExpansion: Expansion | undefined;
 /** Every committed expansion, so transient collapses between focusout and focusin show up. */
 const committed: boolean[] = [];
-function Morph({ inputs = {}, initialDraft = '', onFieldKeyDown, outside = true, sendDisabled }: { inputs?: Partial<Inputs>; initialDraft?: string; onFieldKeyDown?: (event: React.KeyboardEvent<HTMLTextAreaElement>) => void; outside?: boolean; sendDisabled?: boolean }) {
+function Morph({ inputs = {}, initialDraft = '', onFieldKeyDown, outside = true, sendDisabled, onUpload, onPaneToggle }: { inputs?: Partial<Inputs>; initialDraft?: string; onFieldKeyDown?: (event: React.KeyboardEvent<HTMLTextAreaElement>) => void; outside?: boolean; sendDisabled?: boolean; onUpload?: () => void; onPaneToggle?: () => void }) {
   const [draft, setDraft] = React.useState(initialDraft);
   const expansion = useComposerExpanded({ draft, ...inputs });
   lastExpansion = expansion;
@@ -57,7 +57,7 @@ function Morph({ inputs = {}, initialDraft = '', onFieldKeyDown, outside = true,
     h(MessageComposerMorphShell, {
       expansion, debugPrefix: 'conversation',
       context: h('button', { type: 'button', 'data-debug-id': 'conversation-composer-bridge-chip' }, 'riverwood'),
-      actions: h(MessageComposerActions, { ...actionsProps, sendDisabled: sendDisabled ?? draft.trim().length === 0, morph: { expanded: expansion.expanded }, pendingActions: inputs.pendingActions ? h('button', { type: 'button', 'data-debug-id': 'pending-approve-btn' }, 'Approve') : undefined, readOnly: inputs.readOnly }),
+      actions: h(MessageComposerActions, { ...actionsProps, ...(onUpload ? { onUpload } : {}), ...(onPaneToggle ? { onPaneToggle } : {}), sendDisabled: sendDisabled ?? draft.trim().length === 0, morph: { expanded: expansion.expanded }, pendingActions: inputs.pendingActions ? h('button', { type: 'button', 'data-debug-id': 'pending-approve-btn' }, 'Approve') : undefined, readOnly: inputs.readOnly }),
       children: h(MessageComposerInput, { morph: true, mobile: false, debugId: 'conversation-composer-input', value: draft, placeholder: 'Message the agent', onChange: event => setDraft(event.target.value), onKeyDown: onFieldKeyDown }),
     }),
     outside ? h('button', { type: 'button', 'data-debug-id': 'outside-btn' }, 'Elsewhere') : null,
@@ -110,6 +110,71 @@ test('focus opens; moving focus between the field and composer controls keeps it
   await act(async () => q<HTMLButtonElement>(container, 'outside-btn')!.focus());
   assert.equal(expandedOf(container), 'false');
   assert.equal(lastExpansion!.focusWithin, false);
+});
+
+/** A press the way WebKit (Safari, iOS) delivers it: the pressed <button> never takes focus,
+ *  so the field blurs to <body> (relatedTarget null). Desktop Safari blurs on mousedown,
+ *  before pointerup; iOS sends pointerdown/pointerup at touch time and the compatibility
+ *  mousedown (with the blur) just before click. The click is only delivered when the target
+ *  is still hit-testable: a browser never dispatches it into an inert subtree, and jsdom does
+ *  not model inert, so that check is made here, at the moment the click would be dispatched. */
+async function webkitPress(target: HTMLElement, order: 'desktop' | 'ios' = 'desktop') {
+  const fire = (type: string) => act(async () => { target.dispatchEvent(new dom.window.MouseEvent(type, { bubbles: true, cancelable: true, button: 0 })); });
+  const blurField = () => act(async () => { (document.activeElement as HTMLElement | null)?.blur(); });
+  await fire('pointerdown');
+  if (order === 'desktop') { await fire('mousedown'); await blurField(); await fire('pointerup'); await fire('mouseup'); }
+  else { await fire('pointerup'); await fire('mousedown'); await blurField(); await fire('mouseup'); }
+  if (target.closest('[inert]') || (target as HTMLButtonElement).disabled) return false;
+  await act(async () => { target.click(); });
+  return true;
+}
+
+for (const order of ['desktop', 'ios'] as const) {
+  test(`WebKit ${order} press on + and terminal (blur relatedTarget null, button never focused) runs the handler and keeps the composer open`, async () => {
+    const calls: string[] = [];
+    const { container } = await mount(h(Morph, { onUpload: () => calls.push('upload'), onPaneToggle: () => calls.push('terminal') }));
+    const field = fieldOf(container);
+    await act(async () => field.focus());
+    committed.length = 0;
+    for (const [id, call] of [['conversation-attach-btn', 'upload'], ['conversation-request-pane-btn', 'terminal']] as const) {
+      const button = q<HTMLButtonElement>(container, id)!;
+      assert.equal(await webkitPress(button, order), true, `${id} was inert (collapsed) when its click would be dispatched`);
+      assert.equal(calls.at(-1), call, `${id} handler ran`);
+      assert.notEqual(document.activeElement, button, 'models WebKit: the button did not take focus');
+      assert.equal(expandedOf(container), 'true');
+    }
+    assert.deepEqual(calls, ['upload', 'terminal']);
+    assert.ok(committed.every(Boolean), `no collapsed frame during either press: ${committed}`);
+    // Engaged with focus on <body>: a press truly outside ends it.
+    const outside = q<HTMLButtonElement>(container, 'outside-btn')!;
+    await webkitPress(outside, order);
+    assert.equal(expandedOf(container), 'false', 'a press outside the composer collapses it');
+    assert.equal(lastExpansion!.focusWithin, false);
+  });
+}
+
+test('after a WebKit control press, focus returning to the field, Tab/Shift+Tab inside, or focus leaving resolve correctly', async () => {
+  const { container } = await mount(h(Morph));
+  const field = fieldOf(container);
+  await act(async () => field.focus());
+  await webkitPress(q<HTMLButtonElement>(container, 'conversation-tasks-btn')!);
+  assert.equal(expandedOf(container), 'true');
+  // Keyboard focus anywhere in the composer (Tab / Shift+Tab land on its controls) keeps it open.
+  const bridge = q<HTMLButtonElement>(container, 'conversation-composer-bridge-chip')!;
+  await act(async () => bridge.focus());
+  assert.equal(expandedOf(container), 'true');
+  await act(async () => field.focus());
+  assert.equal(expandedOf(container), 'true');
+  // Held again, then keyboard focus moves outside (Tab past the composer): collapses.
+  await webkitPress(q<HTMLButtonElement>(container, 'conversation-attach-btn')!);
+  assert.equal(expandedOf(container), 'true');
+  await act(async () => q<HTMLButtonElement>(container, 'outside-btn')!.focus());
+  assert.equal(expandedOf(container), 'false', 'focus moving outside ends the press hold');
+  // A completed press inside (into the field) does not leak a hold into a later plain blur.
+  await webkitPress(field);
+  await act(async () => field.focus());
+  await act(async () => field.blur());
+  assert.equal(expandedOf(container), 'false', 'blur to <body> without a composer press collapses');
 });
 
 test('window blur (relatedTarget null, document unfocused) keeps it open like :focus-within', async () => {

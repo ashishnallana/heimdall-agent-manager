@@ -257,12 +257,51 @@ export function useComposerExpanded(inputs: ComposerExpansionInputs): ComposerEx
   const [focusWithin, setFocusWithin] = useState(false);
   const latest = useRef(inputs);
   latest.current = inputs;
+  // WebKit (Safari, iOS) does not focus a pressed <button>: pressing + or the terminal
+  // button blurs the field with `relatedTarget` null, and collapsing then makes the tools
+  // inert before the click lands. `pressInside` is true from a primary press on the
+  // composer until that interaction's click (or cancel); `held` means the composer stays
+  // engaged although focus went nowhere. A press or focus outside the composer ends it.
+  const pressInside = useRef(false);
+  const held = useRef(false);
   const ref = useCallback((node: HTMLDivElement | null) => { root.current = node; }, []);
-  const onFocus = useCallback(() => setFocusWithin(true), []);
+  useEffect(() => {
+    const doc = root.current?.ownerDocument ?? (typeof document === 'undefined' ? null : document);
+    if (!doc) return;
+    const inside = (target: EventTarget | null) => Boolean(root.current && target && root.current.contains(target as Node));
+    const release = () => {
+      if (!held.current) return;
+      held.current = false;
+      setFocusWithin(false);
+    };
+    const onPointerDown = (event: Event) => {
+      pressInside.current = inside(event.target);
+      if (!pressInside.current) release();
+    };
+    const onPressEnd = () => { pressInside.current = false; };
+    const onFocusIn = (event: Event) => {
+      if (inside(event.target)) held.current = false;
+      else release();
+    };
+    doc.addEventListener('pointerdown', onPointerDown, true);
+    doc.addEventListener('focusin', onFocusIn, true);
+    // Bubble phase: the press is over once its click has been handled.
+    doc.addEventListener('click', onPressEnd);
+    doc.addEventListener('pointercancel', onPressEnd, true);
+    return () => {
+      doc.removeEventListener('pointerdown', onPointerDown, true);
+      doc.removeEventListener('focusin', onFocusIn, true);
+      doc.removeEventListener('click', onPressEnd);
+      doc.removeEventListener('pointercancel', onPressEnd, true);
+    };
+  }, []);
+  const onFocus = useCallback(() => { held.current = false; setFocusWithin(true); }, []);
   const onBlur = useCallback((event: ReactFocusEvent<HTMLDivElement>) => {
     const node = root.current;
     const next = event.relatedTarget as Node | null;
     if (node && next && node.contains(next)) return;
+    // Focus went nowhere because the user pressed one of the composer's own controls.
+    if (!next && pressInside.current) { held.current = true; return; }
     // The window lost focus but the field keeps it (app switch, devtools): stay open, as
     // `:focus-within` would. Focus returning fires onFocus again.
     if (!next && node && !node.ownerDocument.hasFocus() && node.contains(node.ownerDocument.activeElement)) return;
@@ -277,6 +316,7 @@ export function useComposerExpanded(inputs: ComposerExpansionInputs): ComposerEx
     if (target.tagName !== 'TEXTAREA' || !target.hasAttribute('data-composer-morph-field')) return;
     if (target.value.length > 0) return;
     event.preventDefault();
+    pressInside.current = false;
     target.blur();
   }, []);
   const onMouseDown = useCallback((event: ReactMouseEvent<HTMLDivElement>) => {

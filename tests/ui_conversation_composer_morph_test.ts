@@ -22,7 +22,7 @@ import type { QuoteContext } from '../src/ui/utils/quoteContext.ts';
 const sampleQuote: QuoteContext = { version: 1, id: 'q1', selectedText: 'quoted words', capturedAt: 1,
   source: { kind: 'agent_message', messageId: 'm1', conversationId: 'workerchat', chainId: 'c', agentInstanceId: 'worker', author: 'Worker', createdUnixMs: 1, href: '#/conversations/worker?msg=m1' } };
 
-type Options = { draft?: string; attention?: boolean; recovery?: boolean; aux?: boolean };
+type Options = { draft?: string; attention?: boolean; recovery?: boolean; aux?: boolean; onOpenAuxTab?: (content: any, title?: string) => void };
 
 async function fixture(options: Options, run: (ctx: any) => Promise<void>) {
   const dom = new JSDOM('<div id="root"></div><button id="outside">outside</button>', { url: 'http://localhost/#/conversations/worker', pretendToBeVisual: true });
@@ -35,7 +35,7 @@ async function fixture(options: Options, run: (ctx: any) => Promise<void>) {
     frames.add(timer); return timer as any;
   };
   dom.window.cancelAnimationFrame = (id: any) => { clearTimeout(id); frames.delete(id); };
-  dom.window.matchMedia = () => ({ matches: false, addEventListener() {}, removeEventListener() {} }) as any;
+  dom.window.matchMedia = () => ({ matches: false, addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {} }) as any;
   dom.window.HTMLElement.prototype.scrollIntoView = () => {};
   dom.window.HTMLElement.prototype.scrollTo = () => {};
   (dom.window.HTMLElement.prototype as any).attachEvent = () => {};
@@ -83,7 +83,7 @@ async function fixture(options: Options, run: (ctx: any) => Promise<void>) {
   const focusIn = async (el: HTMLElement) => act(async () => { el.focus(); });
   const blurTo = async (el: HTMLElement) => act(async () => { el.focus(); });
   try {
-    let content: React.ReactElement = React.createElement(AgentChatPane, { agentInstanceId: 'worker', paneId: 'test-pane', isMobile: false } as any);
+    let content: React.ReactElement = React.createElement(AgentChatPane, { agentInstanceId: 'worker', paneId: 'test-pane', isMobile: false, onOpenAuxTab: options.onOpenAuxTab } as any);
     if (options.aux) {
       // The REAL aux mount path: the mobile sheet -> AuxTabContent -> AgentChatPane variant auxSubagent.
       const { AuxDock } = await import('../src/ui/components/auxiliary/AuxDock.tsx');
@@ -247,3 +247,55 @@ test('aux sub-agent chat: the mobile sheet is the visible region and the chat si
     void dom;
   });
 });
+
+// WebKit (Safari, iOS) never focuses a pressed <button>: the field blurs to <body> with
+// relatedTarget null. Before the press hold, that collapsed the card and made the tools
+// inert between the press and its click, so + and the terminal button "disappeared". The
+// click is only dispatched when the target is not inert (a browser never delivers it into an
+// inert subtree; jsdom does not model inert, so it is checked at dispatch time).
+for (const aux of [false, true]) {
+  test(`${aux ? 'aux sub-agent' : 'main'} chat: WebKit-style presses on + and terminal run their handlers; the card stays open until a press outside`, async () => {
+    const opened: string[] = [];
+    // Main chat: the workbench owns the aux dock, so the pane's opener is a prop. Aux: the
+    // real AuxDock opener adds a tab to the store.
+    await fixture({ aux, onOpenAuxTab: aux ? undefined : (content: any) => opened.push(content.type) }, async ({ q, store, wait, expanded, focusIn, outside, dom }) => {
+      const doc = dom.window.document as Document;
+      const press = async (target: HTMLElement) => {
+        const fire = (type: string) => act(async () => { target.dispatchEvent(new dom.window.MouseEvent(type, { bubbles: true, cancelable: true, button: 0 })); });
+        await fire('pointerdown'); await fire('mousedown');
+        await act(async () => { (doc.activeElement as HTMLElement | null)?.blur(); });
+        await fire('pointerup'); await fire('mouseup');
+        if (target.closest('[inert]')) return false;
+        await act(async () => { target.click(); });
+        return true;
+      };
+      await wait(() => Boolean(q('conversation-composer-input')), 'composer input');
+      await focusIn(q('conversation-composer-input'));
+      assert.equal(expanded(), 'true');
+      const fileInput = q('conversation-attach-input') as HTMLInputElement;
+      let chooserOpened = 0; fileInput.click = () => { chooserOpened++; };
+      assert.equal(await press(q('conversation-attach-btn')), true, '+ was inert when its click was dispatched');
+      assert.equal(chooserOpened, 1, '+ opened the file chooser');
+      await act(async () => { fileInput.dispatchEvent(new dom.window.Event('cancel')); });
+      assert.equal(expanded(), 'true', 'still engaged after the chooser closes: focus never left for somewhere else');
+      await press(outside);
+      assert.equal(expanded(), 'false', 'a press outside the composer collapses it');
+      // Terminal: open the card again, press it, and the handler must run.
+      await focusIn(q('conversation-composer-input'));
+      const terminal = q('conversation-request-pane-btn');
+      assert.ok(terminal, 'terminal button rendered');
+      const before = JSON.stringify(store.getState().auxPanes);
+      assert.equal(await press(terminal), true, 'terminal was inert when its click was dispatched');
+      if (aux) {
+        // In the aux dock the terminal opens as the active tab, replacing this chat.
+        assert.notEqual(JSON.stringify(store.getState().auxPanes), before);
+        assert.match(JSON.stringify(store.getState().auxPanes), /"activeTabId":"pty__worker"/, 'terminal button opened the terminal tab');
+      } else {
+        assert.deepEqual(opened, ['agentPty'], 'terminal button opened a terminal tab');
+        assert.equal(expanded(), 'true', 'still engaged after the terminal press');
+        await press(outside);
+        assert.equal(expanded(), 'false');
+      }
+    });
+  });
+}
