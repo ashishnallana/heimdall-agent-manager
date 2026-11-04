@@ -151,6 +151,19 @@ test('a message that cannot decrypt never offers Quote', async () => {
     assert.equal(dom.window.document.body.textContent?.includes('unreadable secret'), false);
   });
 });
+test('a live reply that fails to decrypt is not hidden by the reveal and settles', async () => {
+  await fixture(async ({ dom, render }) => {
+    const { keyringFromHex } = await import('./helpers/vaultTestKeyring.ts');
+    const body = await encryptVaultText('unreadable secret', await keyringFromHex('99'.repeat(32)));
+    let settled = 0;
+    await render(React.createElement(ThreadMessageBody, { body, reveal: { enabled: true, onSettled: () => { settled += 1; } } }));
+    await act(async () => { await new Promise(r => setTimeout(r, 30)); });
+    assert.equal(settled, 1, 'the reply settles, so its chrome shows');
+    assert.equal(dom.window.document.querySelectorAll('[data-sr="h"]').length, 0, 'nothing stays transparent');
+    assert.ok((dom.window.document.querySelector('.markdown')?.textContent || '').length > 0, 'the body renders');
+    assert.equal(dom.window.document.body.textContent?.includes('unreadable secret'), false);
+  });
+});
 test('whole chat pane routes worker Quote into coordinator draft, retains it on failed send and clears only after successful retry', async () => {
   await fixture(async ({ dom, store, key, render, select, q, wait }) => {
     const posts: any[] = [];

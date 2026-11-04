@@ -3,6 +3,7 @@ import { useDispatch, useSelector } from 'react-redux';
 import { artifactsApi } from '../api/endpoints/artifacts';
 import { highlightCode, getActiveShikiTheme } from '../utils/codeHighlight';
 import { escapeHtml, normalizeMarkdownSource, renderMarkdown } from './markdownRender';
+import { useStreamReveal, type StreamRevealOptions } from './chat/streamReveal';
 
 export {
   ARTIFACT_ID_PATTERN,
@@ -62,6 +63,8 @@ export type MarkdownBodyProps = {
   'data-debug-id'?: string;
   onArtifactClick?: (artifactId: string) => void;
   onTextSelectionChange?: (selection: MarkdownTextSelection | null) => void;
+  /** Word-by-word reveal of a live reply (chat/streamReveal.ts). Omit to render instantly. */
+  reveal?: StreamRevealOptions;
 };
 
 function csvEscape(value: string): string {
@@ -132,9 +135,10 @@ export async function renderMermaidElement(
   }
 }
 
-export default function MarkdownBody({ source, className, compact, copyAll = true, 'data-debug-id': dataDebugId, onArtifactClick, onTextSelectionChange }: MarkdownBodyProps) {
+export default function MarkdownBody({ source, className, compact, copyAll = true, 'data-debug-id': dataDebugId, onArtifactClick, onTextSelectionChange, reveal }: MarkdownBodyProps) {
   const rootRef = useRef<HTMLDivElement | null>(null);
   const html = useMemo(() => renderMarkdown(source || '', copyAll), [source, copyAll]);
+  useStreamReveal(rootRef, html, reveal);
   // Compact (chat) spacing lives in `.markdown-compact` (styles.css): a `space-y-*`
   // utility out-specifies the heading/paragraph margins and collapses every gap to 4px.
   const spacing = compact ? 'markdown-compact' : 'space-y-3';

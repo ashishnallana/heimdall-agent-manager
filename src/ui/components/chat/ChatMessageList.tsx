@@ -2,6 +2,8 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, use
 import type { ReactNode, RefObject, UIEvent } from 'react';
 import { useSelector } from 'react-redux';
 import Markdown from '../Markdown';
+import { replyPhase, settleReply, useLiveReplies, useReplyMotionVersion } from './replyMotion';
+import { useSettleWithoutReveal, type StreamRevealOptions } from './streamReveal';
 import ChatHoverCopyButton from '../ChatHoverCopyButton';
 import { VaultText } from '../vault/VaultText';
 import {
@@ -194,7 +196,7 @@ export function cubicBezierAt([x1, y1, x2, y2]: [number, number, number, number]
   return by(t);
 }
 
-function DefaultMessageBody({ body }: { body: string }) {
+function DefaultMessageBody({ body, reveal }: { body: string; reveal?: StreamRevealOptions }) {
   const isArmored = isVaultArmored(body);
   const containsArmored = containsVaultArmored(body);
   const hasVault = isArmored || containsArmored;
@@ -230,6 +232,8 @@ function DefaultMessageBody({ body }: { body: string }) {
     };
   }, [body, hasVault, isArmored, activeKey]);
 
+  // A locked body drops the reveal, so settle the live reply right away.
+  useSettleWithoutReveal(hasVault && !activeKey ? reveal : undefined);
   if (isArmored && !activeKey) {
     return <VaultText value={body} as="div" />;
   }
@@ -237,7 +241,9 @@ function DefaultMessageBody({ body }: { body: string }) {
     const sanitized = replaceVaultTokens(body, '[🔒 Encrypted]');
     return <Markdown source={sanitized} compact copyAll={false} />;
   }
-  return <Markdown source={decrypted !== null ? decrypted : body} compact copyAll={false} />;
+  // Hold the reveal until a vault body has decrypted, so ciphertext never shows.
+  return <Markdown source={decrypted !== null ? decrypted : body} compact copyAll={false}
+    reveal={reveal && { ...reveal, hold: reveal.hold || (hasVault && decrypted === null) }} />;
 }
 
 // The copy text is resolved ahead of the click: iOS Safari rejects a clipboard write made
@@ -306,7 +312,8 @@ export default function ChatMessageList({
   onReply?: (reply: string) => void;
   onAnswerQuestions?: (sourceMessageId: string, submission: QuestionSubmission) => Promise<unknown>;
   renderMessageTop?: (args: { message: ChatMessage; index: number; messages: ChatMessage[] }) => React.ReactNode;
-  renderMessageBody?: (args: { message: ChatMessage; onReply: (reply: string) => void }) => React.ReactNode;
+  /** `reveal` is set for an agent reply that arrived live (replyMotion.ts); pass it to Markdown. */
+  renderMessageBody?: (args: { message: ChatMessage; onReply: (reply: string) => void; reveal?: StreamRevealOptions }) => React.ReactNode;
   formatTimestamp?: (unixMs: number) => ChatTimestamp;
   getDeliveryStatus?: (message: ChatMessage) => ChatDeliveryStatus;
   agentIsWorking?: boolean;
@@ -368,6 +375,9 @@ export default function ChatMessageList({
   const gaveUpRef = useRef<string | null>(null);
   const [focusAnnouncement, setFocusAnnouncement] = useState('');
   const reduceMotion = useReducedMotion();
+  // Incoming replies: live agent replies reveal word by word, history renders instantly.
+  useLiveReplies(conversationKey, messages, reduceMotion);
+  useReplyMotionVersion();
   const pinEnabled = Boolean(pinOnSend);
   const pinOnSendRef = useRef(pinOnSend);
   pinOnSendRef.current = pinOnSend;
@@ -999,6 +1009,11 @@ export default function ChatMessageList({
             const eligible = messageOptionsEligible(message, revision);
             const options = eligible ? visibleMessageOptions(message, Boolean(activeKey)) : [];
             const questionGroup = message.messageType === 'multi_question' ? parseQuestionGroup(message.metadata) : null;
+            const replyMotion = replyPhase(message.key);
+            const reveal: StreamRevealOptions | undefined = replyMotion ? {
+              enabled: replyMotion === 'revealing',
+              onSettled: () => settleReply(message.key),
+            } : undefined;
             return (
               <div key={message.key} data-debug-id={`${debugPrefix}-message-${message.messageId}`}
                 data-chat-pin-index={pinEnabled ? index : undefined}
@@ -1007,7 +1022,7 @@ export default function ChatMessageList({
                 <div className={`flex min-w-0 max-w-full ${message.isUser ? 'max-w-[86%] items-end sm:max-w-[78%]' : 'w-full items-start'} flex-col text-sm`}>
                   {renderMessageTop ? renderMessageTop({ message, index, messages }) : null}
                   <div data-chat-body="" className={`min-w-0 max-w-full overflow-hidden break-words [overflow-wrap:anywhere] ${message.isUser ? 'rounded-[15px] border border-subtle bg-surface-raised px-[14px] py-[10px] text-primary' : 'w-full text-primary'}`}>
-                    {renderMessageBody ? renderMessageBody({ message, onReply: reply }) : <DefaultMessageBody body={message.body} />}
+                    {renderMessageBody ? renderMessageBody({ message, onReply: reply, reveal }) : <DefaultMessageBody body={message.body} reveal={reveal} />}
                     <ChatActionCard message={message} conversationId={conversationKey} onReply={reply} />
                     {questionGroup && !message.isUser ? <MultiQuestionForm
                       key={`${conversationKey}-${message.messageId}`} group={questionGroup}
@@ -1039,9 +1054,12 @@ export default function ChatMessageList({
                     </div>
                   )}
                   {!hideCardChrome && (
-                    <div data-debug-id={`${debugPrefix}-message-actions-${message.messageId}`} data-chat-actions="" className="mt-1 flex min-h-11 w-full items-center justify-end gap-1.5 text-[10px] text-faint sm:min-h-8">
-                      <MessageCopyButton debugId={`${debugPrefix}-message-copy-btn-${message.messageId}`} body={message.body} className="rounded-full border border-subtle bg-surface/80 shadow-lg" />
-                      {timestamp.label ? <time data-debug-id={`${debugPrefix}-message-${message.messageId}-time`} dateTime={timestamp.iso} title={timestamp.iso}>{timestamp.label}</time> : null}
+                    // Phase 4: a live reply holds its action row (kept in layout) until the text
+                    // settles, then fades it in, with the meta line after it.
+                    <div data-debug-id={`${debugPrefix}-message-actions-${message.messageId}`} data-chat-actions="" data-reply-chrome={replyMotion || undefined}
+                      className={`mt-1 flex min-h-11 w-full items-center justify-end gap-1.5 text-[10px] text-faint sm:min-h-8${replyMotion === 'revealing' ? ' reply-chrome-held' : ''}`}>
+                      <MessageCopyButton debugId={`${debugPrefix}-message-copy-btn-${message.messageId}`} body={message.body} className={`rounded-full border border-subtle bg-surface/80 shadow-lg${replyMotion === 'settled' ? ' reply-chrome-in' : ''}`} />
+                      {timestamp.label ? <time data-debug-id={`${debugPrefix}-message-${message.messageId}-time`} dateTime={timestamp.iso} title={timestamp.iso} className={replyMotion === 'settled' ? 'reply-meta-in' : undefined}>{timestamp.label}</time> : null}
                       {message.isUser && delivery.glyph ? (
                         <span data-debug-id={`${debugPrefix}-message-${message.messageId}-status`} title={delivery.label} className={delivery.tone}>{delivery.glyph} {delivery.label}</span>
                       ) : null}

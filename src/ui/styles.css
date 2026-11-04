@@ -991,6 +991,30 @@ body {
   .agent-action-detail { animation: none; background: none; color: var(--color-text-muted); }
 }
 
+/* Incoming reply text (streamReveal.ts, ChatMessageList reply chrome). The working
+   indicator is unchanged.
+   Phase 3: each revealed word fades 0 -> 1, leaving a soft gradient on the newest text.
+   Phase 4: the action row, then the meta line, fade in once the text settles.
+   Opacity and transform only. */
+@keyframes reply-fade-in { from { opacity: 0; } to { opacity: 1; } }
+
+/* streamReveal.ts: unrevealed text and blocks keep their box (final layout, no reflow)
+   but are transparent; new words and blocks fade in. */
+[data-sr="h"] { opacity: 0; }
+.stream-chunk[data-sr="in"] { animation: reply-fade-in 350ms cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+[data-sr="b"] { animation: reply-fade-in 350ms cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+[data-sr="c"] { animation: reply-fade-in 200ms ease-out both; }
+
+/* Completion: the action row 120ms after the last word settles, the meta line 250ms later. */
+.reply-chrome-held { opacity: 0; pointer-events: none; }
+.reply-chrome-in { animation: reply-rise-in 200ms ease-out 120ms both; }
+.reply-meta-in { animation: reply-fade-in 200ms ease-out 370ms both; }
+@keyframes reply-rise-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+
+@media (prefers-reduced-motion: reduce) {
+  .stream-chunk[data-sr="in"], [data-sr="b"], [data-sr="c"], .reply-chrome-in, .reply-meta-in { animation: none; }
+}
+
 /* Markdown Code Blocks / Shiki Highlighting (REQ-UI-MARKDOWN-ENHANCE) */
 .markdown-code-block pre.shiki,
 .code-container pre.shiki {

@@ -104,6 +104,7 @@ import LiveToolActivity from '../extension/LiveToolActivity';
 import AgentActivityBubbles from '../chat/AgentActivityBubbles';
 import AtMentionPopup, { type MentionEntity } from '../chat/AtMentionPopup';
 import ChatMessageList from '../chat/ChatMessageList';
+import { useSettleWithoutReveal, type StreamRevealOptions } from '../chat/streamReveal';
 import InstanceReconfigurationProgress from '../chat/InstanceReconfigurationProgress';
 import { MessageComposerInput, MessageComposerActions, MessageComposerMorphShell, MessageComposerStatus, useComposerDockInset, useComposerExpanded } from '../chat/MessageComposer';
 import RuntimeConfigurationOptions from '../chat/RuntimeConfigurationOptions';
@@ -430,12 +431,17 @@ function PaneCaptureOutput({ body: rawBody, messageId }: { body: string; message
   );
 }
 
-export function ThreadMessageBody({ body, onQuote, quoteDisabledReason = '' }: {
+export function ThreadMessageBody({ body, onQuote, quoteDisabledReason = '', reveal }: {
   body: string; onQuote?: (selectedText: string) => Promise<void>; quoteDisabledReason?: string;
+  /** Live-reply reveal from ChatMessageList (chat/streamReveal.ts). */
+  reveal?: StreamRevealOptions;
 }) {
   const [selection, setSelection] = useState<MarkdownTextSelection | null>(null);
   const dismiss = useCallback(() => setSelection(null), []);
   const [decryptedFor, setDecryptedFor] = useState('');
+  // The body whose decrypt failed while unlocked. It renders as-is, without the reveal's
+  // hold, so a failure never leaves the body hidden.
+  const [failedFor, setFailedFor] = useState('');
 
   const isArmored = isVaultArmored(body);
   const containsArmored = containsVaultArmored(body);
@@ -464,7 +470,7 @@ export function ThreadMessageBody({ body, onQuote, quoteDisabledReason = '' }: {
         if (mounted) { setDecrypted(res); setDecryptedFor(body); }
       })
       .catch(() => {
-        if (mounted) { setDecrypted(null); setDecryptedFor(''); }
+        if (mounted) { setDecrypted(null); setDecryptedFor(''); setFailedFor(body); }
       });
     return () => {
       mounted = false;
@@ -473,16 +479,22 @@ export function ThreadMessageBody({ body, onQuote, quoteDisabledReason = '' }: {
 
   useEffect(() => { setSelection(null); }, [body, activeKey, vaultUnlocked]);
   const quoteReady = Boolean(onQuote && vaultUnlocked && activeKey && (!hasVault || (decryptedFor === body && decrypted !== null && !containsVaultArmored(decrypted))));
-  if (isArmored && (!activeKey || !vaultUnlocked)) {
+  const locked = hasVault && (!activeKey || !vaultUnlocked);
+  const decryptFailed = hasVault && !locked && failedFor === body;
+  // A locked or undecryptable body drops the reveal, so settle the live reply right away.
+  useSettleWithoutReveal(locked || decryptFailed ? reveal : undefined);
+  if (isArmored && locked) {
     return <VaultText value={body} as="div" />;
   }
-  if (containsArmored && (!activeKey || !vaultUnlocked)) {
+  if (containsArmored && locked) {
     const sanitized = replaceVaultTokens(body, '[🔒 Encrypted]');
     return <Markdown source={sanitized} compact copyAll={false} />;
   }
   return <>
     <Markdown source={decrypted !== null && decryptedFor === body ? decrypted : body} compact copyAll={false}
-      onTextSelectionChange={quoteReady ? setSelection : undefined} />
+      onTextSelectionChange={quoteReady ? setSelection : undefined}
+      // Hold the reveal until a vault body has decrypted, so ciphertext never shows.
+      reveal={reveal && !decryptFailed ? { ...reveal, hold: reveal.hold || (hasVault && !(decrypted !== null && decryptedFor === body)) } : undefined} />
     {quoteReady && selection ? <QuoteSelectionPopover selection={selection} onDismiss={dismiss}
       disabledReason={quoteDisabledReason} onQuote={() => onQuote!(selection.selectedText)} /> : null}
   </>;
@@ -1958,7 +1970,7 @@ export function AgentChatPane({
     refetchIfStarted(messagesQuery);
   }
 
-  function renderConversationMessageBody(message: ChatMessage) {
+  function renderConversationMessageBody(message: ChatMessage, reveal?: StreamRevealOptions) {
     if (message.messageType === 'pane_capture') {
       const metadata = message.metadata || {};
       const status = message.messageStatus || 'complete';
@@ -2148,7 +2160,7 @@ export function AgentChatPane({
     }
     return (
       <div className="flex flex-col gap-1">
-        <ThreadMessageBody body={message.body}
+        <ThreadMessageBody body={message.body} reveal={reveal}
           onQuote={!message.isUser && (!message.messageType || message.messageType === 'text') ? async selectedText => {
             const epoch = (reduxStore.getState() as any).composerContext?.epoch;
             const generation = routeGeneration.current;
@@ -3441,7 +3453,7 @@ export function AgentChatPane({
           bottomInset={composerDockHeight}
           pinOnSend={isOptimisticSend}
           pinOriginRef={textareaRef}
-          renderMessageBody={({ message }) => renderConversationMessageBody(message)}
+          renderMessageBody={({ message, reveal }) => renderConversationMessageBody(message, reveal)}
           wrapperClassName="relative min-h-0 min-w-0 max-w-full flex-1 overflow-hidden overflow-x-hidden"
           scrollClassName="chat-scrollbar h-full min-h-0 max-w-full space-y-3 overflow-y-auto overflow-x-hidden rounded-none bg-canvas px-1 py-3 sm:space-y-4 sm:rounded-[18px] sm:px-4 sm:py-4"
           emptyState={

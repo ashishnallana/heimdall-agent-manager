@@ -148,7 +148,26 @@ Running \`npm test -- tests/ui_pane_transport_e2e_test.ts\` now.`],
 
 const SAMPLE_MESSAGES: ChatMessage[] = SAMPLE_BODIES.map(([isUser, body], index) => message(index, isUser, body));
 
-const AGENT_REPLY = `Got it (demo reply, nothing was sent). Your message stays pinned at the top while this reply grows below it; scroll up to see the full history again.`;
+// The incoming-reply demo: a long reply with a heading, bullets, a code block and a table,
+// revealed word by word once it arrives.
+const AGENT_REPLY = `Done. Here's what I found while checking the **send animation** (demo reply, nothing was sent).
+
+### What changed
+- The pinned bubble stays put while the reply grows below it, so there's no single-frame jump and nothing above moves.
+- Each new chunk fades in where it lands, leaving a soft gradient on the newest words.
+- Bullets, headings, code blocks and table rows arrive with their first words.
+
+\`\`\`ts
+// Only the newly revealed tail animates.
+revealer.reveal(nextLength, true);
+\`\`\`
+
+| Phase | Timing |
+| --- | --- |
+| Text chunk | 350ms ease-out |
+| Action row | +120ms, 200ms |
+
+Earlier text never re-animates, and \`inline code\` or **bold** never flashes raw markdown.`;
 
 const LONG_AGENT_REPLY = Array.from({ length: 14 }, (_, i) => `${i + 1}. A long demo reply line, so the exchange outgrows the viewport and you scroll through it normally.`).join('\n\n');
 
@@ -406,6 +425,7 @@ function ComposerDemo() {
     setAttachments([]);
     setAgentIsWorking(true);
     window.clearTimeout(replyTimerRef.current);
+    // Deliver the whole reply at once, as the hub does.
     replyTimerRef.current = window.setTimeout(() => {
       setAgentIsWorking(false);
       setMessages((prev) => [...prev, message(prev.length, false, /\blong\b/i.test(text) ? LONG_AGENT_REPLY : AGENT_REPLY)]);
