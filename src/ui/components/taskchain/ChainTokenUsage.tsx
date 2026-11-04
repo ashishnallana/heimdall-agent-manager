@@ -144,8 +144,8 @@ export function ChainTokenUsageView({ usage }: { usage: ChainTokenUsage | null }
   );
 }
 
-/** The overview section: fetches the chain's token usage and renders the view. */
-export function ChainTokenUsageSection({ chainId }: { chainId: string }) {
+/** Fetches the chain's token usage and renders the view. `embedded` drops the card chrome and title for hosts (the Chain overview panel) that supply their own section header. */
+export function ChainTokenUsageSection({ chainId, embedded = false }: { chainId: string; embedded?: boolean }) {
   const { data, error, isLoading, isFetching, refetch } = useGetTaskChainTokenUsageQuery({ chainId }, { skip: !chainId });
   const usage = React.useMemo(() => normalizeChainTokenUsage(data), [data]);
   // Token events refresh this card only while it is mounted (T14,
@@ -159,8 +159,11 @@ export function ChainTokenUsageSection({ chainId }: { chainId: string }) {
     return view.release;
   }, [chainId]);
   return (
-    <section data-debug-id="chain-token-usage" className="min-w-0 rounded-xl border border-subtle bg-surface p-4 text-left">
-      <Text as="h3" role="overline" tone="faint" className="mb-2 uppercase">Token usage</Text>
+    <section
+      data-debug-id="chain-token-usage"
+      className={embedded ? 'min-w-0 text-left' : 'min-w-0 rounded-xl border border-subtle bg-surface p-4 text-left'}
+    >
+      {!embedded && <Text as="h3" role="overline" tone="faint" className="mb-2 uppercase">Token usage</Text>}
       {isLoading && !data ? (
         <Text as="p" role="body-sm" tone="muted">Loading token usage…</Text>
       ) : error && !data ? (

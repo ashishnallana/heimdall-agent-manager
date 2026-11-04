@@ -34,8 +34,6 @@ export interface TicketBoardViewProps {
   summarySlot?: React.ReactNode;
   /** Whole workflow runs in the same chain, rendered vertically before tickets. */
   workSlot?: React.ReactNode;
-  /** Rendered after the tickets (the chain overview mounts its Token usage section here). */
-  footerSlot?: React.ReactNode;
   hasWorkflowRuns?: boolean;
   names?: TaskNames;
   className?: string;
@@ -128,7 +126,6 @@ export const TicketBoardView: React.FC<TicketBoardViewProps> = ({
   summaryText,
   summarySlot,
   workSlot,
-  footerSlot,
   hasWorkflowRuns = false,
   names = EMPTY_TASK_NAMES,
   className = '',
@@ -243,7 +240,6 @@ export const TicketBoardView: React.FC<TicketBoardViewProps> = ({
           )}
         </div>
       )}
-      {footerSlot}
     </div>
   );
 };

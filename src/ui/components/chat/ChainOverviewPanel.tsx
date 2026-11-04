@@ -37,6 +37,7 @@ import {
   formatFleetRoleName,
 } from '../tasks/FleetManagementDrawer';
 import ArtifactViewer from '../ArtifactViewer';
+import { ChainTokenUsageSection } from '../taskchain/ChainTokenUsage';
 import { HolderName } from '../tasks/HolderName';
 import { buildTaskNames } from '../tasks/taskNames';
 import { ParticipantName } from '../tasks/ParticipantName';
@@ -240,11 +241,11 @@ function AttentionTaskReviewCard({
   return (
     <div
       data-debug-id={`chain-overview-attention-review-${taskId}`}
-      className="mt-3 rounded-lg border border-subtle bg-surface p-3 space-y-3"
+      className="mt-3 rounded-[var(--radius-lg)] border border-subtle bg-surface p-3 space-y-3"
     >
       <div className="flex items-center justify-between">
         <span className="text-xs font-semibold text-primary">Review Action Gate</span>
-        <span className="text-[11px] font-mono text-muted">{taskId}</span>
+        <span className="text-caption font-mono text-muted">{taskId}</span>
       </div>
 
       {isDetailLoading ? (
@@ -255,8 +256,8 @@ function AttentionTaskReviewCard({
       ) : (
         <>
           {checklistItems.length > 0 ? (
-            <div className="space-y-1.5 rounded bg-surface-secondary/50 p-2.5">
-              <span className="text-[11px] font-semibold text-muted uppercase tracking-wider">
+            <div className="space-y-2 rounded-[var(--radius-sm)] bg-surface-raised p-3">
+              <span className="text-overline uppercase text-faint">
                 Acceptance Criteria Checklist
               </span>
               <ul className="space-y-1 text-xs">
@@ -273,11 +274,11 @@ function AttentionTaskReviewCard({
               </ul>
             </div>
           ) : isVaultArmored(rawDescription) && !activeKey ? (
-            <div className="max-h-48 overflow-y-auto rounded bg-surface-secondary/40 p-2 text-xs">
+            <div className="max-h-48 overflow-y-auto rounded-[var(--radius-sm)] bg-surface-raised p-2 text-xs">
               <VaultText value={rawDescription} as="div" fallback="[🔒 Encrypted description]" />
             </div>
           ) : effectiveDescription ? (
-            <div className="max-h-48 overflow-y-auto rounded bg-surface-secondary/40 p-2 text-xs">
+            <div className="max-h-48 overflow-y-auto rounded-[var(--radius-sm)] bg-surface-raised p-2 text-xs">
               <Markdown source={effectiveDescription} compact copyAll={false} />
             </div>
           ) : (
@@ -288,7 +289,7 @@ function AttentionTaskReviewCard({
 
       {/* Review feedback textarea */}
       <div>
-        <label className="block text-[11px] font-medium text-muted mb-1">
+        <label className="block text-caption font-medium text-muted mb-1">
           Review Feedback / Justification
         </label>
         <textarea
@@ -296,7 +297,7 @@ function AttentionTaskReviewCard({
           onChange={(e) => setVoteComment(e.target.value)}
           placeholder="Add comments or required fixes before voting…"
           rows={2}
-          className="w-full rounded border border-subtle bg-canvas px-2.5 py-1.5 text-xs text-primary placeholder:text-muted focus:border-accent focus:outline-none"
+          className="w-full rounded-[var(--radius-sm)] border border-subtle bg-canvas px-3 py-2 text-xs text-primary placeholder:text-muted focus:border-accent focus:outline-none"
         />
       </div>
 
@@ -592,7 +593,7 @@ export default function ChainOverviewPanel({
   return (
     <div
       data-debug-id="chain-overview-panel"
-      className="flex h-full min-h-0 flex-col overflow-y-auto bg-surface text-primary p-3 sm:p-4 space-y-6"
+      className="flex h-full min-h-0 flex-col overflow-y-auto bg-surface text-primary p-4 space-y-6"
     >
       {isChainLoading && (
         <div className="flex items-center justify-center py-8 text-xs text-muted gap-2">
@@ -601,7 +602,7 @@ export default function ChainOverviewPanel({
       )}
 
       {/* SECTION 1: Chain Agents */}
-      <section data-debug-id="chain-overview-section-agents" className="space-y-2.5">
+      <section data-debug-id="chain-overview-section-agents" className="space-y-3">
         <button
           type="button"
           data-debug-id="chain-overview-section-toggle-agents"
@@ -609,14 +610,14 @@ export default function ChainOverviewPanel({
           aria-expanded={!isCollapsed('agents')}
           className="flex w-full items-center justify-between text-left group cursor-pointer"
         >
-          <div className="flex items-center gap-1.5">
+          <div className="flex items-center gap-2">
             <Icon
               name={isCollapsed('agents') ? 'chevron-right' : 'chevron-down'}
               size={14}
               className="text-muted group-hover:text-primary transition-colors"
             />
             <Icon name="bot" size={14} className="text-muted" />
-            <h3 className="text-xs font-semibold uppercase tracking-wider text-muted group-hover:text-primary transition-colors">
+            <h3 className="text-overline uppercase text-faint group-hover:text-primary transition-colors">
               Chain Agents ({members.length})
             </h3>
           </div>
@@ -655,7 +656,7 @@ export default function ChainOverviewPanel({
                         handleNavigateToAgent(instId, name);
                       }
                     }}
-                    className={`group flex h-8 min-w-0 cursor-pointer items-center gap-2 rounded-md px-2 text-xs transition-colors hover:bg-neutral-soft/60 ${
+                    className={`group flex h-8 min-w-0 cursor-pointer items-center gap-2 rounded-[var(--radius-md)] px-2 text-xs transition-colors hover:bg-neutral-soft ${
                       isSelected ? 'bg-accent/10' : ''
                     }`}
                   >
@@ -668,7 +669,7 @@ export default function ChainOverviewPanel({
                       {name}
                     </span>
                     <span
-                      className="min-w-0 flex-1 truncate text-[11px] text-muted"
+                      className="min-w-0 flex-1 truncate text-caption text-muted"
                       title={currentTask ? String(currentTask.title || currentTask.id || '') : 'No ticket'}
                     >
                       {currentTask ? (
@@ -688,7 +689,7 @@ export default function ChainOverviewPanel({
                         onClick={(e) => handleOpenAgentPtyTab(instId, name, e)}
                         title="Open live terminal"
                         aria-label="Open live terminal"
-                        className="grid h-6 w-6 place-items-center rounded text-muted transition-colors hover:bg-neutral-soft hover:text-primary"
+                        className="grid h-6 w-6 place-items-center rounded-[var(--radius-md)] text-muted transition-colors hover:bg-neutral-soft hover:text-primary"
                       >
                         <Icon name="terminal" size={12} />
                       </button>
@@ -700,7 +701,7 @@ export default function ChainOverviewPanel({
                           onClick={(e) => handleStartAgent(instId, e)}
                           title="Start Agent"
                           aria-label="Start Agent"
-                          className="grid h-6 w-6 place-items-center rounded text-accent hover:bg-neutral-soft disabled:opacity-50"
+                          className="grid h-6 w-6 place-items-center rounded-[var(--radius-md)] text-accent hover:bg-neutral-soft disabled:opacity-50"
                         >
                           {isStarting ? <Spinner size="sm" /> : <Icon name="play" size={12} />}
                         </button>
@@ -713,7 +714,7 @@ export default function ChainOverviewPanel({
                             onClick={(e) => handleStopAgent(instId, agentId, e)}
                             title="Stop Agent"
                             aria-label="Stop Agent"
-                            className="grid h-6 w-6 place-items-center rounded text-muted hover:bg-neutral-soft hover:text-danger disabled:opacity-50"
+                            className="grid h-6 w-6 place-items-center rounded-[var(--radius-md)] text-muted hover:bg-neutral-soft hover:text-danger disabled:opacity-50"
                           >
                             {isStopping ? <Spinner size="sm" /> : <Icon name="stop" size={11} />}
                           </button>
@@ -724,7 +725,7 @@ export default function ChainOverviewPanel({
                             onClick={(e) => handleRestartAgent(instId, agentId, e)}
                             title="Restart Agent"
                             aria-label="Restart Agent"
-                            className="grid h-6 w-6 place-items-center rounded text-muted hover:bg-neutral-soft hover:text-primary disabled:opacity-50"
+                            className="grid h-6 w-6 place-items-center rounded-[var(--radius-md)] text-muted hover:bg-neutral-soft hover:text-primary disabled:opacity-50"
                           >
                             {isRestarting ? <Spinner size="sm" /> : <Icon name="refresh" size={12} />}
                           </button>
@@ -741,7 +742,7 @@ export default function ChainOverviewPanel({
 
       {/* SECTION 5: Attention Needed (Placed high for urgent visibility) */}
       {attentionTasks.length > 0 && (
-        <section data-debug-id="chain-overview-section-attention" className="space-y-2.5">
+        <section data-debug-id="chain-overview-section-attention" className="space-y-3">
           <button
             type="button"
             data-debug-id="chain-overview-section-toggle-attention"
@@ -749,14 +750,14 @@ export default function ChainOverviewPanel({
             aria-expanded={!isCollapsed('attention')}
             className="flex w-full items-center justify-between text-left group cursor-pointer"
           >
-            <div className="flex items-center gap-1.5">
+            <div className="flex items-center gap-2">
               <Icon
                 name={isCollapsed('attention') ? 'chevron-right' : 'chevron-down'}
                 size={14}
-                className="text-warning group-hover:text-warning/80 transition-colors"
+                className="text-warning transition-colors"
               />
               <Icon name="alert" size={14} className="text-warning" />
-              <h3 className="text-xs font-semibold uppercase tracking-wider text-warning group-hover:text-warning/80 transition-colors">
+              <h3 className="text-overline uppercase text-warning transition-colors">
                 Attention Needed ({attentionTasks.length})
               </h3>
             </div>
@@ -784,14 +785,14 @@ export default function ChainOverviewPanel({
                   <div
                     key={taskId}
                     data-debug-id={`chain-overview-attention-task-${taskId}`}
-                    className="rounded-lg border border-warning/30 bg-warning-soft/20 p-2.5 transition-colors"
+                    className="rounded-[var(--radius-lg)] border border-subtle bg-warning-soft p-3 transition-colors"
                   >
                     <div
                       onClick={() => setExpandedAttentionTaskId((prev) => (prev === taskId ? null : taskId))}
                       className="flex items-start justify-between gap-2 cursor-pointer"
                     >
                       <div className="min-w-0 flex-1">
-                        <div className="flex items-center gap-1.5 flex-wrap">
+                        <div className="flex items-center gap-2 flex-wrap">
                           <Badge tone={priorityTone(task.priority)}>
                             {task.priority || 'P2'}
                           </Badge>
@@ -799,29 +800,27 @@ export default function ChainOverviewPanel({
                             {task.status}
                           </StatusPill>
                           {task.status === 'queued' && (
-                            <span
-                              data-debug-id={`chain-overview-attention-queued-slot-${taskId}`}
-                              className="rounded bg-warning-soft px-1.5 py-0.5 text-[11px] font-semibold text-warning"
-                            >
+                            <Badge
+                              data-debug-id={`chain-overview-attention-queued-slot-${taskId}`} tone="warning">
                               Queued (Waiting for {getQueuedWaitingSlotName(task, agentIdentities)} slot)
-                            </span>
+                            </Badge>
                           )}
-                          <span className="text-[11px] font-medium text-warning truncate">
+                          <span className="text-caption font-medium text-warning truncate">
                             {reason}
                           </span>
                         </div>
                         <h4 className="text-xs font-semibold text-primary mt-1 line-clamp-2">
                           <VaultText value={task.title} as="span" />
                         </h4>
-                        <div className="mt-1 flex items-center justify-between text-[11px] text-muted">
-                          <span className="truncate max-w-[140px]">
+                        <div className="mt-1 flex items-center justify-between text-caption text-muted">
+                          <span className="truncate max-w-36">
                             Worker:{' '}{workHolder(task) ? (
                           <HolderName instanceId={workHolder(task)} names={names} className="text-primary" />
                         ) : (
                           <strong className="text-primary font-normal">{assignee}</strong>
                         )}
                           </span>
-                          <span className="truncate max-w-[140px]">
+                          <span className="truncate max-w-36">
                             Reviewer: <strong className="text-primary font-normal">{reviewer}</strong>
                           </span>
                         </div>
@@ -854,14 +853,14 @@ export default function ChainOverviewPanel({
       )}
 
       {/* SECTION 4: Ongoing Tasks */}
-      <section data-debug-id="chain-overview-section-ongoing-tasks" className="space-y-2.5">
+      <section data-debug-id="chain-overview-section-ongoing-tasks" className="space-y-3">
         <div className="flex items-center justify-between">
           <button
             type="button"
             data-debug-id="chain-overview-section-toggle-ongoingTasks"
             onClick={() => toggleSection('ongoingTasks')}
             aria-expanded={!isCollapsed('ongoingTasks')}
-            className="flex items-center gap-1.5 text-left group cursor-pointer"
+            className="flex items-center gap-2 text-left group cursor-pointer"
           >
             <Icon
               name={isCollapsed('ongoingTasks') ? 'chevron-right' : 'chevron-down'}
@@ -869,7 +868,7 @@ export default function ChainOverviewPanel({
               className="text-muted group-hover:text-primary transition-colors"
             />
             <Icon name="tasks" size={14} className="text-muted" />
-            <h3 className="text-xs font-semibold uppercase tracking-wider text-muted group-hover:text-primary transition-colors">
+            <h3 className="text-overline uppercase text-faint group-hover:text-primary transition-colors">
               Ongoing Tasks ({ongoingTasks.length})
             </h3>
           </button>
@@ -877,7 +876,7 @@ export default function ChainOverviewPanel({
             <button
               type="button"
               onClick={() => onSelectTask('')}
-              className="text-[11px] font-medium text-accent hover:underline"
+              className="text-caption font-medium text-accent hover:underline"
             >
               All Tasks ({tasks.length})
             </button>
@@ -908,10 +907,10 @@ export default function ChainOverviewPanel({
                     key={taskId}
                     data-debug-id={`chain-overview-ongoing-task-${taskId}`}
                     onClick={() => onSelectTask?.(taskId)}
-                    className="rounded-lg border border-subtle bg-surface-secondary/30 p-2.5 transition-colors hover:bg-neutral-soft/50 cursor-pointer"
+                    className="rounded-[var(--radius-lg)] border border-subtle bg-surface-raised p-3 transition-colors hover:bg-neutral-soft cursor-pointer"
                   >
                     <div className="flex items-center justify-between gap-2">
-                      <div className="flex items-center gap-1.5">
+                      <div className="flex items-center gap-2">
                         <Badge tone={priorityTone(task.priority)}>
                           {task.priority || 'P2'}
                         </Badge>
@@ -919,30 +918,28 @@ export default function ChainOverviewPanel({
                           {task.status}
                         </StatusPill>
                         {task.status === 'queued' && (
-                          <span
-                            data-debug-id={`chain-overview-queued-slot-${taskId}`}
-                            className="rounded bg-warning-soft px-1.5 py-0.5 text-[11px] font-semibold text-warning"
-                          >
+                          <Badge
+                            data-debug-id={`chain-overview-queued-slot-${taskId}`} tone="warning">
                             Queued (Waiting for {getQueuedWaitingSlotName(task, agentIdentities)} slot)
-                          </span>
+                          </Badge>
                         )}
                       </div>
-                      <span className="font-mono text-[10px] text-muted">{taskId}</span>
+                      <span className="font-mono text-caption text-muted">{taskId}</span>
                     </div>
 
                     <h4 className="text-xs font-semibold text-primary mt-1 line-clamp-1">
                       <VaultText value={task.title} as="span" />
                     </h4>
 
-                    <div className="mt-1.5 flex items-center justify-between text-[11px] text-muted">
-                      <span className="truncate max-w-[140px]">
+                    <div className="mt-2 flex items-center justify-between text-caption text-muted">
+                      <span className="truncate max-w-36">
                         Worker:{' '}{workHolder(task) ? (
                           <HolderName instanceId={workHolder(task)} names={names} className="text-primary" />
                         ) : (
                           <strong className="text-primary font-normal">{assignee}</strong>
                         )}
                       </span>
-                      <span className="truncate max-w-[140px]">
+                      <span className="truncate max-w-36">
                         Reviewer: <strong className="text-primary font-normal">{reviewer}</strong>
                       </span>
                     </div>
@@ -955,7 +952,7 @@ export default function ChainOverviewPanel({
       </section>
 
       {/* SECTION 2: Chain Artifacts */}
-      <section data-debug-id="chain-overview-section-artifacts" className="space-y-2.5">
+      <section data-debug-id="chain-overview-section-artifacts" className="space-y-3">
         <button
           type="button"
           data-debug-id="chain-overview-section-toggle-artifacts"
@@ -963,14 +960,14 @@ export default function ChainOverviewPanel({
           aria-expanded={!isCollapsed('artifacts')}
           className="flex w-full items-center justify-between text-left group cursor-pointer"
         >
-          <div className="flex items-center gap-1.5">
+          <div className="flex items-center gap-2">
             <Icon
               name={isCollapsed('artifacts') ? 'chevron-right' : 'chevron-down'}
               size={14}
               className="text-muted group-hover:text-primary transition-colors"
             />
             <Icon name="file" size={14} className="text-muted" />
-            <h3 className="text-xs font-semibold uppercase tracking-wider text-muted group-hover:text-primary transition-colors">
+            <h3 className="text-overline uppercase text-faint group-hover:text-primary transition-colors">
               Chain Artifacts ({artifacts.length})
             </h3>
           </div>
@@ -984,7 +981,7 @@ export default function ChainOverviewPanel({
           ) : artifacts.length === 0 ? (
             <p className="text-xs text-muted py-1">No artifacts produced in this chain yet.</p>
           ) : (
-            <div className="grid gap-1.5 max-h-56 overflow-y-auto pr-1">
+            <div className="grid gap-2 max-h-56 overflow-y-auto pr-1">
               {artifacts.map((artifact) => {
                 const artId = artifact.artifact_id || artifact.artifactId || artifact.id;
                 const name = artifact.name || artId;
@@ -1002,7 +999,7 @@ export default function ChainOverviewPanel({
                     key={artId}
                     data-debug-id={`chain-overview-artifact-${artId}`}
                     onClick={() => setActiveArtifactId(artId)}
-                    className="flex items-center justify-between gap-2 rounded-lg border border-subtle bg-surface-secondary/20 px-2.5 py-1.5 transition-colors hover:bg-neutral-soft/60 cursor-pointer"
+                    className="flex items-center justify-between gap-2 rounded-[var(--radius-lg)] border border-subtle bg-surface-raised px-3 py-2 transition-colors hover:bg-neutral-soft cursor-pointer"
                   >
                     <div className="flex items-center gap-2 min-w-0">
                       <Icon name={iconName} size={14} className="text-accent shrink-0" />
@@ -1010,7 +1007,7 @@ export default function ChainOverviewPanel({
                         <VaultText value={name} fallback={artId} />
                       </span>
                     </div>
-                    <div className="flex items-center gap-2 text-[10px] text-muted shrink-0">
+                    <div className="flex items-center gap-2 text-caption text-muted shrink-0">
                       <span>{size}</span>
                       {time && <span>· {time}</span>}
                     </div>
@@ -1022,16 +1019,40 @@ export default function ChainOverviewPanel({
         )}
       </section>
 
+      {/* SECTION: Token usage (moved from the ticket board) */}
+      <section data-debug-id="chain-overview-section-token-usage" className="space-y-3">
+        <button
+          type="button"
+          data-debug-id="chain-overview-section-toggle-tokenUsage"
+          onClick={() => toggleSection('tokenUsage')}
+          aria-expanded={!isCollapsed('tokenUsage')}
+          className="flex w-full items-center justify-between text-left group cursor-pointer"
+        >
+          <div className="flex items-center gap-2">
+            <Icon
+              name={isCollapsed('tokenUsage') ? 'chevron-right' : 'chevron-down'}
+              size={14}
+              className="text-muted group-hover:text-primary transition-colors"
+            />
+            <Icon name="spark" size={14} className="text-muted" />
+            <h3 className="text-overline uppercase text-faint group-hover:text-primary transition-colors">
+              Token usage
+            </h3>
+          </div>
+        </button>
+        {!isCollapsed('tokenUsage') && <ChainTokenUsageSection chainId={chainId} embedded />}
+      </section>
+
       {/* SECTION 3: VCS Changes */}
       {projectVcsEnabled ? (
-      <section data-debug-id="chain-overview-section-vcs" className="space-y-2.5">
+      <section data-debug-id="chain-overview-section-vcs" className="space-y-3">
         <div className="flex items-center justify-between">
           <button
             type="button"
             data-debug-id="chain-overview-section-toggle-vcs"
             onClick={() => toggleSection('vcs')}
             aria-expanded={!isCollapsed('vcs')}
-            className="flex items-center gap-1.5 text-left group cursor-pointer"
+            className="flex items-center gap-2 text-left group cursor-pointer"
           >
             <Icon
               name={isCollapsed('vcs') ? 'chevron-right' : 'chevron-down'}
@@ -1039,7 +1060,7 @@ export default function ChainOverviewPanel({
               className="text-muted group-hover:text-primary transition-colors"
             />
             <Icon name="layers" size={14} className="text-muted" />
-            <h3 className="text-xs font-semibold uppercase tracking-wider text-muted group-hover:text-primary transition-colors">
+            <h3 className="text-overline uppercase text-faint group-hover:text-primary transition-colors">
               VCS Changes
             </h3>
           </button>
@@ -1048,7 +1069,7 @@ export default function ChainOverviewPanel({
               type="button"
               data-debug-id="chain-overview-vcs-all-changes-btn"
               onClick={onOpenVcsFiles}
-              className="text-[11px] font-medium text-accent hover:underline"
+              className="text-caption font-medium text-accent hover:underline"
             >
               All Changes
             </button>
@@ -1056,20 +1077,20 @@ export default function ChainOverviewPanel({
         </div>
 
         {!isCollapsed('vcs') && (
-          <div className="rounded-lg border border-subtle bg-surface-secondary/30 p-2.5 space-y-2">
+          <div className="rounded-[var(--radius-lg)] border border-subtle bg-surface-raised p-3 space-y-2">
             {/* Status summary chips */}
             <div className="flex items-center gap-2 flex-wrap text-xs">
-              <span className="rounded bg-warning-soft px-2 py-0.5 text-[11px] font-semibold text-warning">
+              <Badge tone="warning">
                 {vcsModifiedCount} Modified
-              </span>
-              <span className="rounded bg-success-soft px-2 py-0.5 text-[11px] font-semibold text-success">
+              </Badge>
+              <Badge tone="success">
                 {vcsStagedCount} Staged
-              </span>
-              <span className="rounded bg-neutral-soft px-2 py-0.5 text-[11px] font-semibold text-muted">
+              </Badge>
+              <Badge tone="neutral">
                 {vcsUntrackedCount} Untracked
-              </span>
+              </Badge>
               {vcsStatusQuery.data?.branch && (
-                <span className="ml-auto text-[11px] font-mono text-muted truncate max-w-[120px]">
+                <span className="ml-auto text-caption font-mono text-muted truncate max-w-32">
                   {vcsStatusQuery.data.branch}
                 </span>
               )}
@@ -1102,19 +1123,19 @@ export default function ChainOverviewPanel({
                           onOpenFileDiff(file.path);
                         }
                       }}
-                      className="flex items-center justify-between gap-2 rounded px-2 py-1 text-xs transition-colors hover:bg-neutral-soft cursor-pointer"
+                      className="flex items-center justify-between gap-2 rounded-[var(--radius-sm)] px-2 py-1 text-xs transition-colors hover:bg-neutral-soft cursor-pointer"
                     >
                       <div className="flex items-center gap-2 min-w-0">
-                        <span className={`grid h-4 w-4 place-items-center rounded text-[10px] font-bold ${statusColor}`}>
+                        <span className={`grid h-4 w-4 place-items-center rounded-[var(--radius-sm)] text-caption font-semibold ${statusColor}`}>
                           {statusChar}
                         </span>
-                        <span className="font-mono text-[11px] text-primary truncate" title={file.path}>
+                        <span className="font-mono text-caption text-primary truncate" title={file.path}>
                           {file.path}
                         </span>
                       </div>
                       {(file.additions > 0 || file.deletions > 0) && (
-                        <div className="flex items-center gap-1.5 shrink-0">
-                          <div className="font-mono text-[10px]">
+                        <div className="flex items-center gap-2 shrink-0">
+                          <div className="font-mono text-caption">
                             {file.additions > 0 && <span className="text-success">+{file.additions} </span>}
                             {file.deletions > 0 && <span className="text-danger">-{file.deletions}</span>}
                           </div>
@@ -1128,7 +1149,7 @@ export default function ChainOverviewPanel({
                     <button
                       type="button"
                       onClick={onOpenVcsFiles}
-                      className="text-[11px] text-accent hover:underline"
+                      className="text-caption text-accent hover:underline"
                     >
                       + {vcsFiles.length - 10} more files
                     </button>

@@ -93,9 +93,14 @@ test('renders per-agent rows (lifetime + context %), instance rows and the chain
   assert.match(html, /warn 40%, rollover 70%/);
 });
 
-test('overview mounts the section; token_usage_changed refreshes the chain usage tag', () => {
+test('token usage lives in the Chain overview panel, not the ticket board; token_usage_changed refreshes the chain usage tag', () => {
   const read = (rel: string) => fs.readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8');
-  assert.match(read('../src/ui/components/taskchain/TaskChainOverview.tsx'), /footerSlot=\{<ChainTokenUsageSection chainId=\{chainId\} \/>\}/);
+  const panel = read('../src/ui/components/chat/ChainOverviewPanel.tsx');
+  assert.match(panel, /data-debug-id="chain-overview-section-token-usage"/);
+  assert.match(panel, /data-debug-id="chain-overview-section-toggle-tokenUsage"/);
+  assert.match(panel, /<ChainTokenUsageSection chainId=\{chainId\} embedded \/>/);
+  assert.doesNotMatch(read('../src/ui/components/taskchain/TaskChainOverview.tsx'), /ChainTokenUsage|footerSlot/);
+  assert.doesNotMatch(read('../src/ui/components/tasks/TicketBoardView.tsx'), /footerSlot|ChainTokenUsage/);
   const ws = read('../src/ui/api/wsInvalidation.ts');
   // T14: paced per viewed chain (chainTokenUsageRefresh.ts), not one refetch per event.
   assert.match(ws, /tokenChanged \|\| change === 'created'[\s\S]{0,200}requestChainTokenUsageRefresh\(tokenChainId[\s\S]{0,120}type: 'ChainTokenUsage', id \}/);

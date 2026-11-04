@@ -18,7 +18,6 @@ import { useFetchAgentInstanceQuery, useFetchAgentIdentityQuery, useListAgentIde
 import { buildTaskNames } from '../tasks/taskNames';
 import { actionErrorMessage } from '../tasks/useTaskActions';
 import { useIsMobile } from '../shell/responsive';
-import { ChainTokenUsageSection } from './ChainTokenUsage';
 import type { WorkflowRunView } from '../../api/endpoints/workflowRuns';
 
 /** Run title + status. The title wraps (long IDs/URLs included) so the badge stays inside the card. */
@@ -230,7 +229,6 @@ export const TaskChainOverview: React.FC<TaskChainOverviewProps> = ({
             publishError={publishError}
             summaryText={chain.summary}
             hasWorkflowRuns={workflowRuns.length > 0}
-            footerSlot={<ChainTokenUsageSection chainId={chainId} />}
             workSlot={
               <div className="flex flex-col gap-4">
                 {workflowRunsQuery.error && <Text role="caption" tone="danger">Could not refresh workflows.</Text>}
