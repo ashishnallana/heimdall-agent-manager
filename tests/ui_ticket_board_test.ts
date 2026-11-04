@@ -11,6 +11,7 @@ import { configureStore } from '@reduxjs/toolkit';
 import type { TaskWire } from '../src/ui/api/taskWire.ts';
 import {
   attemptInfo,
+  blockReasonText,
   boardFilterCounts,
   boardGroupFor,
   boardOrder,
@@ -33,6 +34,7 @@ import {
   ticketKeys,
   ticketPosition,
   ticketShortTitle,
+  ticketStateMenu,
   ticketTabTitle,
   upNextContext,
 } from '../src/ui/components/tasks/ticketModel.ts';
@@ -86,6 +88,21 @@ test('REQ-T2: T-n is the 1-based created_at position; ties by task_id; untimed t
   assert.equal(keys.get('tsk_b'), 'T-2');
   assert.equal(keys.get('tsk_c'), 'T-3');
   assert.equal(keys.get('tsk_z'), 'T-4');
+});
+
+test('REQ-T2: workflow stages get no key, so ticket keys have no gaps', () => {
+  const keys = ticketKeys([
+    { task_id: 'tsk_a', created_at: iso(30 * MIN) },
+    { task_id: 'stage_1', created_at: iso(20 * MIN), workflow_run_id: 'run_1' },
+    { task_id: 'tsk_b', created_at: iso(10 * MIN) },
+  ]);
+  assert.deepEqual([...keys], [['tsk_a', 'T-1'], ['tsk_b', 'T-2']]);
+});
+
+test('a sealed title stays one whole vault token in the tab title, so it can still be decrypted', () => {
+  const sealed = 'vault:v2:0123456789abcdef:e1:c2VhbGVkIHRpdGxl';
+  assert.equal(ticketShortTitle(sealed), sealed);
+  assert.equal(ticketTabTitle('T-3', sealed), `T-3 ${sealed}`);
 });
 
 test('REQ-T1: the tab title is the key plus a short title', () => {
@@ -155,18 +172,41 @@ test('REQ-B2: the headline leads with what needs you and names the first ask', (
 
 test('REQ-B2: progress counts and caption agree with the groups', () => {
   const c = progressCounts(ALL);
-  assert.deepEqual(c, { done: 2, inProgress: 1, inReview: 1, ready: 2, cancelled: 1, total: 7 });
+  assert.deepEqual(c, { done: 2, inProgress: 1, inReview: 1, ready: 2, backlog: 0, cancelled: 1, total: 7 });
   const cap = progressCaption(c);
   assert.equal(cap.lead, '2 of 7 done');
   assert.equal(cap.rest, '1 in review · 1 in progress · 2 ready · 1 cancelled');
+  const withBacklog = progressCounts([...ALL, makeTask({ task_id: 'b', state: 'backlog' })]);
+  assert.equal(withBacklog.ready, 2, 'backlog is not waiting for a worker');
+  assert.equal(withBacklog.backlog, 1);
+  assert.match(progressCaption(withBacklog).rest, /1 in backlog/);
 });
 
 /* Cards -------------------------------------------------------------- */
 
-test('REQ-B4: the attempt shows once and warns only with 1 or fewer attempts left', () => {
-  assert.deepEqual(attemptInfo(makeTask({ task_id: 'x', attempt_no: 1 })), { no: 1, max: 5, left: 4, warn: false, label: 'Attempt 1 of 5' });
-  assert.equal(attemptInfo(makeTask({ task_id: 'x', attempt_no: 4 })).warn, true);
-  assert.equal(attemptInfo(makeTask({ task_id: 'x', attempt_no: 2, brief: { budget: { max_attempts: 3 } } })).label, 'Attempt 2 of 3');
+test('REQ-B4: the attempt shows once, without "of N"; it warns only when the hub says the budget is spent', () => {
+  // attempt_no counts every lease, including ones that spend no budget.
+  assert.deepEqual(attemptInfo(makeTask({ task_id: 'x', attempt_no: 6 })), { no: 6, max: 5, exhausted: false, label: 'Attempt 6' });
+  const spent = makeTask({ task_id: 'y', attempt_no: 5, blocked_on: { kind: 'human', reason: 'budget_exhausted', since_ms: NOW } as any });
+  assert.equal(attemptInfo(spent).exhausted, true);
+  assert.equal(attemptInfo(makeTask({ task_id: 'z', attempt_no: 2, brief: { budget: { max_attempts: 3 } } })).max, 3);
+});
+
+test('hub block reason codes read as sentences; other reasons pass through', () => {
+  assert.match(blockReasonText('budget_exhausted'), /^Every attempt in the budget is spent/);
+  assert.equal(blockReasonText('Which bucket should I use?'), 'Which bucket should I use?');
+  assert.equal(blockReasonText(undefined), '');
+});
+
+test('state button: Approve is never offered during a rework or while an action runs; finished offers Reopen only', () => {
+  const inReview = { task_id: 'r', state: 'in_review', requires_user_approval: true, attempt_no: 1 };
+  assert.ok(ticketStateMenu(makeTask(inReview), false).includes('approve'));
+  assert.ok(!ticketStateMenu(makeTask(inReview), true).includes('approve'), 'not while busy');
+  const rework = makeTask({ ...inReview, requirements: { revision: 3, submitted_revision: 2, submitted_head: '', checkpoint_required: true, acknowledgements: [], history: '', history_truncated: false } });
+  const menu = ticketStateMenu(rework, false);
+  assert.ok(!menu.includes('approve'), 'requirements changed after submission');
+  assert.ok(menu.includes('request_changes'));
+  assert.deepEqual(ticketStateMenu(makeTask({ task_id: 'd', state: 'done' }), false), ['reopen']);
 });
 
 test('live values come from timestamps: lease time left and "ago" labels need no refetch', () => {
@@ -177,6 +217,8 @@ test('live values come from timestamps: lease time left and "ago" labels need no
   assert.equal(Math.round((clock.hardLeftMs || 0) / MIN), 59);
   assert.equal(leaseClock(working, NOW + 7 * MIN)!.fraction < 1, true, 'the bar drains as the clock ticks');
   assert.equal(leaseClock(next, NOW), null);
+  const unstamped = makeTask({ task_id: 'u', state: 'in_progress', leases: [{ ...working.leases![0], expires_at: '', granted_at: iso(5 * MIN), confirmed_at: '' }] });
+  assert.equal(Math.round(leaseClock(unstamped, NOW)!.leftMs / MIN), 10, 'no expiry yet: the default 15 min lease from its grant');
   assert.equal(formatAgo(iso(12 * MIN), NOW), '12m ago');
   assert.equal(formatAgo(iso(10_000), NOW), 'just now');
 });
@@ -252,6 +294,26 @@ test('G1: the preformatted history parses into revisions, newest first; bad text
   assert.equal(parseRequirementsHistory('not the hub format'), null);
 });
 
+test('G1: markdown bullets inside a goal stay in the goal; only the trailing "- " lines are acceptance', () => {
+  const text = [
+    'Revision 2 — user usr_1 — 1730000000000',
+    'Reason: Spell out the cases.',
+    'Before goal: Handle errors.',
+    '- Errors are logged',
+    'After goal: Handle errors in:',
+    '- the bridge',
+    '- the hub',
+    'and report them once.',
+    '- Errors are logged',
+    '- Each error is reported once',
+    'History event: #7',
+  ].join('\n');
+  const [entry] = parseRequirementsHistory(text)!;
+  assert.equal(entry.after.goal, 'Handle errors in:\n- the bridge\n- the hub\nand report them once.');
+  assert.deepEqual(entry.after.acceptance, ['Errors are logged', 'Each error is reported once']);
+  assert.deepEqual(entry.before.acceptance, ['Errors are logged']);
+});
+
 test('REQ-T4: acceptance items are tagged Edited / New against the previous revision', () => {
   const [latest] = parseRequirementsHistory(HISTORY)!;
   const diff = diffAcceptance(latest.before.acceptance, latest.after.acceptance);
@@ -313,6 +375,20 @@ test('REQ-B3: fleet rows grouped by machine with Working / Idle / Coordinating /
   assert.equal(any.slots[0].state, 'coordinating');
   assert.equal(machines[machines.length - 1].bridgeId, 'brg_linux', 'offline machines sort last');
   assert.equal(fleetSummary(machines), '1 working · 1 idle · 3 off');
+});
+
+test('a starting agent reads Starting, not Not running', () => {
+  const [machine] = buildFleetMachines({
+    tasks: [],
+    members: [{ agent_instance_id: 'inst_new', agent_id: 'agt_worker', display_name: 'worker #6', runtime_status: 'starting' }],
+    fleets: [{ agent_id: 'agt_worker', capacity: 1, roles: ['worker'], bridge_id: 'brg_mac' }],
+    bridges: [{ bridge_id: 'brg_mac', label: 'mac', status: 'online' }],
+    keys: new Map(),
+    agentName: () => 'worker',
+  });
+  assert.equal(machine.slots.length, 1, 'the starting instance fills the slot');
+  assert.equal(machine.slots[0].state, 'idle');
+  assert.equal(machine.slots[0].detail, 'Starting');
 });
 
 test('edge state "Agent stopped mid-work": the slot reads Blocked on that ticket since the hub noticed', () => {
@@ -486,6 +562,15 @@ const NEW_FILES = [
   'src/ui/components/tasks/BoardTicketCard.tsx',
   'src/ui/components/tasks/TicketFleetTable.tsx',
   'src/ui/components/tasks/TicketView.tsx',
+  'src/ui/components/tasks/TicketCard.tsx',
+  'src/ui/components/tasks/TicketDecisionBlock.tsx',
+  'src/ui/components/tasks/TicketAgentsCard.tsx',
+  'src/ui/components/tasks/TicketRequirementsCard.tsx',
+  'src/ui/components/tasks/TicketLinkedCard.tsx',
+  'src/ui/components/tasks/TicketAttemptsCard.tsx',
+  'src/ui/components/tasks/TicketChangesCard.tsx',
+  'src/ui/components/tasks/TicketDetailsCard.tsx',
+  'src/ui/components/tasks/HoldReasonDialog.tsx',
   'src/ui/components/tasks/TicketActivity.tsx',
   'src/ui/components/tasks/RequirementsEditorModal.tsx',
   'src/ui/components/tasks/TicketAgentAvatar.tsx',

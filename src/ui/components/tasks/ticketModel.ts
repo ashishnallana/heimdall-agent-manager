@@ -1,6 +1,8 @@
 import type { TaskWire } from '../../api/taskWire';
 import { normalizeTaskState, reviewLeases, taskHold, workLease } from './taskV2Types';
-import { awaitingYourReview, blockedOnYou, isDraft, taskNeedsYou } from './taskActions';
+import { awaitingYourReview, blockedOnYou, getTaskActions, isDraft, taskNeedsYou, type TaskActionId } from './taskActions';
+import { isAgentRunning } from '../../utils/agentStatus';
+import { containsVaultArmored } from '../../utils/vaultCrypto';
 
 /**
  * Pure model behind the Tickets board and the ticket tab (ticket board design
@@ -8,6 +10,9 @@ import { awaitingYourReview, blockedOnYou, isDraft, taskNeedsYou } from './taskA
  * here from the cached chain, fleet, live-agent and bridge data, so the views
  * update from WebSocket cache patches alone (REQ-L1).
  */
+
+/** A work lease's length when the hub has not stamped its expiry yet. */
+const DEFAULT_LEASE_MS = 15 * 60000;
 
 /** Attempts a ticket gets when its brief sets no budget (the hub's default). */
 export const DEFAULT_MAX_ATTEMPTS = 5;
@@ -39,11 +44,12 @@ export function timestampMs(value: unknown): number {
  * ------------------------------------------------------------------ */
 
 /**
- * `T-n` per task: its 1-based position by created_at within the chain, ties
- * broken by task_id (REQ-T2). Tasks without a timestamp sort last.
+ * `T-n` per ticket: its 1-based position by created_at within the chain, ties
+ * broken by task_id (REQ-T2). Tasks without a timestamp sort last. Workflow
+ * stages are not tickets and get no key, so the keys have no gaps.
  */
-export function ticketKeys(tasks: readonly Pick<TaskWire, 'task_id' | 'created_at'>[]): Map<string, string> {
-  const sorted = [...tasks].filter((t) => t?.task_id).sort((a, b) => {
+export function ticketKeys(tasks: readonly Pick<TaskWire, 'task_id' | 'created_at' | 'workflow_run_id'>[]): Map<string, string> {
+  const sorted = [...tasks].filter((t) => t?.task_id && !t.workflow_run_id).sort((a, b) => {
     const ta = timestampMs(a.created_at);
     const tb = timestampMs(b.created_at);
     const na = Number.isNaN(ta);
@@ -66,6 +72,8 @@ export function keyFor(keys: Map<string, string>, taskId: string): string {
  * "Bridges auto-update". A leading "A:" / "P2:" style tag is dropped.
  */
 export function ticketShortTitle(title: string, maxWords = 2): string {
+  // A sealed title is one vault token: cutting it would make it undecryptable.
+  if (containsVaultArmored(title)) return str(title);
   const clean = str(title).replace(/^[A-Za-z0-9]{1,3}:\s+/, '');
   if (!clean) return 'Untitled';
   const words = clean.split(/\s+/).slice(0, maxWords).join(' ').replace(/[,.;:]+$/, '');
@@ -208,12 +216,14 @@ export interface ProgressCounts {
   inProgress: number;
   inReview: number;
   ready: number;
+  /** Not ready yet: backlog, drafts and tickets waiting on dependencies. */
+  backlog: number;
   cancelled: number;
   total: number;
 }
 
 export function progressCounts(tasks: readonly TaskWire[]): ProgressCounts {
-  const c: ProgressCounts = { done: 0, inProgress: 0, inReview: 0, ready: 0, cancelled: 0, total: 0 };
+  const c: ProgressCounts = { done: 0, inProgress: 0, inReview: 0, ready: 0, backlog: 0, cancelled: 0, total: 0 };
   for (const t of tasks) {
     c.total += 1;
     const s = normalizeTaskState(t.state);
@@ -221,7 +231,8 @@ export function progressCounts(tasks: readonly TaskWire[]): ProgressCounts {
     else if (s === 'cancelled') c.cancelled += 1;
     else if (s === 'in_progress') c.inProgress += 1;
     else if (s === 'in_review') c.inReview += 1;
-    else c.ready += 1;
+    else if (s === 'ready') c.ready += 1;
+    else c.backlog += 1;
   }
   return c;
 }
@@ -243,6 +254,7 @@ export function progressCaption(c: ProgressCounts): { lead: string; rest: string
     c.inReview ? `${c.inReview} in review` : '',
     c.inProgress ? `${c.inProgress} in progress` : '',
     c.ready ? `${c.ready} ready` : '',
+    c.backlog ? `${c.backlog} in backlog` : '',
     c.cancelled ? `${c.cancelled} cancelled` : '',
   ].filter(Boolean);
   return { lead: `${c.done} of ${c.total} done`, rest: rest.join(' · ') };
@@ -259,6 +271,20 @@ export function ticketAsk(task: TaskWire): TicketAsk | null {
   if (blockedOnYou(task)) return 'answer';
   if (awaitingYourReview(task)) return 'review';
   return 'answer';
+}
+
+/** The hub's human-block reasons as a person would say them. */
+const HUB_BLOCK_REASONS: Record<string, string> = {
+  budget_exhausted: 'Every attempt in the budget is spent. Reopen it or raise its budget to try again.',
+  oscillation: 'The work kept going back and forth between attempts, so the hub stopped it.',
+  merge_conflict: 'The work could not be merged back because of a conflict. Resolve it, then recheck.',
+  blocked: 'The work is blocked and needs you.',
+};
+
+/** A block's reason for people: known hub reason codes become a sentence. */
+export function blockReasonText(reason: unknown): string {
+  const r = String(reason || '').trim();
+  return HUB_BLOCK_REASONS[r] || r;
 }
 
 export const ASK_LABELS: Record<TicketAsk, string> = {
@@ -312,18 +338,24 @@ export function needsYouHeadline(tasks: readonly TaskWire[], keys: Map<string, s
 
 export interface AttemptInfo {
   no: number;
+  /** The brief's attempt budget. */
   max: number;
-  left: number;
-  /** Warning badge only with 1 or fewer attempts left. */
-  warn: boolean;
+  /** The hub stopped granting leases: the attempt budget is spent. */
+  exhausted: boolean;
   label: string;
 }
 
-export function attemptInfo(task: Pick<TaskWire, 'attempt_no' | 'brief'>): AttemptInfo {
+/**
+ * `attempt_no` counts every lease, but the hub spends budget only on attempts
+ * that count (not replaced, reopened, user-stopped or failed dispatches) and does
+ * not send that count. So the label carries no "of N"; the warning comes from the
+ * hub's own budget block.
+ */
+export function attemptInfo(task: Pick<TaskWire, 'attempt_no' | 'brief' | 'blocked_on'>): AttemptInfo {
   const max = Math.max(1, Number(task.brief?.budget?.max_attempts) || DEFAULT_MAX_ATTEMPTS);
   const no = Math.max(1, Number(task.attempt_no) || 1);
-  const left = Math.max(0, max - no);
-  return { no, max, left, warn: left <= 1, label: `Attempt ${no} of ${max}` };
+  const b: any = task.blocked_on;
+  return { no, max, exhausted: b?.kind === 'human' && b?.reason === 'budget_exhausted', label: `Attempt ${no}` };
 }
 
 export interface LeaseClock {
@@ -340,10 +372,12 @@ export function leaseClock(task: TaskWire, nowMs: number): LeaseClock | null {
   if (normalizeTaskState(task.state) !== 'in_progress') return null;
   const lease = workLease(task);
   if (!lease?.holder_instance_id) return null;
-  const expires = timestampMs(lease.expires_at);
   const granted = timestampMs(lease.confirmed_at) || timestampMs(lease.granted_at);
-  const leftMs = Number.isNaN(expires) ? 0 : Math.max(0, expires - nowMs);
-  const span = !Number.isNaN(expires) && !Number.isNaN(granted) && expires > granted ? expires - granted : 15 * 60000;
+  // No expiry yet: the default 15 minute lease from its grant, as workLeaseHolder assumes.
+  const stated = timestampMs(lease.expires_at);
+  const expires = Number.isNaN(stated) ? (Number.isNaN(granted) ? nowMs : granted) + DEFAULT_LEASE_MS : stated;
+  const leftMs = Math.max(0, expires - nowMs);
+  const span = !Number.isNaN(granted) && expires > granted ? expires - granted : DEFAULT_LEASE_MS;
   const hard = timestampMs(lease.hard_deadline_at);
   return {
     holderInstanceId: String(lease.holder_instance_id),
@@ -373,6 +407,17 @@ export function formatAgo(value: unknown, nowMs: number): string {
   const diff = nowMs - ms;
   if (diff < 45_000) return 'just now';
   return `${formatDuration(diff)} ago`;
+}
+
+/**
+ * The ticket's state button menu: what getTaskActions allows, and Reopen only
+ * once finished. Approve never goes out against an out-of-date submission
+ * (rework) or while another action is running.
+ */
+export function ticketStateMenu(task: TaskWire, busy: boolean): TaskActionId[] {
+  if (isFinishedTask(task)) return ['reopen'];
+  const { primary, more } = getTaskActions(task);
+  return [...primary, ...more].filter((a) => a !== 'copy_id' && !(a === 'approve' && (isRework(task) || busy)));
 }
 
 /** True once requirements changed after the current attempt was submitted (Rework, REQ-T6). */
@@ -495,9 +540,12 @@ export function parseRequirementsHistory(text: string | null | undefined): Requi
       // A multi-line goal or reason continues on the next line.
       if (section === 'reason') entry.reason += `\n${line}`;
       else {
+        // Prose after "- " lines means those were markdown bullets in the goal:
+        // acceptance is only the trailing run of "- " lines.
         const snap = entry[section];
-        if (snap.acceptance.length) snap.acceptance[snap.acceptance.length - 1] += `\n${line}`;
-        else snap.goal += `\n${line}`;
+        if (snap.acceptance.length) snap.goal += snap.acceptance.map((a) => `\n- ${a}`).join('');
+        snap.acceptance = [];
+        snap.goal += `\n${line}`;
       }
     }
   }
@@ -669,9 +717,16 @@ function bridgeLabelOf(b: any): string {
   return str(b?.label) || str(b?.name) || str(b?.machine_hostname) || 'Unnamed machine';
 }
 
+/** Runtime statuses of an instance that is coming up; it counts as running. */
+const STARTING_RUNTIMES = new Set(['starting', 'launching', 'pending', 'booting']);
+
+function isStartingRuntime(runtime: string): boolean {
+  return STARTING_RUNTIMES.has(runtime.toLowerCase());
+}
+
 function isLiveRuntime(runtime: string): boolean {
   const r = runtime.toLowerCase();
-  return r === 'live' || r === 'running' || r === 'ready' || r === 'idle' || r === 'active' || r === 'busy' || r === 'connected' || r === 'working';
+  return isAgentRunning({ state: r }) || r === 'running' || r === 'idle' || r === 'busy' || isStartingRuntime(r);
 }
 
 function isFailedRuntime(runtime: string): boolean {
@@ -749,6 +804,9 @@ export function buildFleetMachines(input: FleetInputs): FleetMachine[] {
     } else if (!isLiveRuntime(runtime) && runtime) {
       state = 'not_running';
       detail = 'Hub starts it when needed';
+    } else if (isStartingRuntime(runtime)) {
+      state = isCoordinator ? 'coordinating' : 'idle';
+      detail = 'Starting';
     } else if (isCoordinator) {
       state = 'coordinating';
       detail = 'Watching the chain';
@@ -887,7 +945,7 @@ export function needsYouContext(task: TaskWire, names: ContextNames): string {
   const b: any = task.blocked_on || {};
   if (ask === 'publish') return "Draft: agents can't see it until you publish it";
   if (ask === 'agent_down') return String(b.reason || 'The agent could not start');
-  if (ask === 'answer') return String(b.question || b.reason || b.message || 'An agent is waiting on your answer');
+  if (ask === 'answer') return String(b.question || blockReasonText(b.reason) || b.message || 'An agent is waiting on your answer');
   const attempt = attemptInfo(task).no;
   const parts: string[] = [];
   const author = task.brief?.assignee ? names.agent(String(task.brief.assignee)) : '';

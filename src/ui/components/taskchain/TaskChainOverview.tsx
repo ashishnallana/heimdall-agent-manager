@@ -128,6 +128,8 @@ export const TaskChainOverview: React.FC<TaskChainOverviewProps> = ({
     },
     [onOpenTicket, tasks, keys],
   );
+  // Stable, so the memoized cards skip re-rendering when nothing they show changed.
+  const editTicket = React.useCallback((taskId: string, field: TaskEditField) => setEditing({ taskId, field }), []);
 
   // A deep link to a task (`?panel=tasks&task=` or /chains/:c/tasks/:t) opens that ticket.
   const consumedFocus = React.useRef('');
@@ -258,7 +260,7 @@ export const TaskChainOverview: React.FC<TaskChainOverviewProps> = ({
             isMobile={isMobile}
             onOpenTicket={openTicket}
             onOpenAgent={openAgent}
-            onEditTicket={(taskId, field) => setEditing({ taskId, field })}
+            onEditTicket={editTicket}
             onNewTask={() => setShowNewTaskModal(true)}
             onOpenFleetDrawer={() => setShowFleetDrawer(true)}
             onOpenReviewRoles={() => setShowReviewRoles(true)}

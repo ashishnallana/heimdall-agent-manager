@@ -30,7 +30,7 @@ export interface AuxTabContentProps {
   ctx: AgentAuxContext;
   isMobile?: boolean;
   onOpenTab: (content: AuxContent, title?: string) => void;
-  onUpdateTab: (tabId: string, patch: Record<string, unknown>) => void;
+  onUpdateTab: (tabId: string, patch: Record<string, unknown>, title?: string) => void;
   onRekeyTab: (tabId: string, content: AuxContent, title?: string) => void;
   onPublishComments?: (markdown: string) => Promise<boolean>;
 }
@@ -218,6 +218,7 @@ function renderAuxTabBody({
           onOpenTicket={(taskId, title) => onOpenTab({ type: 'ticket', chainId: c.chainId, taskId }, title)}
           onSwitchTicket={(taskId, title) => onRekeyTab(tab.id, { type: 'ticket', chainId: c.chainId, taskId }, title)}
           onOpenAgent={(agentInstanceId) => openAgentConversation(agentInstanceId, isMobile)}
+          onTitle={(title) => title !== tab.title && onUpdateTab(tab.id, {}, title)}
         />
       );
     case 'shell': {

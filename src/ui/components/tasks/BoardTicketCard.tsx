@@ -6,7 +6,7 @@ import { TASK_STATE_LABELS, TASK_STATE_TONE, holdSummary, normalizeTaskState, re
 import { TASK_ACTION_LABELS, editLock, getTaskActions, recheckToast, type TaskActionId } from './taskActions';
 import { showToast } from '../../store/toastSlice';
 import { useTaskActions } from './useTaskActions';
-import { VaultText } from '../vault/VaultText';
+import { VaultText, useDecryptedText } from '../vault/VaultText';
 import { TicketAgentAvatar } from './TicketAgentAvatar';
 import { usePrefersReducedMotion } from './useTicketClock';
 import { HoldReasonDialog } from './HoldReasonDialog';
@@ -52,7 +52,7 @@ export interface BoardTicketCardProps {
  * never a coloured rail, outline or glow. The whole card opens the ticket tab;
  * its controls do their own thing.
  */
-export const BoardTicketCard: React.FC<BoardTicketCardProps> = ({
+export const BoardTicketCard = React.memo(function BoardTicketCard({
   task,
   chainId,
   tasks,
@@ -63,7 +63,7 @@ export const BoardTicketCard: React.FC<BoardTicketCardProps> = ({
   chainKind = '',
   onOpen,
   onEdit,
-}) => {
+}: BoardTicketCardProps) {
   const id = task.task_id;
   const key = keyFor(keys, id);
   const state = normalizeTaskState(task.state);
@@ -71,6 +71,8 @@ export const BoardTicketCard: React.FC<BoardTicketCardProps> = ({
   const hold = taskHold(task);
   const lease = leaseClock(task, now);
   const attempt = attemptInfo(task);
+  // The accessible name never carries vault ciphertext.
+  const { text: title } = useDecryptedText(task.title);
   const reqLine = requirementChangeLine(task, now);
   const rework = isRework(task);
   const actions = useTaskActions(chainId, id, task.title, task);
@@ -148,7 +150,7 @@ export const BoardTicketCard: React.FC<BoardTicketCardProps> = ({
       data-id={id}
       data-needs-you={ask ? 'true' : undefined}
       data-highlight={highlight || undefined}
-      aria-label={`${key} ${task.title}`}
+      aria-label={`${key} ${title}`}
       onClick={() => onOpen(id)}
       className={`group cursor-pointer rounded-lg border p-3 text-left transition-colors duration-slow hover:border-strong motion-reduce:transition-none sm:p-4 ${highlight ? 'border-info bg-info-soft' : 'border-subtle bg-surface hover:bg-surface-raised'}`}
     >
@@ -211,14 +213,14 @@ export const BoardTicketCard: React.FC<BoardTicketCardProps> = ({
               </span>
               <span className="tabular-nums">{formatDuration(lease.leftMs)} left</span>
             </span>
-            {attempt.warn ? <Badge tone="warning">{attempt.label}</Badge> : <span className="text-muted">{attempt.label}</span>}
+            {attempt.exhausted ? <Badge tone="warning">{attempt.label} · budget spent</Badge> : <span className="text-muted">{attempt.label}</span>}
           </div>
         ) : state === 'in_review' ? (
           <Text as="p" role="body-sm" tone="muted" data-debug-id={`task-card-status-${id}`}>
             {reviewing.length
               ? reviewing.map((h) => `${names.instance(h.instanceId) || 'A reviewer'} is reviewing, ${h.leftMins}m left`).join(' · ')
               : 'Waiting for a reviewer'}
-            {attempt.no > 1 || attempt.warn ? ` · ${attempt.label}` : ''}
+            {attempt.no > 1 || attempt.exhausted ? ` · ${attempt.label}` : ''}
           </Text>
         ) : hold ? (
           <Text as="p" role="body-sm" tone="warning" data-debug-id={`task-card-hold-${id}`}>
@@ -290,6 +292,6 @@ export const BoardTicketCard: React.FC<BoardTicketCardProps> = ({
       </span>
     </article>
   );
-};
+});
 
 export default BoardTicketCard;

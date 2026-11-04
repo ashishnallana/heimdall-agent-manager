@@ -1,11 +1,17 @@
 import { useEffect, useState } from 'react';
 
 /**
+ * The ticket views' tick. Their live values are minutes ("14m left", "12m ago"),
+ * and every tick re-renders the whole board or ticket, so a slow tick is enough.
+ */
+export const TICKET_CLOCK_MS = 30_000;
+
+/**
  * A local clock for countdowns and "12m ago" labels (ticket board spec, Live
  * updates rules): live values are derived from timestamps on this tick, never
  * by refetching. One timer per subscriber; it stops while the page is hidden.
  */
-export function useTicketClock(intervalMs = 1000): number {
+export function useTicketClock(intervalMs = TICKET_CLOCK_MS): number {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     let id: ReturnType<typeof setInterval> | null = null;

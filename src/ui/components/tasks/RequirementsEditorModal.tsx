@@ -4,6 +4,8 @@ import { Alert, Badge, Button, IconButton, Input, Modal, ModalBody, ModalFooter,
 import type { TaskWire } from '../../api/taskWire';
 import { useAddTaskCommentMutation, useCancelTaskDetailMutation, useCreateTaskMutation, useUpdateTaskDetailMutation } from '../../api/endpoints/tasks';
 import { selectIsVaultUnlocked } from '../../store/vaultSlice';
+import { containsVaultArmored } from '../../utils/vaultCrypto';
+import { VaultText } from '../vault/VaultText';
 import { normalizeTaskState } from './taskV2Types';
 import { actionErrorMessage } from './useTaskActions';
 import type { TaskNames } from './taskNames';
@@ -105,8 +107,11 @@ export const RequirementsEditorModal: React.FC<RequirementsEditorModalProps> = (
   if (!reason.trim()) problems.push('Say why it changed.');
   if (mode === 'amend' && !changed) problems.push('Change the goal or acceptance first.');
   if (mode === 'replace' && !newTitle.trim()) problems.push('Name the new ticket.');
+  const busy = updateState.isLoading || createState.isLoading;
 
   const save = async () => {
+    // Ctrl+Enter must not send a second save while one is in flight.
+    if (busy) return;
     if (locked || problems.length) {
       setError(problems.join(' '));
       return;
@@ -171,10 +176,8 @@ export const RequirementsEditorModal: React.FC<RequirementsEditorModalProps> = (
     }
   };
 
-  const busy = updateState.isLoading || createState.isLoading;
-
   return (
-    <Modal open={open} onOpenChange={(o) => !o && onClose()} title={`Change requirements · ${key}`} size="lg">
+    <Modal open={open} onOpenChange={(o) => !o && onClose()} title={`Change requirements · ${key}`} size="lg" data-debug-id="task-requirements-modal">
       <ModalBody className="text-body-sm">
         <div onKeyDown={onKeyDown} data-debug-id="task-requirements-editor" className="grid gap-5 md:grid-cols-[minmax(0,1fr)_minmax(0,0.85fr)]">
           <div className="flex min-w-0 flex-col gap-4">
@@ -270,22 +273,22 @@ export const RequirementsEditorModal: React.FC<RequirementsEditorModalProps> = (
                   {goalChanged && (
                     <li className="flex gap-2">
                       <Badge tone="info">Goal</Badge>
-                      <span className="min-w-0 break-words text-primary">{goal.trim()}</span>
+                      <span className="min-w-0 break-words text-primary"><VaultText value={goal.trim()} /></span>
                     </li>
                   )}
                   {diff.items.filter((i) => i.tag).map((i, n) => (
                     <li key={`d${n}`} className="flex gap-2">
                       <Badge tone={i.tag === 'new' ? 'success' : 'info'}>{i.tag === 'new' ? 'Add' : 'Edit'}</Badge>
                       <span className="min-w-0 break-words">
-                        {i.previous && <span className="block text-faint line-through">{i.previous}</span>}
-                        <span className="text-primary">{i.text}</span>
+                        {i.previous && <span className="block text-faint line-through"><VaultText value={i.previous} /></span>}
+                        <span className="text-primary"><VaultText value={i.text} /></span>
                       </span>
                     </li>
                   ))}
                   {diff.removed.map((r, n) => (
                     <li key={`r${n}`} className="flex gap-2">
                       <Badge tone="danger">Remove</Badge>
-                      <span className="min-w-0 break-words text-faint line-through">{r}</span>
+                      <span className="min-w-0 break-words text-faint line-through"><VaultText value={r} /></span>
                     </li>
                   ))}
                 </ul>
@@ -321,10 +324,10 @@ export const RequirementsEditorModal: React.FC<RequirementsEditorModalProps> = (
             {newerRevision && (
               <div className="flex flex-col gap-1.5 rounded-md border border-warning/40 bg-warning-soft p-2" data-debug-id="task-requirements-conflict">
                 <Text as="p" role="caption" tone="warning">Rev {currentRevision} is newer than your draft (based on rev {baseRevision}):</Text>
-                <Text as="p" role="caption" className="break-words text-primary">{currentGoal}</Text>
+                <Text as="p" role="caption" className="break-words text-primary"><VaultText value={currentGoal} /></Text>
                 <ul className="list-disc pl-4 text-caption text-primary">
                   {currentItems.map((i, n) => (
-                    <li key={n} className="break-words">{i}</li>
+                    <li key={n} className="break-words"><VaultText value={i} /></li>
                   ))}
                 </ul>
                 <div>
@@ -344,7 +347,7 @@ export const RequirementsEditorModal: React.FC<RequirementsEditorModalProps> = (
       </ModalBody>
       <ModalFooter>
         <span className="mr-auto hidden text-caption text-faint sm:inline">Ctrl+Enter to save</span>
-        <Button size="sm" variant="ghost" onClick={onClose}>
+        <Button size="sm" variant="ghost" onClick={onClose} data-debug-id="task-requirements-cancel">
           Cancel
         </Button>
         <Button
@@ -364,7 +367,7 @@ export const RequirementsEditorModal: React.FC<RequirementsEditorModalProps> = (
 
 /** The edit highlight for an acceptance item: "…restarts [and bridge reinstalls]". */
 export function EditedText({ previous, text }: { previous?: string; text: string }) {
-  if (!previous) return <>{text}</>;
+  if (!previous || containsVaultArmored(previous) || containsVaultArmored(text)) return <VaultText value={text} />;
   const { prefix, changed, suffix } = inlineChange(previous, text);
   return (
     <>

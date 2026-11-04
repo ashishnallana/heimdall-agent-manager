@@ -1,9 +1,9 @@
-import React, { useEffect, useState } from 'react';
-import { Badge, Button, Tab, Tabs, TabsList, Text } from '@ui';
+import React, { useEffect, useMemo, useState } from 'react';
+import { Badge, Tab, Tabs, TabsList, Text } from '@ui';
 import type { TaskWire } from '../../api/taskWire';
-import { useFetchTaskEventsQuery } from '../../api/endpoints/tasks';
+import { useFetchTaskEventsQuery, useFetchTaskFacetQuery } from '../../api/endpoints/tasks';
 import { TaskCommentsThread } from '../taskchain/TaskCommentsThread';
-import { VaultText } from '../vault/VaultText';
+import { DecryptedMarkdown, VaultText } from '../vault/VaultText';
 import { describeTaskEvent, type TaskEventWire } from './taskEvents';
 import type { TaskNames } from './taskNames';
 import { TicketAgentAvatar } from './TicketAgentAvatar';
@@ -13,7 +13,6 @@ import { EditedText } from './RequirementsEditorModal';
 export type ActivityTab = 'all' | 'comments' | 'requirements' | 'handoffs' | 'raw';
 
 const HANDOFF_KINDS = new Set(['submitted', 'handoff']);
-const PAGE = 50;
 
 export interface TicketActivityProps {
   chainId: string;
@@ -136,7 +135,7 @@ function RequirementChanges({ history, rawHistory, names, now, truncated }: { hi
               {diff.removed.map((r, n) => (
                 <li key={`r${n}`} className="flex gap-2">
                   <Badge tone="danger">Remove</Badge>
-                  <span className="min-w-0 break-words text-faint line-through">{r}</span>
+                  <span className="min-w-0 break-words text-faint line-through"><VaultText value={r} /></span>
                 </li>
               ))}
             </ul>
@@ -148,93 +147,67 @@ function RequirementChanges({ history, rawHistory, names, now, truncated }: { hi
   );
 }
 
-/** One page of events, newest first; "Show older" fetches the page before it. */
+/**
+ * Every event, newest first. The hub returns the whole list (it does not page
+ * events yet), so there is no "Show older"; `hasMore` says when it is cut short.
+ */
 function EventFeed({ chainId, taskId, names, now, mode }: { chainId: string; taskId: string; names: TaskNames; now: number; mode: 'all' | 'handoffs' | 'raw' }) {
-  const [pages, setPages] = useState<(number | undefined)[]>([undefined]);
+  const { data, isFetching, error } = useFetchTaskEventsQuery({ chainId, taskId });
+  const events = useMemo(() => [...((data?.events || []) as TaskEventWire[])].sort((a, b) => (b.event_id ?? 0) - (a.event_id ?? 0)), [data?.events]);
+  const shown = useMemo(() => (mode === 'handoffs' ? events.filter((e) => HANDOFF_KINDS.has(String(e.kind))) : events), [events, mode]);
+  if (error) return <Text role="caption" tone="danger">Could not load activity.</Text>;
+  if (!data && isFetching) return <Text role="caption" tone="faint">Loading activity…</Text>;
   return (
     <ol data-debug-id={`ticket-activity-feed-${mode}`} className="flex flex-col gap-3">
-      {pages.map((beforeId, i) => (
-        <EventPage
-          key={String(beforeId ?? 'head')}
-          chainId={chainId}
-          taskId={taskId}
-          beforeId={beforeId}
-          names={names}
-          now={now}
-          mode={mode}
-          isLast={i === pages.length - 1}
-          onOlder={(id) => setPages((p) => (p.includes(id) ? p : [...p, id]))}
-        />
-      ))}
+      {shown.length === 0 && <Text role="caption" tone="faint">{mode === 'handoffs' ? 'No handoffs yet.' : 'Nothing has happened yet.'}</Text>}
+      {shown.map((e, i) =>
+        mode === 'raw' ? (
+          <RawEvent key={e.event_id ?? i} event={e} />
+        ) : (
+          <EventRow key={e.event_id ?? i} event={e} chainId={chainId} taskId={taskId} names={names} now={now} />
+        ),
+      )}
+      {data?.hasMore && <Text role="caption" tone="faint">Showing the most recent events.</Text>}
     </ol>
   );
 }
 
-function EventPage({
-  chainId,
-  taskId,
-  beforeId,
-  names,
-  now,
-  mode,
-  isLast,
-  onOlder,
-}: {
-  chainId: string;
-  taskId: string;
-  beforeId?: number;
-  names: TaskNames;
-  now: number;
-  mode: 'all' | 'handoffs' | 'raw';
-  isLast: boolean;
-  onOlder: (beforeId: number) => void;
-}) {
-  const { data, isFetching, error } = useFetchTaskEventsQuery({ chainId, taskId, beforeId, limit: PAGE });
-  const events: TaskEventWire[] = [...(data?.events || [])].sort((a, b) => (b.event_id ?? 0) - (a.event_id ?? 0));
-  const shown = mode === 'handoffs' ? events.filter((e) => HANDOFF_KINDS.has(String(e.kind))) : events;
-  const oldest = events.length ? Math.min(...events.map((e) => e.event_id ?? Infinity)) : null;
-  if (error) return <Text role="caption" tone="danger">Could not load activity.</Text>;
-  if (!data && isFetching) return <Text role="caption" tone="faint">Loading activity…</Text>;
+/** Memoized by the event alone: the clock tick never re-serializes it. */
+const RawEvent = React.memo(function RawEvent({ event }: { event: TaskEventWire }) {
   return (
-    <>
-      {shown.length === 0 && beforeId === undefined && (
-        <Text role="caption" tone="faint">{mode === 'handoffs' ? 'No handoffs yet.' : 'Nothing has happened yet.'}</Text>
-      )}
-      {shown.map((e, i) =>
-        mode === 'raw' ? (
-          <li key={e.event_id ?? i} data-debug-id="task-timeline-event">
-            <pre className="max-h-48 overflow-auto rounded-md bg-canvas p-2 font-mono text-code-sm text-muted">
-              {JSON.stringify(e, null, 2)}
-            </pre>
-          </li>
-        ) : (
-          <li key={e.event_id ?? i} data-debug-id="task-timeline-event" className="flex gap-3">
-            <TicketAgentAvatar name={actorLabel(names, String(e.actor_kind || ''), String(e.actor_id || ''))} state="idle" />
-            <span className="min-w-0 flex-1">
-              <span className="block text-body-sm text-primary">
-                <span className="font-semibold">{actorLabel(names, String(e.actor_kind || ''), String(e.actor_id || ''))}</span>{' '}
-                <span className="text-muted">{describeTaskEvent(e, names).text}</span>
-              </span>
-              {e.kind === 'submitted' || e.kind === 'handoff' ? (
-                e.payload?.summary ? (
-                  <span className="mt-1 block border-l-2 border-strong pl-3 text-body-sm text-primary">
-                    <VaultText value={String(e.payload.summary)} />
-                  </span>
-                ) : null
-              ) : null}
-              <span className="block text-caption text-faint">{e.ts_ms ? formatAgo(e.ts_ms, now) : ''}</span>
-            </span>
-          </li>
-        ),
-      )}
-      {isLast && events.length >= PAGE && oldest !== null && Number.isFinite(oldest) && (
-        <li>
-          <Button size="sm" variant="ghost" onClick={() => onOlder(oldest)} data-debug-id="ticket-activity-older-btn">
-            Show older
-          </Button>
-        </li>
-      )}
-    </>
+    <li data-debug-id="task-timeline-event">
+      <pre className="max-h-48 overflow-auto rounded-md bg-canvas p-2 font-mono text-code-sm text-muted">{JSON.stringify(event, null, 2)}</pre>
+    </li>
+  );
+});
+
+const EventRow = React.memo(function EventRow({ event: e, chainId, taskId, names, now }: { event: TaskEventWire; chainId: string; taskId: string; names: TaskNames; now: number }) {
+  const actor = actorLabel(names, String(e.actor_kind || ''), String(e.actor_id || ''));
+  const text = useMemo(() => describeTaskEvent(e, names).text, [e, names]);
+  const attemptNo = Number(e.payload?.attempt_no) || 0;
+  return (
+    <li data-debug-id="task-timeline-event" className="flex gap-3">
+      <TicketAgentAvatar name={actor} state="idle" />
+      <span className="min-w-0 flex-1">
+        <span className="block text-body-sm text-primary">
+          <span className="font-semibold">{actor}</span> <span className="text-muted">{text}</span>
+        </span>
+        {HANDOFF_KINDS.has(String(e.kind)) && attemptNo > 0 && <HandoffSummary chainId={chainId} taskId={taskId} attemptNo={attemptNo} />}
+        <span className="block text-caption text-faint">{e.ts_ms ? formatAgo(e.ts_ms, now) : ''}</span>
+      </span>
+    </li>
+  );
+});
+
+/** A handoff's summary lives in the attempt's handoff facet, not in the event. */
+function HandoffSummary({ chainId, taskId, attemptNo }: { chainId: string; taskId: string; attemptNo: number }) {
+  const { data } = useFetchTaskFacetQuery({ chainId, taskId, attemptNo, kind: 'handoff' });
+  const summary = data?.facet?.summary;
+  if (!summary) return null;
+  return (
+    <span className="mt-1 block border-l-2 border-strong pl-3 text-body-sm text-primary">
+      <DecryptedMarkdown source={String(summary)} compact copyAll={false} />
+    </span>
   );
 }
 

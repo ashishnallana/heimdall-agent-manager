@@ -9,20 +9,28 @@ export function HoldReasonDialog({
   ticketKey,
   open,
   busy,
+  error,
   onHold,
   onClose,
 }: {
   ticketKey: string;
   open: boolean;
   busy?: boolean;
-  onHold: (reason: string) => Promise<unknown> | void;
+  /** Why the last hold failed; shown in the dialog, which stays open. */
+  error?: string;
+  /** Resolves true once the hold is placed; false keeps the dialog open with the reason. */
+  onHold: (reason: string) => Promise<boolean>;
   onClose: () => void;
 }) {
   const [reason, setReason] = useState('');
+  const [sending, setSending] = useState(false);
   const submit = async () => {
     const trimmed = reason.trim();
-    if (!trimmed) return;
-    await onHold(trimmed);
+    // Enter must not send a second hold while one is in flight.
+    if (!trimmed || busy || sending) return;
+    setSending(true);
+    const held = await onHold(trimmed).finally(() => setSending(false));
+    if (!held) return;
     setReason('');
     onClose();
   };
@@ -42,12 +50,17 @@ export function HoldReasonDialog({
           onKeyDown={(e) => e.key === 'Enter' && void submit()}
           data-debug-id="task-hold-reason-input"
         />
+        {error && (
+          <Text as="p" role="caption" tone="danger" className="whitespace-pre-line break-words" data-debug-id="task-hold-error">
+            {error}
+          </Text>
+        )}
       </ModalBody>
       <ModalFooter>
         <Button variant="secondary" onClick={onClose} data-debug-id="task-hold-cancel-btn">
           Cancel
         </Button>
-        <Button variant="primary" disabled={!reason.trim() || busy} onClick={() => void submit()} data-debug-id="task-hold-confirm-btn">
+        <Button variant="primary" disabled={!reason.trim() || busy || sending} onClick={() => void submit()} data-debug-id="task-hold-confirm-btn">
           Hold
         </Button>
       </ModalFooter>

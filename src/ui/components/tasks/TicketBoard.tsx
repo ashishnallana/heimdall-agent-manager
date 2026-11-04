@@ -120,7 +120,7 @@ export const TicketBoard: React.FC<TicketBoardProps> = ({
   const [filter, setFilter] = useState<BoardFilter>('open');
   const [order, setOrder] = useState<FinishedOrder>('newest');
   const [showAllFinished, setShowAllFinished] = useState(false);
-  const now = useTicketClock(1000);
+  const now = useTicketClock();
   const vaultUnlocked = useSelector(selectIsVaultUnlocked);
 
   const counts = useMemo(() => boardFilterCounts(tasks), [tasks]);
