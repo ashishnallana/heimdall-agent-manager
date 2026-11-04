@@ -14,7 +14,6 @@ import { desktopCapabilities } from '../../bridge/desktopBridge';
 import BridgeOperationRail from '../bridge/BridgeOperationRail';
 import ThisMachineCard from './ThisMachineCard';
 import BridgeAutoUpdateToggle from './BridgeAutoUpdateToggle';
-import BridgeContextWindows from './BridgeContextWindows';
 import {
   useFetchTelemetryDefaultEnabledQuery,
   useSaveTelemetryDefaultEnabledMutation,
@@ -285,7 +284,6 @@ export default function BridgesPanel({ onHeadingChange }: { onHeadingChange?: (h
                           <Text as="span" role="caption" tone="muted">Catalog: {latestLabel} ({bridge.latest_source})</Text>
                         ) : null}
                         <BridgeAutoUpdateToggle bridgeId={id} online={online} />
-                        <BridgeContextWindows bridgeId={id} online={online} />
                         {bridge?.update_warning ? (
                           <span role="status"><Text as="span" role="caption" tone="warning">{bridge.update_warning}</Text></span>
                         ) : null}

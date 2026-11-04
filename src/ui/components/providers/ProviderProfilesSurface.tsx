@@ -23,6 +23,7 @@ import {
   type ProfileEnv,
 } from './providerProfiles';
 import ProviderExtensionInstallAction from '../extension/ProviderExtensionInstallAction';
+import BridgeContextWindows from '../settings/BridgeContextWindows';
 import ProviderBinaryPath from './ProviderBinaryPath';
 import { providerEnabledView } from './providerEnabledState';
 import ProviderTestRunModal, { type ProviderTestTarget } from './ProviderTestRunModal';
@@ -972,6 +973,9 @@ export default function ProviderProfilesSurface({ bridge, onHeadingChange }: {
                         onComplete={refresh}
                         onRetryDiscovery={() => discover('providers')}
                       />
+                      <div className="border-t border-subtle pt-3" data-debug-id="profile-context-windows">
+                        <BridgeContextWindows bridgeId={bridgeId} online={bridge?.status === 'online'} provider={draft.provider} />
+                      </div>
                     </section>
                   ) : null}
                 </>

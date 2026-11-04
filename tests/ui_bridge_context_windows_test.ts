@@ -237,3 +237,24 @@ test('reported rows keep their badge, and the amber note shows only on mismatch 
     }
   });
 });
+
+test('provider filter shows only that provider models; empty state names the provider; Bridges panel no longer renders it', async () => {
+  await withDom(async (dom, container) => {
+    const root = createRoot(container);
+    try {
+      await act(async () => { root.render(React.createElement(BridgeContextWindows, { bridgeId: 'brg-1', online: true, provider: 'claude' })); });
+      const models = Array.from(dom.window.document.querySelectorAll('li[data-source]')).map((li) => li.textContent);
+      assert.equal(models.length, 2);
+      assert.ok(models.every((t) => t?.includes('claude /')));
+      assert.doesNotMatch(dom.window.document.body.textContent || '', /gemini-3-pro/);
+      assert.doesNotMatch(dom.window.document.body.textContent || '', /not in the shipped config/, 'default-count is for the filtered provider only');
+      await act(async () => { root.render(React.createElement(BridgeContextWindows, { bridgeId: 'brg-1', online: true, provider: 'pi' })); });
+      assert.match(dom.window.document.body.textContent || '', /No pi models known on this bridge yet/);
+    } finally {
+      await act(async () => root.unmount());
+    }
+  });
+  const { readFileSync } = await import('node:fs');
+  assert.doesNotMatch(readFileSync('src/ui/components/settings/BridgesPanel.tsx', 'utf8'), /BridgeContextWindows/);
+  assert.match(readFileSync('src/ui/components/providers/ProviderProfilesSurface.tsx', 'utf8'), /<BridgeContextWindows[^>]*provider=\{draft\.provider\}/);
+});

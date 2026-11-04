@@ -26,10 +26,10 @@ function errorText(err: any, fallback: string): string {
   return code && !message.includes(code) ? `${message} (${code})` : message;
 }
 
-// Per-bridge context windows: what each provider/model resolves to and where the
+// Per-bridge context windows (optionally filtered to one provider): what each provider/model resolves to and where the
 // value comes from. The bridge is the source of truth; every reply carries its
 // full state and replaces ours.
-export default function BridgeContextWindows({ bridgeId, online }: { bridgeId: string; online: boolean }) {
+export default function BridgeContextWindows({ bridgeId, online, provider }: { bridgeId: string; online: boolean; provider?: string }) {
   const [state, setState] = useState<ContextWindowState | null>(null);
   const [loadError, setLoadError] = useState('');
   const [editing, setEditing] = useState<string | null>(null);
@@ -94,9 +94,10 @@ export default function BridgeContextWindows({ bridgeId, online }: { bridgeId: s
     void apply(() => cookieMutation(contextWindowClearPath(bridgeId, e.provider, e.model), 'DELETE'));
   }
 
-  const missing = state ? state.windows.filter((w) => w.source === 'default').length : 0;
+  const windows = state ? (provider ? state.windows.filter((w) => w.provider === provider) : state.windows) : [];
+  const missing = windows.filter((w) => w.source === 'default').length;
 
-  return <div className="flex flex-col gap-2" data-debug-id={`settings-bridge-context-windows-${bridgeId}`}>
+  return <div className="flex flex-col gap-2" data-debug-id={`settings-bridge-context-windows-${bridgeId}${provider ? `-${provider}` : ''}`}>
     <Text as="span" role="caption" tone="muted">
       Context windows{!online ? ' (connect to view or change)' : state === null && !loadError ? ' (loading…)' : ''}
     </Text>
@@ -105,9 +106,9 @@ export default function BridgeContextWindows({ bridgeId, online }: { bridgeId: s
       {missing > 0 ? ` ${missing} model${missing === 1 ? ' is' : 's are'} not in the shipped config and use${missing === 1 ? 's' : ''} the ${formatContextWindow(state.default_window)} default.` : ''}
     </Text> : null}
     {loadError ? <p role="alert" className="text-caption text-danger">{loadError}</p> : null}
-    {state && state.windows.length === 0 ? <Text as="p" role="caption" tone="muted">No provider models known on this bridge yet.</Text> : null}
-    {state && state.windows.length > 0 ? <ul className="flex flex-col gap-1" aria-label="Context windows by provider and model">
-      {state.windows.map((w) => {
+    {state && windows.length === 0 ? <Text as="p" role="caption" tone="muted">{provider ? `No ${provider} models known on this bridge yet.` : 'No provider models known on this bridge yet.'}</Text> : null}
+    {state && windows.length > 0 ? <ul className="flex flex-col gap-1" aria-label="Context windows by provider and model">
+      {windows.map((w) => {
         const key = entryKey(w);
         const open = editing === key;
         const isDefault = w.source === 'default';
