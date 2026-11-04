@@ -1548,3 +1548,32 @@ fs_wire_json_repairs_non_utf8_paths_in_any_frame :: proc(t: ^testing.T) {
 	testing.expectf(t, err == nil, "strict unmarshal: %v", err)
 	testing.expect_value(t, wire.path, "/home/u/\uFFFD\uFFFD\uFFFD")
 }
+
+// Every fs command resolves its path through bridge_fs_resolve_within; on a long-lived
+// bridge any intermediate it leaks is retained once per command (riverwood OOM, T4b).
+@(test)
+test_fs_resolve_within_frees_intermediates :: proc(t: ^testing.T) {
+	root := fs_test_make_root(t, "resolve_leak")
+	defer fs_test_cleanup(root)
+	sub := strings.concatenate({root, "/sub"})
+	defer delete(sub)
+	_ = os.make_directory_all(sub)
+
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	{
+		context.allocator = mem.tracking_allocator(&track)
+		// existing path, relative path, not-yet-existing tail, and an escape attempt
+		for req in ([]string{sub, "sub", "sub/new/deeper", "../outside"}) {
+			canonical, _ := bridge_fs_resolve_within(req, root)
+			delete(canonical)
+		}
+		for p in ([]string{sub, "/definitely/not/here/x"}) {
+			c := bridge_fs_canonicalize_existing(p)
+			delete(c)
+		}
+	}
+	testing.expect_value(t, len(track.allocation_map), 0)
+	testing.expect_value(t, len(track.bad_free_array), 0)
+}
