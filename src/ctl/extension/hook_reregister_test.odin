@@ -253,32 +253,38 @@ hook_debug_log_hook_invocations_append_jsonl_and_stay_silent :: proc(t: ^testing
 	os.set_env(HOOK_DEBUG_LOG_ENV, log_path)
 	defer os.unset_env(HOOK_DEBUG_LOG_ENV)
 
+	// Run the hooks in a forked child so stdout/stderr are isolated from the
+	// test runner's own output: the captured files must be exactly empty.
 	out_fd := posix.open(strings.clone_to_cstring(out_path, context.temp_allocator), {.WRONLY, .CREAT, .TRUNC}, {.IRUSR, .IWUSR})
 	err_fd := posix.open(strings.clone_to_cstring(err_path, context.temp_allocator), {.WRONLY, .CREAT, .TRUNC}, {.IRUSR, .IWUSR})
 	testing.expect(t, out_fd >= 0 && err_fd >= 0)
-	saved_out := posix.dup(1)
-	saved_err := posix.dup(2)
-	posix.dup2(out_fd, 1)
-	posix.dup2(err_fd, 2)
-
+	if out_fd < 0 || err_fd < 0 {
+		return
+	}
 	raw := `{"hook_event_name":"Stop","session_id":"dbgmark_s1","transcript_path":"/nonexistent/dbgmark.jsonl","prompt":"SECRET_PROMPT"}`
 	env := Hook_Env{endpoint = "unix:/tmp/x.sock", token = "tok", ts = "2026-10-22T06:00:00Z"}
-	res1 := hook_run_logged("claude", raw, env, dbg_send_ok)
-	res2 := hook_run_logged("claude", raw, env, dbg_send_fail)
-
-	posix.dup2(saved_out, 1)
-	posix.dup2(saved_err, 2)
-	posix.close(saved_out)
-	posix.close(saved_err)
+	pid := posix.fork()
+	testing.expect(t, pid >= 0)
+	if pid < 0 {
+		return
+	}
+	if pid == 0 {
+		posix.dup2(out_fd, 1)
+		posix.dup2(err_fd, 2)
+		res1 := hook_run_logged("claude", raw, env, dbg_send_ok)
+		res2 := hook_run_logged("claude", raw, env, dbg_send_fail)
+		posix._exit(res1 == "" && res2 == "" ? 0 : 3)
+	}
 	posix.close(out_fd)
 	posix.close(err_fd)
-
-	testing.expect_value(t, res1, "")
-	testing.expect_value(t, res2, "")
+	status: i32
+	w := posix.waitpid(pid, &status, {})
+	testing.expect_value(t, w, pid)
+	testing.expect(t, posix.WIFEXITED(status) && posix.WEXITSTATUS(status) == 0, "child must exit 0 with empty hook results")
 	for p in ([]string{out_path, err_path}) {
-		d, _ := os.read_entire_file(p, context.temp_allocator)
-		testing.expect(t, !strings.contains(string(d), "dbgmark"), p)
-		testing.expect(t, !strings.contains(string(d), "SECRET_PROMPT"), p)
+		d, rerr := os.read_entire_file(p, context.temp_allocator)
+		testing.expect(t, rerr == nil, p)
+		testing.expect_value(t, len(d), 0)
 	}
 	data, err := os.read_entire_file(log_path, context.temp_allocator)
 	testing.expect(t, err == nil)
