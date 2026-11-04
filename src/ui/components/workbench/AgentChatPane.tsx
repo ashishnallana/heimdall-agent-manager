@@ -3440,6 +3440,7 @@ export function AgentChatPane({
           agentActivity={<AgentActivityBubbles key={agentInstanceId} instanceId={agentInstanceId} isWorking={isWorking} />}
           bottomInset={composerDockHeight}
           pinOnSend={isOptimisticSend}
+          pinOriginRef={textareaRef}
           renderMessageBody={({ message }) => renderConversationMessageBody(message)}
           wrapperClassName="relative min-h-0 min-w-0 max-w-full flex-1 overflow-hidden overflow-x-hidden"
           scrollClassName="chat-scrollbar h-full min-h-0 max-w-full space-y-3 overflow-y-auto overflow-x-hidden rounded-none bg-canvas px-1 py-3 sm:space-y-4 sm:rounded-[18px] sm:px-4 sm:py-4"

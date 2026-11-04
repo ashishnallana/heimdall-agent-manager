@@ -1157,12 +1157,14 @@ html[data-window-chrome="win-overlay"][data-window-fullscreen] .window-gate-drag
 
 /* REQ-PIN-3: send pin-to-top resting state (ChatMessageList pinOnSend). Only the strip
    above the pinned bubble (--chat-pin-offset tall) is de-emphasised: the scroller's mask
-   fades it from ~30% opacity next to the bubble to 0 at the header, and a light blur sits
-   over that strip alone. Removed as soon as the reader scrolls back into history.
-   --chat-pin-start moves the strip below a floating header (pinOffsetFor). */
+   fades it from ~30% opacity next to the bubble to 0 at the header (holding 30% over the
+   lower half, where the previous message's last line sits), and a light blur with
+   feathered edges sits over that strip alone. Removed as soon as the reader scrolls back into history.
+   The strip spans the previous message's last line and action row (pinTailFor), and
+   --chat-pin-start moves it below a floating header (pinOffsetFor). */
 .ui-chat-pin-tail-mask {
-  -webkit-mask-image: linear-gradient(to bottom, transparent var(--chat-pin-start, 0px), rgb(0 0 0 / 0.3) calc(var(--chat-pin-offset, 52px) - 8px), #000 var(--chat-pin-offset, 52px));
-  mask-image: linear-gradient(to bottom, transparent var(--chat-pin-start, 0px), rgb(0 0 0 / 0.3) calc(var(--chat-pin-offset, 52px) - 8px), #000 var(--chat-pin-offset, 52px));
+  -webkit-mask-image: linear-gradient(to bottom, transparent var(--chat-pin-start, 0px), rgb(0 0 0 / 0.3) calc(var(--chat-pin-start, 0px) + (var(--chat-pin-offset, 48px) - var(--chat-pin-start, 0px)) * 0.45), rgb(0 0 0 / 0.3) calc(var(--chat-pin-offset, 48px) - 6px), #000 var(--chat-pin-offset, 48px));
+  mask-image: linear-gradient(to bottom, transparent var(--chat-pin-start, 0px), rgb(0 0 0 / 0.3) calc(var(--chat-pin-start, 0px) + (var(--chat-pin-offset, 48px) - var(--chat-pin-start, 0px)) * 0.45), rgb(0 0 0 / 0.3) calc(var(--chat-pin-offset, 48px) - 6px), #000 var(--chat-pin-offset, 48px));
 }
 .ui-chat-pin-tail-blur {
   position: absolute;
@@ -1171,6 +1173,8 @@ html[data-window-chrome="win-overlay"][data-window-fullscreen] .window-gate-drag
   pointer-events: none;
   -webkit-backdrop-filter: blur(1.5px);
   backdrop-filter: blur(1.5px);
+  -webkit-mask-image: linear-gradient(to bottom, transparent, #000 35%, #000 75%, transparent);
+  mask-image: linear-gradient(to bottom, transparent, #000 35%, #000 75%, transparent);
 }
 @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
   /* The mask alone still reads as faded history. */

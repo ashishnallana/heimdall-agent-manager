@@ -147,7 +147,7 @@ Running \`npm test -- tests/ui_pane_transport_e2e_test.ts\` now.`],
 
 const SAMPLE_MESSAGES: ChatMessage[] = SAMPLE_BODIES.map(([isUser, body], index) => message(index, isUser, body));
 
-const AGENT_REPLY = `Got it (demo reply, nothing was sent). The newest message should land just above the composer.`;
+const AGENT_REPLY = `Got it (demo reply, nothing was sent). Your message stays pinned at the top while this reply grows below it; scroll up to see the full history again.`;
 
 const PRESETS = new URLSearchParams(window.location.search);
 
@@ -476,6 +476,7 @@ function ComposerDemo() {
             onReply={send}
             bottomInset={composerDockHeight}
             pinOnSend
+            pinOriginRef={textareaRef}
             wrapperClassName="relative min-h-0 min-w-0 max-w-full flex-1 overflow-hidden overflow-x-hidden"
             scrollClassName="chat-scrollbar h-full min-h-0 max-w-full space-y-3 overflow-y-auto overflow-x-hidden rounded-none bg-canvas px-1 py-3 pt-16"
           />

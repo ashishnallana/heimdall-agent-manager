@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
-import type { ReactNode, UIEvent } from 'react';
+import type { ReactNode, RefObject, UIEvent } from 'react';
 import { useSelector } from 'react-redux';
 import Markdown from '../Markdown';
 import ChatHoverCopyButton from '../ChatHoverCopyButton';
@@ -71,29 +71,45 @@ function useReducedMotion(): boolean {
   return useSyncExternalStore(subscribeReducedMotion, prefersReducedMotion, () => false);
 }
 
-// REQ-PIN-1..6: send pin-to-top. On the user's own send the new bubble travels up to
-// PIN_OFFSET_PX below the top of the list viewport and stays there while the reply
-// renders below it; the strip above it shows the faded tail of the previous message.
-// Timing mirrors the motion tokens: --duration-slow (300ms) on --ease-standard
-// (cubic-bezier(0.2, 0.8, 0.2, 1)). The history follows the bubble PIN_HISTORY_LAG_MS
-// later over a shorter PIN_HISTORY_TRAVEL_MS leg, so the two read as one motion and
-// send-to-settled stays at ~350ms. Only transforms animate.
-export const PIN_OFFSET_PX = 52;
-export const PIN_TRAVEL_MS = 300;
-export const PIN_HISTORY_LAG_MS = 100;
-export const PIN_HISTORY_TRAVEL_MS = 250;
-export const PIN_SETTLE_MS = Math.max(PIN_TRAVEL_MS, PIN_HISTORY_LAG_MS + PIN_HISTORY_TRAVEL_MS);
+// REQ-PIN-1..6: send pin-to-top. On the user's own send the new bubble travels from
+// where the composer text was (measured before the insert) to its slot just under the
+// top of the list, and stays there while the reply renders below it. The strip above it
+// keeps the faded, lightly blurred tail of the previous message (its last line and
+// action row). REQ-PIN-1 rev3 (user QA round 2): the bubble and the history move as ONE
+// animation on one curve, cubic-bezier(0.2, 0.8, 0.2, 1) over ~320ms with no overshoot,
+// on transforms only (WAAPI, so it runs on the compositor; rAF where WAAPI is missing).
+export const PIN_TRAVEL_MS = 320;
+export const PIN_SETTLE_MS = PIN_TRAVEL_MS;
 export const PIN_ACTIVITY_DELAY_MS = 200;
-// A scroller whose top padding clears a floating header (e.g. pt-16) needs a deeper slot,
-// or the bubble would sit under that header: keep PIN_TAIL_PX of tail below the padding.
-export const PIN_TAIL_PX = 40;
-export function pinOffsetFor(paddingTop: number): number {
-  return Math.max(PIN_OFFSET_PX, Math.round(paddingTop) + PIN_TAIL_PX);
+export const PIN_EASE: [number, number, number, number] = [0.2, 0.8, 0.2, 1];
+const PIN_EASE_CSS = `cubic-bezier(${PIN_EASE.join(', ')})`;
+// The visible tail: from the bubble up to the top of the previous message's last line,
+// so that line and its action row peek out, kept within PIN_TAIL_PX..PIN_TAIL_MAX_PX.
+export const PIN_TAIL_PX = 48;
+export const PIN_TAIL_MAX_PX = 96;
+export function pinTailFor(gapToPreviousText: number, lineHeight: number): number {
+  return Math.min(PIN_TAIL_MAX_PX, Math.max(PIN_TAIL_PX, Math.round(gapToPreviousText + lineHeight)));
+}
+// The slot sits below the scroller's top padding, which may clear a floating header
+// (e.g. pt-16), so the bubble never lands under that header.
+export function pinOffsetFor(paddingTop: number, tail = PIN_TAIL_PX): number {
+  return Math.round(paddingTop) + tail;
 }
 // How far the pinned bubble may drift from its slot before a scroll counts as the
 // reader's own and leaves the pin (REQ-PIN-5).
 const PIN_DRIFT_PX = 4;
-const PIN_EASE: [number, number, number, number] = [0.2, 0.8, 0.2, 1];
+
+function cssPx(el: Element, prop: 'paddingTop' | 'paddingLeft' | 'borderTopWidth' | 'borderLeftWidth' | 'lineHeight'): number {
+  const style = el.ownerDocument.defaultView?.getComputedStyle(el);
+  return parseFloat(style?.[prop] ?? '') || 0;
+}
+
+// Where an element's text starts on screen (its content box's top-left corner).
+function textOrigin(el: Element): { left: number; top: number } {
+  const rect = el.getBoundingClientRect();
+  return { left: rect.left + cssPx(el, 'borderLeftWidth') + cssPx(el, 'paddingLeft'),
+    top: rect.top + cssPx(el, 'borderTopWidth') + cssPx(el, 'paddingTop') };
+}
 
 // Solves a CSS cubic-bezier timing function for progress x in [0, 1].
 export function cubicBezierAt([x1, y1, x2, y2]: [number, number, number, number], x: number): number {
@@ -207,6 +223,7 @@ export default function ChatMessageList({
   scrollClassName = 'chat-scrollbar h-full min-h-0 max-w-full space-y-[22px] overflow-y-auto overflow-x-hidden rounded-none bg-canvas px-1 py-4 sm:space-y-4 sm:rounded-[18px] sm:px-4 sm:py-4',
   bottomInset = 0,
   pinOnSend = false,
+  pinOriginRef,
 }: {
   conversationKey: string;
   messages: ChatMessage[];
@@ -253,6 +270,11 @@ export default function ChatMessageList({
    * A predicate narrows which appended user rows count as a send (e.g. optimistic rows only).
    */
   pinOnSend?: boolean | ((message: ChatMessage) => boolean);
+  /**
+   * REQ-PIN-1 rev2: the composer input the sent bubble emerges from (its left edge and
+   * top). Without it the bubble starts at the left of the list, just under the dock top.
+   */
+  pinOriginRef?: RefObject<HTMLElement | null>;
 }) {
   const isMobile = useIsMobile();
   const isUnlocked = useSelector(selectIsVaultUnlocked);
@@ -286,6 +308,15 @@ export default function ChatMessageList({
   const pinEnabled = Boolean(pinOnSend);
   const pinOnSendRef = useRef(pinOnSend);
   pinOnSendRef.current = pinOnSend;
+  // REQ-PIN-1 rev3: where the composer text sits, read during the render that adds the
+  // sent row, i.e. before React commits the insert, the cleared draft or any scroll.
+  const pinOriginStartRef = useRef<{ left: number; top: number } | null>(null);
+  const renderedCountRef = useRef(messages.length);
+  if (messages.length > renderedCountRef.current && pinOnSend && messages[messages.length - 1]?.isUser) {
+    const origin = pinOriginRef?.current;
+    pinOriginStartRef.current = origin ? textOrigin(origin) : null;
+  }
+  renderedCountRef.current = messages.length;
   const reduceMotionRef = useRef(reduceMotion);
   reduceMotionRef.current = reduceMotion;
   const reply = useMemo(() => onReply || (() => undefined), [onReply]);
@@ -298,11 +329,14 @@ export default function ChatMessageList({
   const pinIndexRef = useRef(-1);
   const [activityHeld, setActivityHeld] = useState(false);
   const pinFrameRef = useRef(0);
+  const pinAnimationsRef = useRef<{ content: Animation; row: Animation; rowEl: HTMLElement; keyframes: Keyframe[] } | null>(null);
   const activityTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const turnSpacerRef = useRef<HTMLDivElement | null>(null);
-  // The resolved slot (pinOffsetFor), measured from the scroller's padding at each send.
-  const [pinOffset, setPinOffset] = useState(PIN_OFFSET_PX);
-  const pinOffsetRef = useRef(PIN_OFFSET_PX);
+  // The resolved slot (pinOffsetFor) and where the tail strip starts (the scroller's top
+  // padding), measured at each send.
+  const [pinOffset, setPinOffset] = useState(PIN_TAIL_PX);
+  const [pinTop, setPinTop] = useState(0);
+  const pinOffsetRef = useRef(PIN_TAIL_PX);
   const setPin = useCallback((phase: PinPhase, index = pinIndexRef.current) => {
     pinPhaseRef.current = phase;
     pinIndexRef.current = phase === 'idle' ? -1 : index;
@@ -318,12 +352,18 @@ export default function ChatMessageList({
   const clearPinMotion = useCallback(() => {
     cancelAnimationFrame(pinFrameRef.current);
     pinFrameRef.current = 0;
+    const animations = pinAnimationsRef.current;
+    pinAnimationsRef.current = null;
+    if (animations) { animations.content.onfinish = null; animations.content.cancel(); animations.row.cancel(); }
     clearTimeout(activityTimerRef.current);
     setActivityHeld(false);
     const content = contentRef.current;
     if (!content) return;
     content.style.transform = '';
-    content.querySelector<HTMLElement>('[data-chat-pin-row="true"]')?.style.removeProperty('transform');
+    const row = content.querySelector<HTMLElement>('[data-chat-pin-row="true"]');
+    row?.style.removeProperty('transform');
+    row?.style.removeProperty('position');
+    row?.style.removeProperty('z-index');
   }, []);
 
   // Leaving the pinned state (manual scroll-up, jump-latest, conversation switch) gives
@@ -363,11 +403,13 @@ export default function ChatMessageList({
 
   // REQ-PIN-1/1b/6: pin the just-sent row at `index`. Runs in a layout effect, before
   // the first paint of the new row: the scroll position jumps to the pinned target at
-  // once and transforms put the bubble back at the composer and the history back where
-  // it was, then both ease to zero (bubble first, history PIN_HISTORY_LAG_MS later).
+  // once, and transforms put the history back where it was and the bubble back where the
+  // composer text was. Both then ease to zero together, as one motion on one curve.
   const pinRow = useCallback((index: number) => {
     const node = scrollRef.current;
     const content = contentRef.current;
+    const start = pinOriginStartRef.current;
+    pinOriginStartRef.current = null;
     clearPinMotion();
     setPin('travel', index);
     stickyRef.current = false;
@@ -378,20 +420,30 @@ export default function ChatMessageList({
     if (!row) return;
     content.querySelectorAll<HTMLElement>('[data-chat-pin-row="true"]').forEach((el) => { delete el.dataset.chatPinRow; });
     row.dataset.chatPinRow = 'true';
-    const offset = pinOffsetFor(parseFloat(node.ownerDocument.defaultView?.getComputedStyle(node).paddingTop ?? '') || 0);
+    // REQ-PIN-3: keep the previous message's last line and action row in the tail.
+    const previous = content.querySelector<HTMLElement>(`[data-chat-pin-index="${index - 1}"] [data-chat-body]`);
+    const tail = previous
+      ? pinTailFor(row.getBoundingClientRect().top - previous.getBoundingClientRect().bottom, cssPx(previous, 'lineHeight') || 24)
+      : PIN_TAIL_PX;
+    const paddingTop = cssPx(node, 'paddingTop');
+    const offset = pinOffsetFor(paddingTop, tail);
     pinOffsetRef.current = offset;
     setPinOffset(offset);
+    setPinTop(Math.round(paddingTop));
     sizeTurnSpacer();
     const fromScroll = node.scrollTop;
     const inset = node.querySelector<HTMLElement>('[data-chat-bottom-inset]')?.offsetHeight ?? 0;
-    // Where the composer text was: the bubble's bottom just above the dock.
-    const startVisual = Math.max(offset, node.clientHeight - inset - row.offsetHeight);
-    const target = pinTargetTop(row);
-    node.scrollTop = target;
+    node.scrollTop = pinTargetTop(row);
     const settle = () => {
       pinFrameRef.current = 0;
+      const animations = pinAnimationsRef.current;
+      pinAnimationsRef.current = null;
+      if (animations) { animations.content.cancel(); animations.row.cancel(); }
       content.style.transform = '';
-      content.querySelector<HTMLElement>('[data-chat-pin-row="true"]')?.style.removeProperty('transform');
+      const pinned = content.querySelector<HTMLElement>('[data-chat-pin-row="true"]');
+      pinned?.style.removeProperty('transform');
+      pinned?.style.removeProperty('position');
+      pinned?.style.removeProperty('z-index');
       setPin('pinned', index);
       setActivityHeld(true);
       clearTimeout(activityTimerRef.current);
@@ -402,34 +454,67 @@ export default function ChatMessageList({
       setActivityHeld(false);
       return;
     }
-    const historyFrom = node.scrollTop - fromScroll;
-    const bubbleFrom = startVisual - offset;
-    if (Math.abs(historyFrom) < 1 && Math.abs(bubbleFrom) < 1) { settle(); return; }
-    const total = PIN_SETTLE_MS;
+    // Offsets, in screen pixels, from the resting state back to the moment of send.
+    const history = node.scrollTop - fromScroll;
+    const bubble = textOrigin(row.querySelector('[data-chat-body]') ?? row);
+    const fromX = start ? start.left - bubble.left : 0;
+    // Without a composer origin, start just under the dock top (behind the composer).
+    const fromY = (start ? start.top : node.getBoundingClientRect().top + node.clientHeight - inset) - bubble.top;
+    if (Math.abs(history) < 1 && Math.abs(fromX) < 1 && Math.abs(fromY) < 1) { settle(); return; }
+    // The row lives inside the moving content, so its own offset excludes the history's.
+    const rowX = fromX;
+    const rowY = fromY - history;
+    // REQ-PIN-6 safety net: the opaque bubble draws above the list while it moves.
+    row.style.position = 'relative';
+    row.style.zIndex = '1';
+    setActivityHeld(true);
+    const contentFrames: Keyframe[] = [{ transform: `translate3d(0, ${history}px, 0)` }, { transform: 'translate3d(0, 0, 0)' }];
+    const rowFrames: Keyframe[] = [{ transform: `translate3d(${rowX}px, ${rowY}px, 0)` }, { transform: 'translate3d(0, 0, 0)' }];
+    if (typeof content.animate === 'function' && typeof row.animate === 'function') {
+      const timing: KeyframeAnimationOptions = { duration: PIN_TRAVEL_MS, easing: PIN_EASE_CSS };
+      const contentAnimation = content.animate(contentFrames, timing);
+      const rowAnimation = row.animate(rowFrames, timing);
+      pinAnimationsRef.current = { content: contentAnimation, row: rowAnimation, rowEl: row, keyframes: rowFrames };
+      contentAnimation.onfinish = settle;
+      return;
+    }
     const apply = (elapsed: number) => {
-      const bubble = bubbleFrom * (1 - cubicBezierAt(PIN_EASE, Math.min(1, elapsed / PIN_TRAVEL_MS)));
-      const lag = Math.min(1, Math.max(0, elapsed - PIN_HISTORY_LAG_MS) / PIN_HISTORY_TRAVEL_MS);
-      const history = historyFrom * (1 - cubicBezierAt(PIN_EASE, lag));
-      content.style.transform = history ? `translate3d(0, ${history}px, 0)` : '';
-      // The row lives inside the content, so subtract the history shift from it.
+      const remaining = 1 - cubicBezierAt(PIN_EASE, Math.min(1, elapsed / PIN_TRAVEL_MS));
+      content.style.transform = `translate3d(0, ${history * remaining}px, 0)`;
       const pinned = content.querySelector<HTMLElement>('[data-chat-pin-row="true"]');
-      if (pinned) pinned.style.transform = `translate3d(0, ${bubble - history}px, 0)`;
+      if (pinned) pinned.style.transform = `translate3d(${rowX * remaining}px, ${rowY * remaining}px, 0)`;
     };
     apply(0);
-    setActivityHeld(true);
-    let start = -1;
+    let begin = -1;
     const step = (now: number) => {
-      if (start < 0) start = now;
-      const elapsed = now - start;
-      if (elapsed >= total) { settle(); return; }
+      if (begin < 0) begin = now;
+      const elapsed = now - begin;
+      if (elapsed >= PIN_TRAVEL_MS) { settle(); return; }
       apply(elapsed);
       pinFrameRef.current = requestAnimationFrame(step);
     };
     pinFrameRef.current = requestAnimationFrame(step);
   }, [clearPinMotion, pinTargetTop, setPin, sizeTurnSpacer]);
 
+  // The optimistic local_ -> server-id swap re-mounts the pinned row mid-travel: carry
+  // its animation (and raised stacking) over to the new element, in step with the list.
+  useLayoutEffect(() => {
+    const animations = pinAnimationsRef.current;
+    if (!animations || pinPhaseRef.current !== 'travel') return;
+    const row = contentRef.current?.querySelector<HTMLElement>('[data-chat-pin-row="true"]');
+    if (!row || row === animations.rowEl) return;
+    animations.row.cancel();
+    row.style.position = 'relative';
+    row.style.zIndex = '1';
+    const next = row.animate(animations.keyframes, { duration: PIN_TRAVEL_MS, easing: PIN_EASE_CSS });
+    next.currentTime = animations.content.currentTime;
+    pinAnimationsRef.current = { ...animations, row: next, rowEl: row };
+  });
+
   useEffect(() => () => {
     cancelAnimationFrame(pinFrameRef.current);
+    pinAnimationsRef.current?.content.cancel();
+    pinAnimationsRef.current?.row.cancel();
     clearTimeout(activityTimerRef.current);
   }, []);
 
@@ -692,7 +777,7 @@ export default function ChatMessageList({
         // (ui-chat-pin-tail-mask) fades it. Shown in the pinned resting state only.
         <div data-debug-id={`${debugPrefix}-pin-tail-blur`} aria-hidden="true"
           className={`ui-chat-pin-tail-blur ${pinPhase === 'pinned' ? '' : 'hidden'}`}
-          style={{ top: pinOffset - PIN_OFFSET_PX, height: PIN_OFFSET_PX }} />
+          style={{ top: pinTop, height: pinOffset - pinTop }} />
       ) : null}
       {/* Polite live region for scroll-to-match: announces the jump / paging / not-found
           to screen readers without stealing focus or blocking. */}
@@ -705,7 +790,7 @@ export default function ChatMessageList({
           if (['ArrowUp', 'PageUp', 'Home'].includes(event.key) || (event.key === ' ' && event.shiftKey)) cancelTailFollow();
         }}
         className={`${scrollClassName}${pinPhase === 'pinned' ? ' ui-chat-pin-tail-mask' : ''}`}
-        style={{ overflowAnchor: 'auto', ...(pinEnabled ? { ['--chat-pin-offset' as string]: `${pinOffset}px`, ['--chat-pin-start' as string]: `${pinOffset - PIN_OFFSET_PX}px` } : {}) }}>
+        style={{ overflowAnchor: 'auto', ...(pinEnabled ? { ['--chat-pin-offset' as string]: `${pinOffset}px`, ['--chat-pin-start' as string]: `${pinTop}px` } : {}) }}>
         <div ref={contentRef} data-debug-id={`${debugPrefix}-messages-container`}
           className="mx-auto w-full max-w-4xl space-y-3 sm:space-y-4 [--live-tools-tail-gap:12px] sm:[--live-tools-tail-gap:16px]"
           style={{ overflowAnchor: 'none' }}>
@@ -744,7 +829,7 @@ export default function ChatMessageList({
                 className={`msg group flex min-w-0 max-w-full rounded-xl outline-none focus-visible:shadow-focus ${reduceMotion ? '' : 'transition-colors duration-500'} ${message.messageId === highlightId ? 'bg-warning-soft ring-1 ring-warning' : ''} ${message.isUser ? 'justify-end' : 'justify-start'}`}>
                 <div className={`flex min-w-0 max-w-full ${message.isUser ? 'max-w-[86%] items-end sm:max-w-[78%]' : 'w-full items-start'} flex-col text-sm`}>
                   {renderMessageTop ? renderMessageTop({ message, index, messages }) : null}
-                  <div className={`min-w-0 max-w-full overflow-hidden break-words [overflow-wrap:anywhere] ${message.isUser ? 'rounded-[15px] border border-subtle bg-surface-raised px-[14px] py-[10px] text-primary' : 'w-full text-primary'}`}>
+                  <div data-chat-body="" className={`min-w-0 max-w-full overflow-hidden break-words [overflow-wrap:anywhere] ${message.isUser ? 'rounded-[15px] border border-subtle bg-surface-raised px-[14px] py-[10px] text-primary' : 'w-full text-primary'}`}>
                     {renderMessageBody ? renderMessageBody({ message, onReply: reply }) : <DefaultMessageBody body={message.body} />}
                     <ChatActionCard message={message} conversationId={conversationKey} onReply={reply} />
                     {questionGroup && !message.isUser ? <MultiQuestionForm
