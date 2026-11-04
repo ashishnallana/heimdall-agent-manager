@@ -9,6 +9,7 @@ import domain "odin_test:hub/domain"
 import iface "odin_test:hub/repository/iface"
 import sqlite "odin_test:hub/repository/sqlite"
 import mcp "odin_test:hub/service/mcp"
+import events "odin_test:hub/service/events"
 import project "odin_test:hub/service/project"
 import http "odin_test:hub/transport/http"
 import vault "odin_test:lib/vault"
@@ -32,6 +33,11 @@ mcp_chain_create_test :: proc(t:^testing.T,g:^App_Graph,h:^http.MCP_Control_Hand
 	args:=json.Object{"title"=json.String("Fresh coordinator chain"),"description"=json.String("Private description"),"coordinator_agent_id"=json.String("agt_placement"),"bridge_id"=json.String("brg_placement_a"),"provider"=json.String("codex"),"provider_profile"=json.String("codex"),"model"=json.String(model)}
 	owner:=domain.User_ID(view.owner)
 	before,_:=iface.taskchain_list_chains_by_owner(&g.repos.taskchains,owner)
+	// Every owner-bus publish bumps this hint: rejected or rolled-back creates
+	// announce nothing; a committed one must reach the sidebar's live clients.
+	hint,attached:=events.poll_attach(&g.event_bus,view.owner)
+	if !testing.expect(t,attached) do return
+	defer events.poll_detach(&g.event_bus,hint)
 	instances_before,_:=iface.agent_list_instances_by_owner(&g.repos.agents,owner,100)
 	// Unknown and foreign agents are indistinguishable, and neither creates state.
 	_,_,_=iface.agent_save(&g.repos.agents,{agent_id="agt_foreign_coordinator",owner_user_id="foreign_owner",name="Foreign",slug="foreign-coordinator",template_id=domain.TEMPLATE_EMPTY_ID,state=.Active})
@@ -65,8 +71,17 @@ mcp_chain_create_test :: proc(t:^testing.T,g:^App_Graph,h:^http.MCP_Control_Hand
 	instances_after,_=iface.agent_list_instances_by_owner(&g.repos.agents,owner,100)
 	testing.expect(t,len(after)==len(before) && len(instances_after)==len(instances_before) && len(sink.commands)==0)
 	testing.expect(t,sqlite.exec(&g.db,"DROP TRIGGER coordinator_fail_commit; DROP TABLE coordinator_commit_child; DROP TABLE coordinator_commit_parent;"))
+	testing.expect_value(t,events.poll_revision(&g.event_bus,hint),u64(0))
 	result:=mcp_task_test_output(t,mcp_task_test_call(h,headers,"chains.create",args));if result==nil do return
 	id:=string(result["coordinator_agent_instance_id"].(json.String));chain_id:=domain.Task_Chain_ID(result["chain_id"].(json.String))
+	// Instance + conversation + task_chain "created" (as POST /task-chains emits).
+	testing.expect_value(t,events.poll_revision(&g.event_bus,hint),u64(3))
+	chain_hint,chain_attached:=events.poll_attach(&g.event_bus,view.owner,string(chain_id))
+	if testing.expect(t,chain_attached) {
+		mcp_chain_create_publish(&g.event_bus,view.owner,{},string(chain_id))
+		testing.expect_value(t,events.poll_revision(&g.event_bus,chain_hint),u64(1))
+		events.poll_detach(&g.event_bus,chain_hint)
+	}
 	chain,found,_:=iface.taskchain_get_chain(&g.repos.taskchains,chain_id)
 	testing.expect(t,found && chain.publish_state==.Draft && chain.coordinator_agent_instance_id==id && strings.has_prefix(chain.title,"vault:v2:"))
 	i,instance_found,_:=iface.agent_get_instance(&g.repos.agents,id)
