@@ -155,10 +155,17 @@ export function ProjectDetailActions({
   record,
   busy,
   onVerb,
+  menuAlign = 'end',
 }: {
   record: ProjectRecord;
   busy: ProjectVerb | '';
   onVerb: (verb: ProjectVerb) => void;
+  /**
+   * Which edge the `…` menu lines up with. `end` (opens leftward) suits the page
+   * header, where the cluster sits at the right edge; the pane header starts its
+   * cluster at the pane's left edge, where a leftward menu is clipped by the pane.
+   */
+  menuAlign?: 'start' | 'end';
 }) {
   const verbs = verbsForState(projectState(record));
   const menuVerbs = verbs.filter((verb) => verb !== 'edit');
@@ -178,7 +185,7 @@ export function ProjectDetailActions({
       {menuVerbs.length ? (
         <Menu
           label="Project actions"
-          align="end"
+          align={menuAlign}
           trigger={
             <ActionButton
               icon="more-horizontal"
@@ -282,7 +289,7 @@ export function ProjectDetailHeader({
       timestampTooltip={absoluteTime(record.updatedAt)}
       alert={alert}
       onBack={onBack}
-      actions={<ProjectDetailActions record={record} busy={busy} onVerb={onVerb} />}
+      actions={<ProjectDetailActions record={record} busy={busy} onVerb={onVerb} menuAlign="start" />}
     />
   );
 }
