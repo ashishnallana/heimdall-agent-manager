@@ -373,12 +373,24 @@ export default function DeviceApprovalPage() {
   }, [phase]);
 
   const reset = () => { setCode(''); setPhase({ kind: 'enter' }); };
+  // Back leaves the page: to Bridges when the app's Bridge setup opened it, else to
+  // the previous screen (home when this page was opened directly).
+  const goBack = () => {
+    if (fromApp) window.location.hash = '#/settings/bridges';
+    else if (window.history.length > 1) window.history.back();
+    else window.location.hash = '#/home';
+  };
+
   const onBridgeReconnected = useCallback(() => {
     setPhase((p) => p.kind === 'reconnecting' ? { kind: 'providers', bridgeId: p.bridgeId, label: p.label, approved: p.approved } : p);
   }, []);
 
   return (
     <div data-debug-id="device-approval-page" className="mx-auto w-full max-w-xl p-4">
+      <Button data-debug-id="device-approval-back-btn" variant="ghost" size="sm" className="-ml-2 mb-2 gap-1.5" onClick={goBack}>
+        <Icon name="chevron-left" size={16} />
+        <span>Back</span>
+      </Button>
       <h1 className="mb-1 flex items-center gap-2 text-lg font-semibold text-primary"><Icon name="lock" size={18} />Add a device</h1>
       {fromApp ? (
         <p data-debug-id="device-approval-from-app" className="mb-4 text-sm text-muted">This app is setting up its Bridge; its pairing code was filled in for you. Check the details, then approve.</p>
