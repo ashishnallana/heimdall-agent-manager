@@ -72,6 +72,7 @@ import {
   containsVaultArmored,
   decryptVaultText,
   decryptEmbeddedVaultTokens,
+  maskVaultArmored,
 } from '../../utils/vaultContent';
 import {
   artifactKindForFile,
@@ -364,6 +365,15 @@ function sentMessageFromResult(result: any): Message | null {
   return { ...candidate, sending: false } as Message;
 }
 
+// REQ-ENC-1: the send ack echoes the stored row, whose body is vault ciphertext while the
+// vault is unlocked. The user's own bubble keeps the text they typed instead, so it never
+// shows `vault:v2:` until the decrypted refetch lands.
+function ownSentBody(ackBody: unknown, sendBody: string): string {
+  const body = typeof ackBody === 'string' ? ackBody : '';
+  if (!body || isVaultArmored(body) || containsVaultArmored(body)) return sendBody;
+  return body;
+}
+
 function failedLocalMessage(message: Message, error: string): Message {
   return {
     ...message,
@@ -490,11 +500,18 @@ export function ThreadMessageBody({ body, onQuote, quoteDisabledReason = '', rev
     const sanitized = replaceVaultTokens(body, '[🔒 Encrypted]');
     return <Markdown source={sanitized} compact copyAll={false} />;
   }
+  // REQ-ENC-2: never paint `vault:v2:`. While a vault body decrypts, keep this row's
+  // previous plaintext (e.g. the optimistic send's text) or show the mask; a failed open
+  // shows the mask.
+  const ready = decrypted !== null && decryptedFor === body;
+  const plain = (text: string | null) => text !== null && !isVaultArmored(text) && !containsVaultArmored(text);
+  const source = !hasVault ? body
+    : plain(decrypted) && (ready || !decryptFailed) ? decrypted! : maskVaultArmored(body);
   return <>
-    <Markdown source={decrypted !== null && decryptedFor === body ? decrypted : body} compact copyAll={false}
+    <Markdown source={source} compact copyAll={false}
       onTextSelectionChange={quoteReady ? setSelection : undefined}
       // Hold the reveal until a vault body has decrypted, so ciphertext never shows.
-      reveal={reveal && !decryptFailed ? { ...reveal, hold: reveal.hold || (hasVault && !(decrypted !== null && decryptedFor === body)) } : undefined} />
+      reveal={reveal && !decryptFailed ? { ...reveal, hold: reveal.hold || (hasVault && !ready) } : undefined} />
     {quoteReady && selection ? <QuoteSelectionPopover selection={selection} onDismiss={dismiss}
       disabledReason={quoteDisabledReason} onQuote={() => onQuote!(selection.selectedText)} /> : null}
   </>;
@@ -1855,7 +1872,7 @@ export function AgentChatPane({
           return sent
             ? {
                 ...sent,
-                body: String(sent.body || sendBody),
+                body: ownSentBody(sent.body, sendBody),
                 direction: sent.direction || 'user_to_agent',
                 artifact_ids_json:
                   (sent as any).artifact_ids_json || JSON.stringify(attachmentIds),
@@ -1905,7 +1922,7 @@ export function AgentChatPane({
           return sent
             ? {
                 ...sent,
-                body: String(sent.body || sendBody),
+                body: ownSentBody(sent.body, sendBody),
                 direction: sent.direction || 'user_to_agent',
                 artifact_ids_json: '[]',
               }

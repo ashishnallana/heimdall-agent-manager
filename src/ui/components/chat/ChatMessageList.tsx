@@ -225,7 +225,8 @@ function DefaultMessageBody({ body, reveal }: { body: string; reveal?: StreamRev
         if (mounted) setDecrypted(res);
       })
       .catch(() => {
-        if (mounted) setDecrypted(body);
+        // REQ-ENC-2: a failed open shows the mask, never the ciphertext.
+        if (mounted) setDecrypted(maskVaultArmored(body));
       });
     return () => {
       mounted = false;
@@ -241,9 +242,13 @@ function DefaultMessageBody({ body, reveal }: { body: string; reveal?: StreamRev
     const sanitized = replaceVaultTokens(body, '[🔒 Encrypted]');
     return <Markdown source={sanitized} compact copyAll={false} />;
   }
-  // Hold the reveal until a vault body has decrypted, so ciphertext never shows.
-  return <Markdown source={decrypted !== null ? decrypted : body} compact copyAll={false}
-    reveal={reveal && { ...reveal, hold: reveal.hold || (hasVault && decrypted === null) }} />;
+  // REQ-ENC-2: never paint `vault:v2:`. Until a vault body has decrypted, keep the
+  // previous plaintext of this row (state survives a body swap on the same key) or show
+  // the mask, and hold the reveal.
+  const pending = hasVault && (decrypted === null || isVaultArmored(decrypted) || containsVaultArmored(decrypted));
+  const source = !hasVault ? body : pending ? maskVaultArmored(body) : decrypted!;
+  return <Markdown source={source} compact copyAll={false}
+    reveal={reveal && { ...reveal, hold: reveal.hold || pending }} />;
 }
 
 // The copy text is resolved ahead of the click: iOS Safari rejects a clipboard write made
