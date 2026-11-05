@@ -1,5 +1,5 @@
 import { Badge, Text } from '@ui';
-import { providerBinaryPathView } from './providerBinaryPath';
+import { providerBinaryPathView } from './providerBinaryPathView';
 
 /** Resolved executable path (monospace, truncated, full path in the tooltip). */
 export default function ProviderBinaryPath({ provider, status, overridePath = '', hasOverride = false }: {
