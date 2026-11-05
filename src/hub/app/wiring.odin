@@ -363,7 +363,13 @@ build_graph :: proc(graph: ^App_Graph, config: Hub_Config) -> (bool, string) {
 		fmt.eprintfln("hub: startup bridge plan reconciliation incomplete: %s", plan_err.message)
 	}
 	graph.bridges.catalog = &graph.bridge_update_catalog
-	graph.bridge_update_catalog.release_get = bridge_service.bridge_catalog_http_get
+	// HEIMDALL_UPDATE_CATALOG_OFFLINE=1 leaves release_get nil: an offline,
+	// manifest-only catalog (HEIMDALL_UPDATE_MANIFEST_PATH), so an isolated hub
+	// (the 3-OS lifecycle e2e) offers the build under test instead of whatever
+	// release GitHub has promoted.
+	if os.get_env("HEIMDALL_UPDATE_CATALOG_OFFLINE", context.temp_allocator) != "1" {
+		graph.bridge_update_catalog.release_get = bridge_service.bridge_catalog_http_get
+	}
 	graph.agents = agent_service.new_agent_service_with_runtime(&graph.repos.agents, &graph.repos.bridges, &graph.repos.projects, &graph.repos.content, &graph.repos.taskchains, bridge_command_sink, &graph.bridge_runtime_registry, &graph.clock, &graph.ids)
 	graph.agents.event_bus = &graph.event_bus
 	graph.agents.entitlements = billing_service.entitlement_lookup(&graph.billing)

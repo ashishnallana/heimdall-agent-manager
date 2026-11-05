@@ -368,3 +368,31 @@ test_two_accounts_install_uninstall_both_orders :: proc(t: ^testing.T) {
 		testing.expect(t, re_ports[0] != after[0] && re_ports[1] != after[1])
 	}
 }
+
+// A home directory reached through a link (Fedora Atomic /home -> /var/home, macOS
+// /var -> /private/var, a Windows junction) must give the same key as its target,
+// or a valid profile install looks like a foreign binary to update/uninstall.
+@(test)
+test_path_key_resolves_linked_directory :: proc(t: ^testing.T) {
+	tmp, terr := os.temp_directory(context.temp_allocator)
+	testing.expect(t, terr == nil)
+	root := pjoin(tmp, fmt.tprintf("bridgesvc-pathkey-%d", os.get_pid()))
+	_ = os.remove_all(root)
+	defer os.remove_all(root)
+	real_bin := pjoin(root, "var", "home", "u", "bin")
+	other_bin := pjoin(root, "other", "u", "bin")
+	testing.expect(t, os.make_directory_all(real_bin) == nil)
+	testing.expect(t, os.make_directory_all(other_bin) == nil)
+	link_home := pjoin(root, "home")
+	if err := os.symlink(pjoin(root, "var", "home"), link_home); err != nil {
+		fmt.eprintfln("symlink unavailable here (%v); skipping the linked-path case", err)
+		return
+	}
+	linked_bin := pjoin(link_home, "u", "bin")
+	testing.expect_value(t, path_key(linked_bin), path_key(real_bin))
+	testing.expect_value(t, path_key(strings.concatenate({linked_bin, "/"}, context.temp_allocator)), path_key(real_bin))
+	testing.expect(t, path_key(other_bin) != path_key(real_bin))
+	// A missing path keeps its lexical form rather than failing.
+	missing := pjoin(root, "missing", "bin")
+	testing.expect_value(t, path_key(missing), path_key(missing))
+}

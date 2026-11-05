@@ -433,11 +433,19 @@ export function useComposerDockInset(dockRef: RefObject<HTMLElement | null>, { i
         flushSync(() => setInset(height));
         return;
       }
-      // Read before writing: layout is clean when observers are delivered.
-      const pinned = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight <= 2;
-      spacer.style.height = `${height}px`;
       const jump = jumpDebugId ? scope.querySelector<HTMLElement>(`[data-debug-id="${jumpDebugId}"]`) : null;
       if (jump) jump.style.bottom = `${height + 12}px`;
+      // REQ-PIN-2 rev3 (decouple): a ChatMessageList with pinOnSend keeps its inset at the
+      // resting composer height; it only learns the live height (for the end of a long
+      // reply), and the list is never scrolled for a composer change.
+      if (spacer.dataset.chatBottomInset === 'fixed') {
+        spacer.style.setProperty('--chat-live-inset', `${height}px`);
+        settle = setTimeout(() => setInset(height), DOCK_INSET_SETTLE_MS);
+        return;
+      }
+      // Read before writing: layout is clean when observers are delivered.
+      const pinned = scroller.dataset.chatPinned !== 'true' && scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight <= 2;
+      spacer.style.height = `${height}px`;
       if (pinned) scroller.scrollTop = scroller.scrollHeight;
       settle = setTimeout(() => setInset(height), DOCK_INSET_SETTLE_MS);
     });

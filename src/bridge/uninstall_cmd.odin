@@ -488,11 +488,7 @@ bridge_uninstall_relocated_argv :: proc(copy_path: string, args: []string, servi
 bridge_uninstall_relocate :: proc(l: bridgesvc.Layout, args: []string) -> (relocated: bool, ok: bool) {
 	if has_flag(args, BRIDGE_UNINSTALL_RELOCATED_FLAG) do return false, false
 	exe, _ := os.get_executable_path(context.temp_allocator)
-	bin := strings.to_lower(strings.trim_right(l.bin_dir, "/\\"), context.temp_allocator)
-	exe_dir := strings.to_lower(bridgesvc.pdir(exe), context.temp_allocator)
-	same, _ := strings.replace_all(exe_dir, "\\", "/", context.temp_allocator)
-	want, _ := strings.replace_all(bin, "\\", "/", context.temp_allocator)
-	if exe == "" || same != want do return false, false
+	if !bridge_exe_in_bin_dir(exe, l.bin_dir) do return false, false
 	tmp, _ := os.lookup_env("TEMP", context.temp_allocator)
 	if tmp == "" do return false, false
 	copy_path := bridgesvc.pjoin(tmp, fmt.tprintf("%s%d.exe", BRIDGE_UNINSTALL_COPY_PREFIX, os.get_pid()))

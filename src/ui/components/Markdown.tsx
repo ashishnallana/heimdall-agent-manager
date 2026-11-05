@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useSelector } from 'react-redux';
 import ArtifactViewer from './ArtifactViewer';
 import MarkdownBody, { type MarkdownTextSelection } from './MarkdownBody';
+import type { StreamRevealOptions } from './chat/streamReveal';
 
 type MarkdownProps = {
   source: string;
@@ -9,6 +10,8 @@ type MarkdownProps = {
   compact?: boolean;
   copyAll?: boolean;
   onTextSelectionChange?: (selection: MarkdownTextSelection | null) => void;
+  /** Word-by-word reveal of a live reply (chat/streamReveal.ts). Omit to render instantly. */
+  reveal?: StreamRevealOptions;
   'data-debug-id'?: string;
 };
 
@@ -24,7 +27,7 @@ function artifactViewerSession(session: any) {
   return { daemonUrl: String(session?.daemonUrl || ''), clientToken: String(session?.clientToken || '') };
 }
 
-export default function Markdown({ source, className, compact, copyAll = true, onTextSelectionChange, 'data-debug-id': dataDebugId }: MarkdownProps) {
+export default function Markdown({ source, className, compact, copyAll = true, onTextSelectionChange, reveal, 'data-debug-id': dataDebugId }: MarkdownProps) {
   const session = useSelector((state: any) => state.chat?.session || {});
   const viewerSession = artifactViewerSession(session);
   const [activeArtifactId, setActiveArtifactId] = useState('');
@@ -39,6 +42,7 @@ export default function Markdown({ source, className, compact, copyAll = true, o
         data-debug-id={dataDebugId}
         onArtifactClick={setActiveArtifactId}
         onTextSelectionChange={onTextSelectionChange}
+        reveal={reveal}
       />
       {activeArtifactId && viewerSession.clientToken ? (
         <ArtifactViewer artifactId={activeArtifactId} daemonUrl={viewerSession.daemonUrl} clientToken={viewerSession.clientToken} onClose={() => setActiveArtifactId('')} />

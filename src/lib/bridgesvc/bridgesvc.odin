@@ -298,12 +298,19 @@ parse_ports :: proc(text: string) -> (ports: [2]int, ok: bool) {
 
 Port_Busy_Proc :: #type proc(port: int) -> bool
 
-// Directory enumeration on Windows returns absolute backslash paths even when
-// the profile was constructed with forward slashes or a root-relative path.
+// path_key is the comparison key for a filesystem path: two spellings of the same
+// existing file or directory get the same key. Directory enumeration on Windows
+// returns absolute backslash paths even when the profile was constructed with
+// forward slashes or a root-relative path, and a home directory is often reached
+// through a link (Fedora Atomic /home -> /var/home, macOS /var -> /private/var,
+// Windows junctions and 8.3 short names), so an existing path is resolved to its
+// final target: core:os does that on Linux (/proc/self/fd) and macOS (realpath),
+// and path_final_windows does it on Windows. A missing path keeps its lexical form.
 path_key :: proc(path: string) -> string {
 	absolute, err := os.get_absolute_path(path, context.temp_allocator)
 	value := absolute if err == nil else path
 	when ODIN_OS == .Windows {
+		if final, ok := path_final_windows(value); ok do value = final
 		value, _ = strings.replace_all(value, "\\", "/", context.temp_allocator)
 		value = strings.to_lower(value, context.temp_allocator)
 	}

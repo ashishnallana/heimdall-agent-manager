@@ -991,6 +991,30 @@ body {
   .agent-action-detail { animation: none; background: none; color: var(--color-text-muted); }
 }
 
+/* Incoming reply text (streamReveal.ts, ChatMessageList reply chrome). The working
+   indicator is unchanged.
+   Phase 3: each revealed word fades 0 -> 1, leaving a soft gradient on the newest text.
+   Phase 4: the action row, then the meta line, fade in once the text settles.
+   Opacity and transform only. */
+@keyframes reply-fade-in { from { opacity: 0; } to { opacity: 1; } }
+
+/* streamReveal.ts: unrevealed text and blocks keep their box (final layout, no reflow)
+   but are transparent; new words and blocks fade in. */
+[data-sr="h"] { opacity: 0; }
+.stream-chunk[data-sr="in"] { animation: reply-fade-in 350ms cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+[data-sr="b"] { animation: reply-fade-in 350ms cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+[data-sr="c"] { animation: reply-fade-in 200ms ease-out both; }
+
+/* Completion: the action row 120ms after the last word settles, the meta line 250ms later. */
+.reply-chrome-held { opacity: 0; pointer-events: none; }
+.reply-chrome-in { animation: reply-rise-in 200ms ease-out 120ms both; }
+.reply-meta-in { animation: reply-fade-in 200ms ease-out 370ms both; }
+@keyframes reply-rise-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+
+@media (prefers-reduced-motion: reduce) {
+  .stream-chunk[data-sr="in"], [data-sr="b"], [data-sr="c"], .reply-chrome-in, .reply-meta-in { animation: none; }
+}
+
 /* Markdown Code Blocks / Shiki Highlighting (REQ-UI-MARKDOWN-ENHANCE) */
 .markdown-code-block pre.shiki,
 .code-container pre.shiki {
@@ -1153,4 +1177,36 @@ html[data-window-chrome="win-overlay"][data-window-fullscreen] .window-gate-pad 
 }
 html[data-window-chrome="win-overlay"][data-window-fullscreen] .window-gate-drag-strip {
   display: none;
+}
+
+/* REQ-PIN-3: send pin-to-top resting state (ChatMessageList pinOnSend). Only the strip
+   above the pinned bubble is de-emphasised: the history there shows at ~30% next to the
+   bubble (holding over the lower half, where the previous message's last line sits) and
+   fades to 0 at the header, under a light blur with feathered edges. Both fade out as the
+   reader scrolls up into history. The strip spans the previous message's last line and
+   action row (pinTailFor); its top clears a floating header (pinOffsetFor).
+   REQ-PIN-3 rev3 (QA round 5): both are fixed overlays outside the scroller, so scrolling
+   only changes their opacity. The fade paints the list's own background colour
+   (--chat-pin-bg, "r g b") over the strip instead of masking the scroller, whose mask
+   change rebuilt WebKit's scrolling layer and stopped the first scroll-up. */
+.ui-chat-pin-tail-fade {
+  position: absolute;
+  inset: 0 0 auto 0;
+  z-index: 10;
+  pointer-events: none;
+  background: linear-gradient(to bottom, rgb(var(--chat-pin-bg, 15 15 15) / 1), rgb(var(--chat-pin-bg, 15 15 15) / 0.7) 45%, rgb(var(--chat-pin-bg, 15 15 15) / 0.7) calc(100% - 6px), rgb(var(--chat-pin-bg, 15 15 15) / 0));
+}
+.ui-chat-pin-tail-blur {
+  position: absolute;
+  inset: 0 0 auto 0;
+  z-index: 10;
+  pointer-events: none;
+  -webkit-backdrop-filter: blur(1.5px);
+  backdrop-filter: blur(1.5px);
+  -webkit-mask-image: linear-gradient(to bottom, transparent, #000 35%, #000 75%, transparent);
+  mask-image: linear-gradient(to bottom, transparent, #000 35%, #000 75%, transparent);
+}
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  /* The colour fade alone still reads as faded history. */
+  .ui-chat-pin-tail-blur { display: none; }
 }
