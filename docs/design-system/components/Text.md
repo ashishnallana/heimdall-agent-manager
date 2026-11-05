@@ -5,7 +5,7 @@ All typography through one `role`: `<Text role="…" tone="…" as="…">`. Each
 | Role | Style | Use for |
 |---|---|---|
 | `display` | serif 32/38 | The page's single h1 (PageShell sets it) and empty-state headlines |
-| `headline` | serif 32/52 (26/44 below 768px) | The new conversation page's sentence headline, whose nouns are tokens |
+| `headline` | serif 32/52 (22/36 below 768px) | The new conversation page's sentence headline, whose nouns are tokens |
 | `heading` | serif 20/28, 500 | Section headings, Panel/Modal titles in detail panes |
 | `title` | sans 15/22, 600 | Card, ticket and row titles; Alert/Toast titles |
 | `body` | sans 14/20 | Default UI text |

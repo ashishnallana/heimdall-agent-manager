@@ -79,13 +79,14 @@
   --text-display-tracking: -0.01em;
 
   /* Launcher sentence headline (new conversation page): serif, roomy leading so
-     the dotted token underlines clear the next line. 26/44 below md. */
+     the dotted token underlines clear the next line. 22/36 below md, so the
+     sentence fits a phone in two or three lines (tokens keep 44px tap targets). */
   --text-headline-size: 32px;
   --text-headline-weight: 400;
   --text-headline-leading: 52px;
   --text-headline-tracking: -0.01em;
-  --text-headline-sm-size: 26px;
-  --text-headline-sm-leading: 44px;
+  --text-headline-sm-size: 22px;
+  --text-headline-sm-leading: 36px;
 
   --text-heading-size: 20px;
   --text-heading-weight: 500;

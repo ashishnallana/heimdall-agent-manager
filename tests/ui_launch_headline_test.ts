@@ -230,6 +230,39 @@ test('meta line: bridge:path and branch in mono 12px, unknown items omitted; no-
   });
 });
 
+test('mobile wrapping: each connector\'s last word stays with its token, values truncate, meta items stay on one line', async () => {
+  await withDom(async (doc) => {
+    const { LaunchHeadline } = await load();
+    const ui = await mount(doc, React.createElement(LaunchHeadline, props({ template: 'going', branch: 'feature/a-very-long-branch-name' }) as any));
+    const h1 = q(doc, 'new-convo-headline')!;
+    assert.ok(h1.className.split(' ').includes('max-md:[text-wrap:balance]'), h1.className);
+    assert.equal(headlineText(doc), "Let's get a conversation going in heimdall-agent-manager on riverwood", 'text unchanged');
+    // "a" + mode, "in" + project ("going" stays outside), "on" + bridge: one no-wrap group each.
+    const groups = Array.from(h1.querySelectorAll('[data-headline-group]')) as HTMLElement[];
+    assert.deepEqual(groups.map((g) => [g.getAttribute('data-headline-group'), squash(g.firstElementChild!.textContent)]), [['mode', 'a'], ['project', 'in'], ['bridge', 'on']]);
+    for (const g of groups) {
+      assert.ok(g.className.split(' ').includes('whitespace-nowrap'), g.className);
+      assert.ok(g.querySelector('[data-headline-slot]'), 'the token is inside the group');
+    }
+    assert.ok(!groups[1].textContent!.includes('going'), '"going" is not glued to the project token');
+    // Each value truncates beside its chevron below md (desktop keeps the plain inline value).
+    for (const id of ['new-convo-mode-token', 'new-convo-project-token', 'new-convo-machine-token']) {
+      const value = q(doc, id)!.querySelector('[data-token-value]') as HTMLElement;
+      for (const cls of ['max-md:min-w-0', 'max-md:truncate']) assert.ok(value.className.split(' ').includes(cls), `${id} value has ${cls}`);
+    }
+    // Path and branch: one line, ellipsis, full text in the title, icon never squeezed.
+    for (const [name, full] of [['location', 'riverwood:/var/home/tanmay/heimdall-agent-manager'], ['branch', 'feature/a-very-long-branch-name']] as const) {
+      const item = q(doc, 'new-convo-meta')!.querySelector(`[data-meta-item="${name}"]`) as HTMLElement;
+      assert.equal(item.getAttribute('title'), full);
+      for (const cls of ['min-w-0', 'max-w-full']) assert.ok(item.className.split(' ').includes(cls), `${name} has ${cls}`);
+      const text = item.querySelector('span') as HTMLElement;
+      assert.ok(text.className.split(' ').includes('truncate') && text.className.split(' ').includes('min-w-0'), `${name} text truncates`);
+      assert.ok(item.querySelector('svg')!.getAttribute('class')!.includes('shrink-0'), `${name} icon is shrink-0`);
+    }
+    await ui.unmount();
+  });
+});
+
 test('typography and token wiring: serif headline role, muted connectors, primary tokens, menus open one at a time', async () => {
   await withDom(async (doc, win) => {
     const { LaunchHeadline } = await load();

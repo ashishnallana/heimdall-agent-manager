@@ -247,7 +247,7 @@ Families: Source Serif 4 (`serif`), IBM Plex Sans (`sans`), IBM Plex Mono (`mono
 Type styles share their names with the app's `<Text role>` values, so `role="title"` and the `title` style are the same thing.
 
 - `display` (serif 32/38) — the page's single h1, set by PageShell; empty-state headlines.
-- `headline` (serif 32/52, 26/44 below 768px) — the new conversation page's sentence headline; the tall leading leaves room for the dotted token underlines.
+- `headline` (serif 32/52, 22/36 below 768px) — the new conversation page's sentence headline; the tall leading leaves room for the dotted token underlines.
 - `heading` (serif 20/28, 500) — section, Panel-detail and Modal titles.
 - `title` (sans 15/22, 600) — card, ticket and row titles; Alert and Toast titles.
 - `body` (sans 14/20) — default UI text. `body-sm` (13/18) — metadata, descriptions, hints.

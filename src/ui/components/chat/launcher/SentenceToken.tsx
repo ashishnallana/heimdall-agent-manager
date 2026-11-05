@@ -273,13 +273,14 @@ export function SentenceToken<V extends string = string>({
       data-state={open ? 'open' : 'closed'}
       onClick={isMobile ? () => setOpen(!open) : undefined}
       className={chip ? cx(
-        // Composer chip (DESIGN.md control height 32; 44px touch target on mobile).
-        'inline-flex max-w-full items-center gap-1.5 rounded-[var(--radius-md)] border border-strong bg-neutral-soft px-2.5 text-body-sm font-medium text-primary',
+        // Composer chip (DESIGN.md control height 32; 40px on mobile). It shrinks and
+        // truncates its value so the composer toolbar stays on one row.
+        'inline-flex min-w-0 max-w-full shrink items-center gap-1.5 rounded-[var(--radius-md)] border border-strong bg-neutral-soft px-2.5 text-body-sm font-medium text-primary',
         'transition-colors duration-fast ease-standard motion-reduce:transition-none hover:bg-strong',
         open && 'bg-strong',
         'focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus',
         'disabled:cursor-not-allowed disabled:opacity-[.45]',
-        isMobile ? 'h-11' : 'h-8',
+        isMobile ? 'h-10 max-w-[9rem]' : 'h-8',
         className,
       ) : cx(
         // Rest (§3.2): inherits the headline type; radius 10px and padding 0 8px 2px are the spec's exact values.
@@ -292,7 +293,10 @@ export function SentenceToken<V extends string = string>({
         // Focus: the standard 2px accent ring, 2px offset.
         'focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus',
         'disabled:cursor-not-allowed disabled:opacity-[.45]',
-        isMobile && 'min-h-11',
+        // 44px tap target on mobile; the -my-1 keeps it from stretching the 36px headline
+        // lines. The max width is the slot plus the -mx-0.5 overhang, so a value only
+        // truncates when it really is wider than the line.
+        isMobile && 'min-h-11 -my-1 max-w-[calc(100%+4px)]',
         className,
       )}
     >
@@ -300,7 +304,10 @@ export function SentenceToken<V extends string = string>({
       <span
         key={`v:${swap.count}`}
         data-token-value=""
-        className={cx(chip ? 'inline-flex min-w-0 items-center gap-1.5 truncate' : 'inline-block', animateSwap && 'animate-tok-swap')}
+        className={cx(
+          chip ? 'inline-flex min-w-0 items-center gap-1.5 truncate' : 'inline-block max-md:min-w-0 max-md:truncate',
+          animateSwap && 'animate-tok-swap',
+        )}
       >
         {display}
       </span>

@@ -82,7 +82,7 @@ export type TextElement =
 /** Role → font-size token alias (each binds size/weight/line-height/tracking). */
 const ROLE_CLASS: Record<TextRole, string> = {
   display: 'text-display',
-  // Responsive: 26/44 below md (768px, the app's mobile breakpoint), 32/52 from md.
+  // Responsive: 22/36 below md (768px, the app's mobile breakpoint), 32/52 from md.
   headline: 'text-headline-sm md:text-headline',
   heading: 'text-heading',
   title: 'text-title',

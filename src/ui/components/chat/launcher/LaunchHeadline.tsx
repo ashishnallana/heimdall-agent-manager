@@ -182,22 +182,44 @@ export function LaunchHeadline({
     );
   };
 
+  const slotNode = (slot: LaunchHeadlineMenu) => (
+    // Never wider than the line: below md a long value truncates next to its chevron.
+    <span className="relative inline-block min-w-0 max-w-full" data-headline-slot={slot}>
+      {token(slot)}
+    </span>
+  );
+
   return (
     <div className="flex flex-col gap-3" data-headline-template={templateId}>
-      <Text as="h1" role="headline" tone="muted" data-debug-id="new-convo-headline" className="m-0">
-        {segments.map((segment, index) => (
+      <Text as="h1" role="headline" tone="muted" data-debug-id="new-convo-headline" className="m-0 max-md:[text-wrap:balance]">
+        {segments.map((segment, index) => {
           // One space between every pair of pieces, so the sentence reads and wraps naturally.
-          <React.Fragment key={typeof segment === 'string' ? `t${index}` : segment.slot}>
-            {index > 0 ? ' ' : null}
-            {typeof segment === 'string' ? (
-              segment
-            ) : (
-              <span className="relative inline-block" data-headline-slot={segment.slot}>
-                {token(segment.slot)}
+          const space = index > 0 ? ' ' : null;
+          if (typeof segment !== 'string') {
+            // A token after a connector is rendered with that connector (below).
+            if (typeof segments[index - 1] === 'string') return null;
+            return <React.Fragment key={segment.slot}>{space}{slotNode(segment.slot)}</React.Fragment>;
+          }
+          const next = segments[index + 1];
+          if (next === undefined || typeof next === 'string') return <React.Fragment key={`t${index}`}>{space}{segment}</React.Fragment>;
+          // Keep the connector's last word with the token after it ("going [project]"), so
+          // a wrap never leaves that word alone at the end of a line.
+          const cut = segment.lastIndexOf(' ');
+          return (
+            <React.Fragment key={`t${index}`}>
+              {space}
+              {cut >= 0 ? `${segment.slice(0, cut)} ` : null}
+              {/* Below md a flex row (the space is dropped there, hence the gap), so the
+                  token shrinks to fit the line beside the word. */}
+              <span
+                className="whitespace-nowrap max-md:inline-flex max-md:max-w-full max-md:items-baseline max-md:gap-x-[0.25em]"
+                data-headline-group={next.slot}
+              >
+                <span className="shrink-0">{segment.slice(cut + 1)}</span> {slotNode(next.slot)}
               </span>
-            )}
-          </React.Fragment>
-        ))}
+            </React.Fragment>
+          );
+        })}
       </Text>
       {meta.kind === 'none' ? (
         <Text role="body-sm" tone="muted" className="m-0" data-debug-id="new-convo-meta">
@@ -205,16 +227,17 @@ export function LaunchHeadline({
         </Text>
       ) : meta.location || meta.branch ? (
         <div className="flex flex-wrap items-center gap-x-4 gap-y-2" data-debug-id="new-convo-meta">
+          {/* Each item stays on one line and truncates; the title carries the full text. */}
           {meta.location ? (
-            <Text role="code-sm" tone="muted" as="span" className="inline-flex items-center gap-1.5" data-meta-item="location">
-              <Icon name="folder" size="sm" />
-              {meta.location}
+            <Text role="code-sm" tone="muted" as="span" title={meta.location} className="inline-flex min-w-0 max-w-full items-center gap-1.5" data-meta-item="location">
+              <Icon name="folder" size="sm" className="shrink-0" />
+              <span className="min-w-0 truncate">{meta.location}</span>
             </Text>
           ) : null}
           {meta.branch ? (
-            <Text role="code-sm" tone="muted" as="span" className="inline-flex items-center gap-1.5" data-meta-item="branch">
-              <Icon name="git-branch" size="sm" />
-              {meta.branch}
+            <Text role="code-sm" tone="muted" as="span" title={meta.branch} className="inline-flex min-w-0 max-w-full items-center gap-1.5" data-meta-item="branch">
+              <Icon name="git-branch" size="sm" className="shrink-0" />
+              <span className="min-w-0 truncate">{meta.branch}</span>
             </Text>
           ) : null}
         </div>

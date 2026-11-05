@@ -388,22 +388,40 @@ test('mobile (390px): all five menus open as bottom sheets and the composer undo
     for (const cls of ['max-md:bottom-[max(var(--ui-bottom-chrome,0px),env(safe-area-inset-bottom,0px))]', 'max-md:z-sticky', 'max-md:bg-canvas']) {
       assert.ok(dock.className.includes(cls), `dock has ${cls}`);
     }
-    // Page padding 48px 16px 0 on mobile.
+    // Page padding 24px 16px 0 on mobile (120px top from md); the page fills the height
+    // and the dock is pushed to the bottom (max-md:mt-auto).
+    const classes = (el: Element) => el.className.split(/\s+/);
     const column = q(ctx.doc, 'new-convo-headline')!.closest('div.mx-auto') as HTMLElement;
-    for (const cls of ['pt-12', 'pb-0', 'md:pb-16']) assert.ok(column.className.split(/\s+/).includes(cls), `column has ${cls}`);
-    assert.ok(q(ctx.doc, 'new-conversation-page')!.className.split(/\s+/).includes('px-4'));
+    for (const cls of ['pt-6', 'md:pt-[120px]', 'pb-0', 'md:pb-16', 'max-md:flex-1']) assert.ok(classes(column).includes(cls), `column has ${cls}`);
+    assert.ok(!classes(column).includes('pt-12'), 'no 48px top padding on mobile');
+    const page = q(ctx.doc, 'new-conversation-page')!;
+    for (const cls of ['px-4', 'max-md:flex', 'max-md:flex-1', 'max-md:flex-col']) assert.ok(classes(page).includes(cls), `page has ${cls}`);
+    assert.ok(classes(dock).includes('max-md:mt-auto'), 'dock sits at the bottom of the column');
+    assert.ok(!q(ctx.doc, 'new-convo-footer'), 'no empty footer under the docked composer');
+    // The toolbar is one row: it never wraps, the buttons keep their size and the chips shrink and truncate.
+    const toolbar = q(ctx.doc, 'new-convo-composer-toolbar')!;
+    assert.ok(classes(toolbar).includes('flex-nowrap') && !classes(toolbar).includes('flex-wrap'), 'toolbar never wraps');
+    for (const id of ['new-convo-attach-btn', 'new-convo-composer-send-btn']) assert.ok(classes(q(ctx.doc, id)!).includes('shrink-0'), `${id} keeps its size`);
+    for (const id of ['new-convo-agent-picker', 'new-convo-runtime-picker']) {
+      const chip = q(ctx.doc, id)!;
+      for (const cls of ['min-w-0', 'shrink', 'h-10', 'max-w-[9rem]']) assert.ok(classes(chip).includes(cls), `${id} has ${cls}`);
+      assert.ok(classes(chip.querySelector('[data-token-value]')!).includes('truncate'), `${id} value truncates`);
+    }
+    const providerName = q(ctx.doc, 'new-convo-runtime-picker')!.querySelector('[data-runtime-chip-provider]') as HTMLElement | null;
+    if (providerName) assert.ok(classes(providerName).includes('max-[439px]:sr-only'), 'provider chip is icon-only at phone widths');
     // No Kbd hint; the model name is hidden on the chip below md.
     assert.ok(!q(ctx.doc, 'new-convo-send-shortcut'), 'no Kbd on mobile');
     await until(ctx, () => Boolean(q(ctx.doc, 'new-convo-runtime-picker')!.querySelector('[data-runtime-chip-model]')), 'model on the chip');
     const model = q(ctx.doc, 'new-convo-runtime-picker')!.querySelector('[data-runtime-chip-model]') as HTMLElement;
     assert.ok(model && model.className.includes('hidden') && model.className.includes('md:inline'), 'model name hidden below md');
-    // 44px touch targets on the composer controls.
+    // 44px touch targets on the attach and send buttons and the headline tokens; the chips are 40px.
     for (const id of ['new-convo-attach-btn', 'new-convo-composer-send-btn']) assert.ok(q(ctx.doc, id)!.className.includes('h-11'), `${id} is 44px`);
 
     for (const token of ['new-convo-mode-token', 'new-convo-project-token', 'new-convo-machine-token', 'new-convo-agent-picker', 'new-convo-runtime-picker']) {
       const trigger = q(ctx.doc, token);
       assert.ok(trigger, `${token} rendered`);
-      assert.ok(/(^|\s)(min-)?h-11(\s|$)/.test(trigger!.className), `${token} is >= 44px`);
+      const chip = token === 'new-convo-agent-picker' || token === 'new-convo-runtime-picker';
+      assert.ok((chip ? /(^|\s)h-10(\s|$)/ : /(^|\s)min-h-11(\s|$)/).test(trigger!.className), `${token} is ${chip ? '40px' : '>= 44px'}`);
       await click(ctx, trigger);
       const sheet = ctx.doc.querySelector('[role="dialog"]') as HTMLElement | null;
       assert.ok(sheet, `${token} opens a sheet`);

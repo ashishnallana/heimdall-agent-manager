@@ -138,20 +138,22 @@ export function ConversationComposerBody({
         onPaste={onPaste}
       />
       {attachments}
-      <div data-debug-id="new-convo-composer-toolbar" className="flex min-w-0 flex-wrap items-center gap-2">
+      {/* One row that never wraps (§3.7, like the classic composer toolbar): the attach
+          and send buttons keep their size and the two chips shrink and truncate. */}
+      <div data-debug-id="new-convo-composer-toolbar" className="flex min-w-0 flex-nowrap items-center gap-1.5 md:gap-2">
         <IconButton
           icon="plus"
           label="Attach files"
           size={mobile ? 'md' : 'sm'}
+          className="shrink-0"
           data-debug-id="new-convo-attach-btn"
           disabled={attachDisabled}
           onClick={onAttach}
         />
         {agentChip}
-        {/* One right-aligned group, so a narrow toolbar wraps it as a unit and the
-            send button never ends up alone on the left (§3.7). */}
-        <div data-debug-id="new-convo-composer-send-group" className="ml-auto flex min-w-0 items-center gap-2">
-          {mobile ? null : <Kbd data-debug-id="new-convo-send-shortcut">{SEND_SHORTCUT_HINT}</Kbd>}
+        {/* One right-aligned group holding the provider chip and the send button. */}
+        <div data-debug-id="new-convo-composer-send-group" className="ml-auto flex min-w-0 items-center gap-1.5 md:gap-2">
+          {mobile ? null : <Kbd data-debug-id="new-convo-send-shortcut" className="shrink-0">{SEND_SHORTCUT_HINT}</Kbd>}
           {runtimeChip}
           <IconButton
             type="submit"
@@ -159,6 +161,7 @@ export function ConversationComposerBody({
             label="Start conversation"
             variant="primary"
             size={mobile ? 'md' : 'sm'}
+            className="shrink-0"
             data-debug-id="new-convo-composer-send-btn"
             disabled={sendDisabled}
           />

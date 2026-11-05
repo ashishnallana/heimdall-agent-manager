@@ -56,6 +56,8 @@ export const NO_BRIDGE_EXIT_MS = 120;
 /**
  * Spec §3.7: below 768px the composer docks to the bottom of the scroll area,
  * lifted clear of the bottom tab bar (`--ui-bottom-chrome`) or the safe area.
+ * The page fills the height below md and the dock has `max-md:mt-auto`, so at
+ * rest the composer sits near the bottom instead of under the headline.
  * The canvas backdrop and top padding keep scrolled content from showing behind it.
  * The page drops these classes while a launcher menu is open.
  */
@@ -398,8 +400,8 @@ export default function NewConversationPage({ embedded = false, footer, onLaunch
     </section>;
   }
 
-  return <section data-debug-id="new-conversation-page" data-no-bridge={showBanner ? 'banner' : undefined} className="w-full px-4 sm:px-8">
-    <div className={`mx-auto flex w-full max-w-[760px] flex-col gap-6 pb-0 pt-12 md:pb-16 md:pt-[120px] ${swapInLauncher ? 'animate-composer-swap' : ''}`} onAnimationEnd={() => setSwapInLauncher(false)}>
+  return <section data-debug-id="new-conversation-page" data-no-bridge={showBanner ? 'banner' : undefined} className="w-full px-4 sm:px-8 max-md:flex max-md:flex-1 max-md:flex-col">
+    <div className={`mx-auto flex w-full max-w-[760px] flex-col gap-6 pb-0 pt-6 max-md:flex-1 md:pb-16 md:pt-[120px] ${swapInLauncher ? 'animate-composer-swap' : ''}`} onAnimationEnd={() => setSwapInLauncher(false)}>
       <LaunchHeadline
         mode={paneMode}
         onModeChange={setPaneMode}
@@ -416,7 +418,7 @@ export default function NewConversationPage({ embedded = false, footer, onLaunch
         onMenuOpenChange={setHeadlineMenu}
       />
       {showBanner ? <NoBridgeBanner bridges={bridges} onCheckAgain={() => void bridgesQuery.refetch()} checking={bridgesQuery.isFetching} /> : null}
-      <div ref={composerRef} data-debug-id="new-convo-launch-dock" data-docked={menuOpen ? undefined : ''} className={`relative w-full ${menuOpen ? '' : LAUNCH_DOCK_MOBILE} ${transitioning ? 'z-20' : ''}`}>
+      <div ref={composerRef} data-debug-id="new-convo-launch-dock" data-docked={menuOpen ? undefined : ''} className={`relative w-full max-md:mt-auto ${menuOpen ? '' : LAUNCH_DOCK_MOBILE} ${transitioning ? 'z-20' : ''}`}>
         <LaunchComposer mode={paneMode} disabled={showBanner} onSubmit={paneMode === 'agent' ? submit : (event) => { event.preventDefault(); openShell(); }}>
           {paneMode === 'agent' ? (
             <ConversationComposerBody
@@ -484,7 +486,8 @@ export default function NewConversationPage({ embedded = false, footer, onLaunch
           {preferenceError ? <Button size="sm" tone="danger" className="max-md:min-h-11" data-debug-id="new-convo-retry-preferences-btn" disabled={pendingWrites > 0} onClick={() => { for (const field of Object.keys(preferenceFailures) as ('agent_id' | 'project_id' | 'bridge_id')[]) remember(field, latestSelections.current[field] || ''); }}>Retry saving selections</Button> : null}
         </div> : null}
       </div>
-      <div data-debug-id="new-convo-footer" className={`flex items-center justify-center ${transitioning ? 'pointer-events-none opacity-0' : ''} transition-opacity duration-base`}>{footer}</div>
+      {/* Only with a footer: an empty one would still take a gap under the docked composer. */}
+      {footer ? <div data-debug-id="new-convo-footer" className={`flex items-center justify-center ${transitioning ? 'pointer-events-none opacity-0' : ''} transition-opacity duration-base`}>{footer}</div> : null}
     </div>
     <NewProjectModal
       open={projectOpen}

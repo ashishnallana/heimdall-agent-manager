@@ -167,7 +167,9 @@ export function RuntimeMenu({
     >
       {selectedId ? (
         <>
-          <span className="truncate">{providerLabel}</span>
+          {/* Icon-only at phone widths (below 440px), so the agent chip keeps room on the
+              one-row composer toolbar; the name stays for screen readers. */}
+          <span data-runtime-chip-provider="" className="truncate max-[439px]:sr-only">{providerLabel}</span>
           {selection.model ? <span data-runtime-chip-model="" className="hidden truncate font-normal text-muted md:inline">{selection.model}</span> : null}
         </>
       ) : (
