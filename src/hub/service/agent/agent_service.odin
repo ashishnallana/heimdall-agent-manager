@@ -251,6 +251,15 @@ archive_agent :: proc(service: ^Agent_Service, auth: contracts.Auth_Context, age
 	return iface.agent_save(service.agents, agent)
 }
 
+// unarchive_agent returns an archived agent to Active (the reverse of archive_agent).
+unarchive_agent :: proc(service: ^Agent_Service, auth: contracts.Auth_Context, agent_id: string) -> (domain.Agent, bool, domain.Domain_Error) {
+	agent, ok, err := get_agent(service, auth, agent_id)
+	if !ok do return domain.Agent{}, false, err
+	agent.state = .Active
+	agent.updated_at = platform.clock_now(service.clock)
+	return iface.agent_save(service.agents, agent)
+}
+
 list_support :: proc(service: ^Agent_Service, auth: contracts.Auth_Context, agent_id: string) -> ([]domain.Agent_Bridge_Support, domain.Domain_Error) {
 	agent, ok, err := get_agent(service, auth, agent_id)
 	if !ok do return nil, err

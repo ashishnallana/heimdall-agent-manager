@@ -449,6 +449,18 @@ export const agentsApi = heimdallApi.injectEndpoints({
       },
       invalidatesTags: [{ type: 'Agents' as const, id: 'LIST' }],
     }),
+    // Returns an archived agent to Active (`POST /agents/{id}/unarchive`).
+    unarchiveAgentIdentity: build.mutation<any, { agentId: string }>({
+      queryFn: async ({ agentId }) => {
+        try {
+          const data = await cookieMutation(`/agents/${encodeURIComponent(agentId)}/unarchive`, 'POST');
+          return { data };
+        } catch (error: any) {
+          return { error: { status: 'CUSTOM_ERROR', error: String(error?.message || error) } as any };
+        }
+      },
+      invalidatesTags: [{ type: 'Agents' as const, id: 'LIST' }],
+    }),
     // TODO(FIX): Replace any with strict TypeScript interface matching Odin backend schema
     listAgentInstances: build.query<any, { agentId?: string; projectId?: string; limit?: number; cursor?: string } | void>({
       queryFn: async (arg) => {
@@ -814,6 +826,7 @@ export const {
   useListAgentsQuery,
   useCreateAgentMutation,
   useArchiveAgentIdentityMutation,
+  useUnarchiveAgentIdentityMutation,
   useListAgentInstancesQuery,
   useFetchAgentInstanceQuery,
   useLaunchAgentInstanceMutation,

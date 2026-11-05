@@ -55,16 +55,17 @@ export const FILTER_PAGE_CAP = 5;
  * Verbs
  * ------------------------------------------------------------------ */
 
-export type AgentVerb = 'edit' | 'archive';
+export type AgentVerb = 'edit' | 'archive' | 'unarchive';
 
-/** Like Projects: archived agents can be edited but not restored. */
+/** Like Projects: an archived agent can be edited and unarchived. */
 export function verbsForState(state: AgentState): AgentVerb[] {
-  return state === 'archived' ? ['edit'] : ['edit', 'archive'];
+  return state === 'archived' ? ['edit', 'unarchive'] : ['edit', 'archive'];
 }
 
 export const VERB_LABEL: Record<AgentVerb, string> = {
   edit: 'Edit',
   archive: 'Archive',
+  unarchive: 'Unarchive',
 };
 
 export function archiveConfirmBody(names: string[]): string {
@@ -72,7 +73,7 @@ export function archiveConfirmBody(names: string[]): string {
     names.length === 1
       ? `"${names[0]}"`
       : `${names.length} agents`;
-  return `Archiving ${subject} only takes ${names.length === 1 ? 'it' : 'them'} out of the Active list — running instances and associated memories are untouched, and nothing is deleted. Ninjy can't un-archive from here.`;
+  return `Archiving ${subject} only takes ${names.length === 1 ? 'it' : 'them'} out of the Active list — running instances and associated memories are untouched, and nothing is deleted. You can unarchive ${names.length === 1 ? 'it' : 'them'} later.`;
 }
 
 /* ------------------------------------------------------------------ *

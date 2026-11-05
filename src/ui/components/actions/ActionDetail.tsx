@@ -30,8 +30,6 @@ import {
   Badge,
   Button,
   IconButton,
-  Menu,
-  MenuItem,
   ResourceDetailHeader,
   ResourceSectionCard,
   StatusPill,
@@ -54,6 +52,7 @@ import {
   actionErrorText,
   actionState,
   actionTitle,
+  deleteConfirmBody,
   actionViewHref,
   isScheduled,
   navigateTo,
@@ -163,10 +162,10 @@ export function ActionDetailActions({
   onVerb: (verb: ActionVerb) => void;
 }) {
   const verbs = verbsForState(actionState(record));
-  // Edit is the primary and gets its own button on desktop; everything else lives in
-  // the menu. Run and Delete are NOT duplicated into the mobile bar below — Memory
-  // shipped two Approve buttons on one phone screen by doing exactly that.
-  const menuVerbs = verbs.filter((verb) => verb !== 'edit');
+  // Edit is the primary and gets its own button on desktop; Run and Delete are direct
+  // buttons beside it (no `…` menu). They are NOT duplicated into the mobile bar
+  // below — Memory shipped two Approve buttons on one phone screen by doing exactly that.
+  const directVerbs = verbs.filter((verb) => verb !== 'edit');
 
   return (
     <>
@@ -180,33 +179,21 @@ export function ActionDetailActions({
           />
         </span>
       ) : null}
-      {menuVerbs.length ? (
-        <Menu
-          label="Action actions"
-          align="end"
-          trigger={
-            <ActionButton
-              icon="more-horizontal"
-              label="More"
-              iconOnly
-              aria-label="Action actions"
-              loading={Boolean(busy)}
-              data-debug-id="action-view-menu"
-            />
-          }
-        >
-          {menuVerbs.map((verb) => (
-            <MenuItem
-              key={verb}
-              danger={verb === 'delete'}
-              data-debug-id={`action-view-${verb}`}
-              onClick={() => onVerb(verb)}
-            >
-              {VERB_LABEL[verb]}
-            </MenuItem>
-          ))}
-        </Menu>
-      ) : null}
+      {directVerbs.map((verb) => (
+        <ActionButton
+          key={verb}
+          label={VERB_LABEL[verb]}
+          variant={verb === 'delete' ? 'danger' : 'secondary'}
+          loading={busy === verb}
+          disabled={Boolean(busy)}
+          data-debug-id={`action-view-${verb}`}
+          onClick={() => {
+            // Delete is permanent; as a one-click button beside Edit it confirms first.
+            if (verb === 'delete' && !window.confirm(deleteConfirmBody([actionTitle(record)]))) return;
+            onVerb(verb);
+          }}
+        />
+      ))}
     </>
   );
 }
