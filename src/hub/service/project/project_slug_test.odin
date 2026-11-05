@@ -204,6 +204,22 @@ test_create_after_archiving_same_slug_succeeds :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_unarchive_restores_active_and_keeps_slug :: proc(t: ^testing.T) {
+	f: Unique_Fixture; unique_fixture_init(&f); defer unique_fixture_destroy(&f)
+	auth := contracts.Auth_Context{user_id = "usr_slug"}
+	first := unique_create(t, &f, Create_Project_Input{name = "x", slug = "my-app", default_path = "/srv/my-app"})
+	archived, archived_ok, _ := archive_project(&f.service, auth, first.project_id)
+	testing.expect(t, archived_ok, "archive ok")
+	testing.expect_value(t, archived.state, domain.Project_State.Archived)
+	restored, restored_ok, _ := unarchive_project(&f.service, auth, first.project_id)
+	testing.expect(t, restored_ok, "unarchive ok")
+	testing.expect_value(t, restored.state, domain.Project_State.Active)
+	testing.expect_value(t, restored.slug, "my-app")
+	_, other_ok, _ := unarchive_project(&f.service, contracts.Auth_Context{user_id = "usr_other"}, first.project_id)
+	testing.expect(t, !other_ok, "another owner cannot unarchive it")
+}
+
+@(test)
 test_create_given_slug_clash_suffixed_and_owners_isolated :: proc(t: ^testing.T) {
 	f: Unique_Fixture; unique_fixture_init(&f); defer unique_fixture_destroy(&f)
 	unique_create(t, &f, Create_Project_Input{name = "my app", slug = "my-app", default_path = "/srv/one"})
