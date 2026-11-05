@@ -398,13 +398,22 @@ export default function ChatMessageList({
   const reduceMotionRef = useRef(reduceMotion);
   reduceMotionRef.current = reduceMotion;
   const reply = useMemo(() => onReply || (() => undefined), [onReply]);
-  // Pin-to-top state. The newest sent row is tracked by INDEX, not key, so the optimistic
-  // local_ -> server-id key swap (same index, re-mounted row) neither re-animates nor
-  // jumps; an older-page prepend shifts the index by the rows added above it. There is no
-  // pinned "mode" (REQ-PIN-2 rev2): once a send sets the index, the exchange spacer below
-  // keeps max scrollTop = the pin position until the next send or a conversation switch.
-  const [pinIndex, setPinIndexState] = useState(-1);
-  const pinIndexRef = useRef(-1);
+  // Pin-to-top state. The newest sent row is tracked by its stable KEY (the pane keeps
+  // the optimistic row's key across the send ack, see AgentChatPane), and its index is
+  // derived from the key on each render, so a refetch that trims or prepends rows can
+  // neither unpin it nor move the pin to another row (the 30-row newest page slide). There
+  // is no pinned "mode" (REQ-PIN-2 rev2): once a send sets the key, the exchange spacer
+  // below keeps max scrollTop = the pin position until the next send, a conversation
+  // switch or the row leaving the list.
+  const [pinKey, setPinKeyState] = useState<string | null>(null);
+  const pinKeyRef = useRef<string | null>(null);
+  const pinIndex = useMemo(() => (pinKey === null ? -1 : messages.findIndex((message) => message.key === pinKey)), [messages, pinKey]);
+  // Where the pinned row (else the last row) sat in content coordinates at the end of the
+  // previous layout pass, and the scrollTop then: a refetch that drops rows from the top
+  // shifts everything up, and the browser may already have clamped scrollTop by the time
+  // the layout effect runs.
+  const anchorRef = useRef<{ key: string; top: number; scrollTop: number } | null>(null);
+  const prevMessagesRef = useRef<ChatMessage[]>([]);
   // True only while the send travel runs.
   const travelRef = useRef(false);
   const finishTravelRef = useRef<(() => void) | null>(null);
@@ -448,12 +457,12 @@ export default function ChatMessageList({
     programmaticScrollUntilRef.current = performance.now() + 50;
     node.scrollTop = top;
   }, []);
-  const setPinIndex = useCallback((index: number) => {
-    pinIndexRef.current = index;
-    setPinIndexState(index);
+  const setPinKey = useCallback((key: string | null) => {
+    pinKeyRef.current = key;
+    setPinKeyState(key);
     const node = scrollRef.current;
     if (node) {
-      if (index < 0) delete node.dataset.chatPinned;
+      if (key === null) delete node.dataset.chatPinned;
       else node.dataset.chatPinned = 'true';
     }
   }, []);
@@ -470,7 +479,7 @@ export default function ChatMessageList({
   const applyPinFade = useCallback(() => {
     const node = scrollRef.current;
     if (!node) return;
-    const fade = pinIndexRef.current < 0 ? 0
+    const fade = pinKeyRef.current === null ? 0
       : travelRef.current ? 1
         : pinFadeFor(Math.abs(node.scrollHeight - node.clientHeight - pinOverflowRef.current - node.scrollTop));
     const value = String(Math.round(fade * 1000) / 1000);
@@ -536,7 +545,7 @@ export default function ChatMessageList({
     const node = scrollRef.current;
     const spacer = turnSpacerRef.current;
     if (!node || !spacer) return;
-    const row = pinIndexRef.current < 0 ? null : contentRef.current?.querySelector<HTMLElement>('[data-chat-pin-row="true"]');
+    const row = pinKeyRef.current === null ? null : contentRef.current?.querySelector<HTMLElement>('[data-chat-pin-row="true"]');
     let height = 0;
     let overflow = 0;
     if (row) {
@@ -563,13 +572,13 @@ export default function ChatMessageList({
     updateJump();
   }, [applyPinFade, updateJump, userScrolling]);
 
-  // REQ-PIN-1/1b/6: pin the just-sent row at `index`. Runs in a layout effect, before
+  // REQ-PIN-1/1b/6: pin the just-sent row (`key`, rendered at `index`). Runs in a layout effect, before
   // the first paint of the new row: the scroll position jumps to the end of the range
   // (which the exchange spacer makes the pin position), and transforms put the history
   // back where it was and the bubble back where the composer text was. Both then ease to
   // zero together as one motion: the history and the bubble's Y on one curve, the
   // bubble's X on its own curve so the path bends.
-  const pinRow = useCallback((index: number) => {
+  const pinRow = useCallback((index: number, key: string) => {
     const node = scrollRef.current;
     const content = contentRef.current;
     const start = pinOriginStartRef.current;
@@ -581,7 +590,7 @@ export default function ChatMessageList({
     const row = content.querySelector<HTMLElement>(`[data-chat-pin-index="${index}"]`);
     if (!row) return;
     // REQ-PIN-2 rev2/5: the previous exchange gives up its space in this same pass.
-    setPinIndex(index);
+    setPinKey(key);
     content.querySelectorAll<HTMLElement>('[data-chat-pin-row="true"]').forEach((el) => { delete el.dataset.chatPinRow; });
     row.dataset.chatPinRow = 'true';
     // REQ-PIN-3: keep the previous message's last line and action row in the tail.
@@ -677,13 +686,13 @@ export default function ChatMessageList({
       pinFrameRef.current = requestAnimationFrame(step);
     };
     pinFrameRef.current = requestAnimationFrame(step);
-  }, [applyPinFade, clearPinMotion, setPinIndex, sizeTurnSpacer, updateJump, writeScrollTop]);
+  }, [applyPinFade, clearPinMotion, setPinKey, sizeTurnSpacer, updateJump, writeScrollTop]);
 
   // The optimistic local_ -> server-id swap re-mounts the pinned row mid-travel: carry
   // its animations (and raised stacking) over to the new element, in step with the list.
   // Every layout pass also re-sizes the exchange spacer, before paint.
   useLayoutEffect(() => {
-    if (pinIndexRef.current >= 0) sizeTurnSpacer();
+    if (pinKeyRef.current !== null) sizeTurnSpacer();
     const animations = pinAnimationsRef.current;
     if (!animations || !travelRef.current) return;
     const row = contentRef.current?.querySelector<HTMLElement>('[data-chat-pin-row="true"]');
@@ -728,12 +737,14 @@ export default function ChatMessageList({
     firstKeyRef.current = firstKey;
     lastKeyRef.current = lastKey;
     prevScrollHeightRef.current = node?.scrollHeight ?? 0;
+    const anchor = anchorRef.current;
+    anchorRef.current = null;
 
     if (lastConversationRef.current !== conversationKey) {
       lastConversationRef.current = conversationKey;
       lastCountRef.current = 0;
       clearPinMotion();
-      setPinIndex(-1);
+      setPinKey(null);
       sizeTurnSpacer();
       stickyRef.current = true;
       didInitialScrollRef.current = false;
@@ -753,22 +764,44 @@ export default function ChatMessageList({
       return;
     }
 
+    // The pinned key is gone. A caller that re-keys the sent row (the pane keeps the key
+    // stable across the send ack; this is the safety net) puts a new user row at the
+    // same index: adopt it. Otherwise the sent row itself left the list (deleted, or the
+    // conversation was re-anchored): drop the exchange spacer. Rows trimmed around it
+    // never unpin it (REQ-PIN-1).
+    const prevMessages = prevMessagesRef.current;
+    prevMessagesRef.current = messages;
+    if (pinKeyRef.current !== null && !messages.some((message) => message.key === pinKeyRef.current)) {
+      const prevIndex = prevMessages.findIndex((message) => message.key === pinKeyRef.current);
+      const successor = prevIndex >= 0 && messages.length === prevMessages.length ? messages[prevIndex] : undefined;
+      if (successor?.isUser && !prevMessages.some((message) => message.key === successor.key)) {
+        setPinKey(successor.key);
+      } else {
+        clearPinMotion();
+        setPinKey(null);
+        sizeTurnSpacer();
+      }
+    }
+
+    // REQ-PIN-1: rows were trimmed from the top (the old first row is gone): everything
+    // below moved up by the lost height, so move scrollTop with the anchor row and the
+    // view stays put. This runs whatever the count did (31 -> 30, or 30 -> 30 with a new
+    // reply at the end).
+    if (node && anchor && prevFirstKey !== null && firstKey !== prevFirstKey
+      && !messages.some((message) => message.key === prevFirstKey)) {
+      const index = messages.findIndex((message) => message.key === anchor.key);
+      const row = index < 0 ? null : contentRef.current?.querySelector<HTMLElement>(`[data-chat-pin-index="${index}"]`);
+      if (row && row.offsetTop !== anchor.top) writeScrollTop(node, anchor.scrollTop + row.offsetTop - anchor.top);
+    }
+
     if (count !== lastCountRef.current) {
       const prevCount = lastCountRef.current;
       const grew = count > prevCount;
       lastCountRef.current = count;
-      // A removed row took the sent row with it: drop the exchange spacer.
-      if (!grew && pinIndexRef.current >= count) {
-        clearPinMotion();
-        setPinIndex(-1);
-        sizeTurnSpacer();
-        return;
-      }
       // An older page was prepended (same newest message, new oldest one): hold the
       // reader where they were by shifting scrollTop by the height that was added
       // above them. Never scroll to the bottom for this.
       if (grew && node && lastKey === prevLastKey && firstKey !== prevFirstKey) {
-        if (pinIndexRef.current >= 0) setPinIndex(pinIndexRef.current + count - prevCount);
         writeScrollTop(node, node.scrollTop + node.scrollHeight - prevScrollHeight);
         return;
       }
@@ -778,15 +811,29 @@ export default function ChatMessageList({
       if (grew && last?.isUser === true) {
         const pinRule = pinOnSendRef.current;
         cancelAnimationFrame(pendingBottomFrameRef.current);
+        if (last.key === pinKeyRef.current) return;
         if (typeof pinRule === 'function' ? pinRule(last) : pinRule) {
           // REQ-PIN-1: pin the new bubble under the header instead of following the bottom.
-          pinRow(count - 1);
+          pinRow(count - 1, last.key);
           return;
         }
+        // REQ-PIN-3: while a send is pinned, a user row that is not a new own send (a
+        // server copy, an echo from another device) never pulls the view to the bottom.
+        if (pinKeyRef.current !== null) return;
         pendingBottomFrameRef.current = requestAnimationFrame(() => scrollToBottom('smooth'));
       }
     }
-  }, [clearPinMotion, conversationKey, messages, pinRow, scrollToBottom, setPinIndex, sizeTurnSpacer, writeScrollTop]);
+  }, [clearPinMotion, conversationKey, messages, pinRow, scrollToBottom, setPinKey, sizeTurnSpacer, writeScrollTop]);
+
+  // Record the anchor for the top-trim compensation above, after every layout pass.
+  useLayoutEffect(() => {
+    const node = scrollRef.current;
+    const content = contentRef.current;
+    if (!node || !content || messages.length === 0) return;
+    const index = pinIndex >= 0 ? pinIndex : messages.length - 1;
+    const row = content.querySelector<HTMLElement>(`[data-chat-pin-index="${index}"]`);
+    anchorRef.current = row ? { key: messages[index].key, top: row.offsetTop, scrollTop: node.scrollTop } : null;
+  });
 
   useLayoutEffect(() => () => cancelAnimationFrame(pendingBottomFrameRef.current), [conversationKey]);
 
@@ -920,6 +967,7 @@ export default function ChatMessageList({
     const node = scrollRef.current;
     if (!node) return;
     prevScrollHeightRef.current = node.scrollHeight;
+    if (anchorRef.current) anchorRef.current.scrollTop = node.scrollTop;
     if (performance.now() >= programmaticScrollUntilRef.current) {
       gestureRef.current.lastScroll = performance.now();
       scheduleIdle();
@@ -1022,7 +1070,7 @@ export default function ChatMessageList({
             return (
               <div key={message.key} data-debug-id={`${debugPrefix}-message-${message.messageId}`}
                 data-chat-pin-index={pinEnabled ? index : undefined}
-                data-chat-pin-row={pinEnabled && index === pinIndex ? 'true' : undefined}
+                data-chat-pin-row={pinEnabled && message.key === pinKey ? 'true' : undefined}
                 className={`msg group flex min-w-0 max-w-full rounded-xl outline-none focus-visible:shadow-focus ${reduceMotion ? '' : 'transition-colors duration-500'} ${message.messageId === highlightId ? 'bg-warning-soft ring-1 ring-warning' : ''} ${message.isUser ? 'justify-end' : 'justify-start'}`}>
                 <div className={`flex min-w-0 max-w-full ${message.isUser ? 'max-w-[86%] items-end sm:max-w-[78%]' : 'w-full items-start'} flex-col text-sm`}>
                   {renderMessageTop ? renderMessageTop({ message, index, messages }) : null}

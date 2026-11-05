@@ -279,8 +279,9 @@ test('reconcileOlderPages carries rows that slide out of the newest page and re-
   // Same page refetched (read receipt, reconnect with nothing new): identity kept.
   const same = reconcileOlderPages(previous, range(PAGE, 2 * PAGE), older, idOf);
   assert.equal(same.older, older);
-  // No older pages loaded: nothing to carry; the pane pages from the new cursor.
-  assert.deepEqual(reconcileOlderPages(previous, range(PAGE + 1, 2 * PAGE + 1), [], idOf), { older: [], reanchor: false });
+  // No older pages loaded (REQ-PIN-3): the row that slid out is still carried, so the
+  // list never shrinks under a pinned send.
+  assert.deepEqual(reconcileOlderPages(previous, range(PAGE + 1, 2 * PAGE + 1), [], idOf), { older: [row(PAGE)], reanchor: false });
   // Repeated refetch does not duplicate rows already carried.
   const again = reconcileOlderPages(range(PAGE + 1, 2 * PAGE + 1), range(PAGE + 2, 2 * PAGE + 2), one.older, idOf);
   assert.equal(new Set(again.older.map(idOf)).size, again.older.length);

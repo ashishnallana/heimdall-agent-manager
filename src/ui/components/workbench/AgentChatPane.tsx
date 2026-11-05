@@ -269,6 +269,9 @@ function bridgeId(bridge: any): string {
 function msgId(m: Message, i: number): string {
   return String(m.message_id || m.messageId || m.id || `idx-${i}`);
 }
+function messageIdOf(m: Message): string {
+  return String(m.message_id || m.messageId || m.id || '');
+}
 function msgDir(m: Message): string {
   return String(m.direction || '');
 }
@@ -665,7 +668,9 @@ function deliveryStatusFor(message: ChatMessage): ChatDeliveryStatus {
   return { glyph: '✓', label: 'Sent', tone: 'text-faint' };
 }
 
-function normalizeConversationMessages(rows: Message[], agentLabel: string): ChatMessage[] {
+// `keyFor` maps a server id to the React key of the optimistic row it replaced
+// (REQ-PIN-2), so the sent bubble keeps one key across the send ack.
+function normalizeConversationMessages(rows: Message[], agentLabel: string, keyFor: (id: string) => string | undefined = () => undefined): ChatMessage[] {
   const seen = new Set<string>();
   // Newest-page data supersedes carried older rows with the same durable ID,
   // including answered state and freshness. Display sorting happens afterwards.
@@ -693,7 +698,7 @@ function normalizeConversationMessages(rows: Message[], agentLabel: string): Cha
       return {
         order: index,
         chatMessage: {
-          key: id || `${direction}-${createdUnixMs}-${index}`,
+          key: keyFor(id) ?? (id || `${direction}-${createdUnixMs}-${index}`),
           messageId: id,
           body: String(message.body || ''),
           isUser,
@@ -1375,14 +1380,53 @@ export function AgentChatPane({
     return ordered;
   }, [caps, provider, providerProfile, providerOptions, instanceProvider, instanceModel, instance?.provider_profile]);
 
-  const chatMessages = useMemo(
-    () =>
-      normalizeConversationMessages(
-        [...olderMessages, ...baseMessages, ...localMessages],
-        agentId || agentInstanceId,
-      ),
-    [olderMessages, baseMessages, localMessages, agentId, agentInstanceId],
-  );
+  // REQ-PIN-3: rows that slide out of a refetched newest page are carried here, during
+  // render, so the list never sees a temporarily shrunken array (an effect would commit
+  // one frame without them, which unpinned a send in a conversation of 30+ messages). A
+  // refetch that no longer joins the older pages re-anchors (effect below).
+  const olderCarryRef = useRef({ conversationId, base: [] as Message[], slid: [] as Message[], dropped: null as Message[] | null });
+  const carry = olderCarryRef.current;
+  if (carry.conversationId !== conversationId) Object.assign(carry, { conversationId, base: [], slid: [], dropped: null });
+  if (carry.base !== baseMessages) {
+    const carried = [...carry.slid, ...olderMessages];
+    const { older, reanchor } = reconcileOlderPages(carry.base, baseMessages, carried, messageIdOf);
+    carry.base = baseMessages;
+    if (reanchor) Object.assign(carry, { slid: [], dropped: olderMessages });
+    else if (older !== carried) carry.slid = [...older.slice(0, older.length - carried.length), ...carry.slid];
+  }
+  const effectiveOlder = carry.dropped === olderMessages ? carry.slid : carry.slid.length ? [...carry.slid, ...olderMessages] : olderMessages;
+  const carriedCount = carry.slid.length;
+  const olderReanchored = carry.dropped !== null && carry.dropped === olderMessages && olderMessages.length > 0;
+
+  // REQ-PIN-2: server id -> key of the optimistic row it replaced, and for each pending
+  // send the ids already in the transcript when it was sent.
+  const sentKeysRef = useRef(new Map<string, string>());
+  const pendingSendsRef = useRef(new Map<string, Set<string>>());
+  const chatMessages = useMemo(() => {
+    const keys = sentKeysRef.current;
+    // REQ-PIN-3: the WS echo of a send can land before its POST resolves. Its server row
+    // takes over the pending row's key and the pending row is hidden, so the list never
+    // holds both (no second bubble, no double pin, no scroll-back).
+    const hidden = new Set<string>();
+    for (const local of localMessages) {
+      const localId = msgId(local, 0);
+      const before = pendingSendsRef.current.get(localId);
+      if (!before) continue;
+      const echo = baseMessages.find((row) => {
+        const id = messageIdOf(row);
+        return id && msgDir(row) === 'user_to_agent' && !before.has(id) && (keys.get(id) ?? localId) === localId
+          && String(row.body || '') === String(local.body || '');
+      });
+      if (!echo) continue;
+      keys.set(messageIdOf(echo), localId);
+      hidden.add(localId);
+    }
+    return normalizeConversationMessages(
+      [...effectiveOlder, ...baseMessages, ...(hidden.size ? localMessages.filter((message) => !hidden.has(msgId(message, 0))) : localMessages)],
+      agentId || agentInstanceId,
+      (id) => keys.get(id),
+    );
+  }, [effectiveOlder, baseMessages, localMessages, agentId, agentInstanceId]);
 
   const activeVaultKey = useSelector(selectActiveVaultKey);
   const hasLockedVaultMessages = useMemo(
@@ -1512,6 +1556,8 @@ export function AgentChatPane({
     setOlderHasMore(false);
     setLocalMessages([]);
     setAttachments([]);
+    sentKeysRef.current.clear();
+    pendingSendsRef.current.clear();
   }, [conversationId]);
   useEffect(() => {
     if (baseMessages.length === 0 || localMessages.length === 0) return;
@@ -1523,29 +1569,20 @@ export function AgentChatPane({
       }),
     );
   }, [baseMessages, localMessages.length]);
+  // With carried rows the cursor stays where the older end was (the page they slid from).
   useEffect(() => {
-    if (olderMessages.length > 0) return;
+    if (olderMessages.length > 0 || carriedCount > 0) return;
     setOlderCursor(String(messagesQuery.data?.nextCursor || ''));
     setOlderHasMore(Boolean(messagesQuery.data?.hasMore));
-  }, [messagesQuery.data?.nextCursor, messagesQuery.data?.hasMore, olderMessages.length]);
-  // The refetched newest page (after new messages, a reconnect or a show) may have
-  // dropped rows the loaded older pages do not hold: carry them, or re-anchor when the
-  // pages no longer join (reconcileOlderPages).
-  const previousBaseRef = useRef<Message[]>([]);
+  }, [messagesQuery.data?.nextCursor, messagesQuery.data?.hasMore, olderMessages.length, carriedCount]);
+  // The render-time carry above found that the older pages no longer join: drop them and
+  // page back from the new newest page.
   useEffect(() => {
-    const previous = previousBaseRef.current;
-    previousBaseRef.current = baseMessages;
-    if (previous === baseMessages) return;
-    const idOf = (message: Message) => String(message.message_id || message.messageId || message.id || '');
-    const { older, reanchor } = reconcileOlderPages(previous, baseMessages, olderMessages, idOf);
-    if (reanchor) {
-      setOlderMessages([]);
-      setOlderCursor(String(messagesQuery.data?.nextCursor || ''));
-      setOlderHasMore(Boolean(messagesQuery.data?.hasMore));
-    } else if (older !== olderMessages) {
-      setOlderMessages(older);
-    }
-  }, [baseMessages]);
+    if (!olderReanchored) return;
+    setOlderMessages([]);
+    setOlderCursor(String(messagesQuery.data?.nextCursor || ''));
+    setOlderHasMore(Boolean(messagesQuery.data?.hasMore));
+  }, [olderReanchored]);
   // Read receipts for older pages held in state (RTK pages are patched in wsInvalidation).
   useEffect(() => {
     if (!conversationId) return undefined;
@@ -1816,6 +1853,17 @@ export function AgentChatPane({
     }
   }
 
+  // REQ-PIN-2/3: remember what the transcript held at send time (to spot the WS echo),
+  // and on the ack map the server id to the optimistic row's key.
+  function trackPendingSend(localId: string) {
+    pendingSendsRef.current.set(localId, new Set([...effectiveOlder, ...baseMessages].map(messageIdOf).filter(Boolean)));
+  }
+  function settlePendingSend(localId: string, sent: Message | null) {
+    pendingSendsRef.current.delete(localId);
+    const id = sent ? messageIdOf(sent) : '';
+    if (id) sentKeysRef.current.set(id, localId);
+  }
+
   async function submit(event: FormEvent) {
     event.preventDefault();
     if (desktopUpdateFrozen()) return;
@@ -1842,6 +1890,7 @@ export function AgentChatPane({
     (local as any).artifact_ids_json = JSON.stringify(attachmentIds);
     setError('');
     if (submittedQuotes.length) (local as any).hasQuoteContext = true;
+    trackPendingSend(localId);
     setLocalMessages((current) => [...current, local]);
     // REQ-PIN-1: release the message at t=0. The input clears now (a failed send puts
     // the draft back) and, on phones, blurring dismisses the keyboard; the composer then
@@ -1866,6 +1915,7 @@ export function AgentChatPane({
       if (latestDraft !== submittedDraft && latestDraft !== updateDraftRef.current) updateDraft(latestDraft);
       setAttachments([]);
       const sent = sentMessageFromResult(result);
+      settlePendingSend(localId, sent);
       setLocalMessages((current) =>
         current.map((message) => {
           if (msgId(message, 0) !== localId) return message;
@@ -1881,6 +1931,7 @@ export function AgentChatPane({
         }),
       );
     } catch (err: any) {
+      settlePendingSend(localId, null);
       // The input was cleared at send, so every failure path puts the draft back.
       if (!mountedRef.current || routeGeneration.current !== submittedGeneration || currentTargetRef.current !== submittedTarget) {
         // The pane moved on: restore the draft to storage for the submitted route
@@ -1908,6 +1959,7 @@ export function AgentChatPane({
     const local = optimisticUserMessage(conversationId, sendBody);
     const localId = msgId(local, 0);
     setError('');
+    trackPendingSend(localId);
     setLocalMessages((current) => [...current, local]);
     try {
       const result = await sendMessage({
@@ -1916,6 +1968,7 @@ export function AgentChatPane({
         artifactIds: [],
       }).unwrap();
       const sent = sentMessageFromResult(result);
+      settlePendingSend(localId, sent);
       setLocalMessages((current) =>
         current.map((message) => {
           if (msgId(message, 0) !== localId) return message;
@@ -1930,6 +1983,7 @@ export function AgentChatPane({
         }),
       );
     } catch (err: any) {
+      settlePendingSend(localId, null);
       const message = errMsg(err, 'Send failed');
       setLocalMessages((current) =>
         current.map((item) =>

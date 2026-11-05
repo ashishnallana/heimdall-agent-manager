@@ -103,7 +103,9 @@ export function announceConversationMessagesRead(receipt: ConversationMessagesRe
 //   transcript stays contiguous;
 // - no overlap (k >= page): the older pages no longer join the newest one; drop them
 //   and page back from the new newest page (reanchor) rather than render a hole.
-// Rows without an id cannot be matched and are not carried.
+// Rows slide out even when no older page is loaded (REQ-PIN-3): a send in a conversation
+// of 30+ messages pushes the oldest row out, and dropping it shrinks the list under the
+// pinned bubble. Rows without an id cannot be matched and are not carried.
 export type OlderPagesReconcile<T> = { older: T[]; reanchor: boolean };
 
 export function reconcileOlderPages<T extends Record<string, any>>(
@@ -112,7 +114,7 @@ export function reconcileOlderPages<T extends Record<string, any>>(
   older: T[],
   idOf: (row: T) => string,
 ): OlderPagesReconcile<T> {
-  if (older.length === 0 || previousBase.length === 0 || nextBase.length === 0) return { older, reanchor: false };
+  if (previousBase.length === 0 || nextBase.length === 0) return { older, reanchor: false };
   const nextIds = new Set(nextBase.map(idOf).filter(Boolean));
   if (!previousBase.some((row) => nextIds.has(idOf(row)))) return { older: [], reanchor: true };
   const olderIds = new Set(older.map(idOf).filter(Boolean));

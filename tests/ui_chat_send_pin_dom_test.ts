@@ -645,3 +645,77 @@ test('user QA round 3: an incoming message never moves the list, at rest at the 
     assert.equal(env.scrollToCalls(), calls, 'no scroll-to-bottom for inbound rows');
   });
 });
+
+// REQ-PIN-4: the 30-row newest page slide. A send in a conversation of 30+ messages is
+// followed by a refetch whose page no longer holds the oldest row.
+const longHistory = Array.from({ length: 31 }, (_, i) => msg(`h${i}`, i % 2 === 1, `Row ${i}`));
+// The pane keeps the optimistic row's key across the ack (REQ-PIN-2).
+const acked = (id: string, key: string, body: string) => ({ ...msg(id, true, body), key });
+const pinnedRow = (env: any) => env.dom.window.document.querySelector('[data-chat-pin-row="true"]') as HTMLElement | null;
+
+test('REQ-PIN-4a: 30+ rows, send, id swap, then a refetch without the oldest row keeps the pin, the spacer and the view', async () => {
+  await withList(async (env) => {
+    const { q, render, list, geometry, settle } = env;
+    await render(list(longHistory));
+    const scroll = geometry();
+    await render(list([...longHistory, msg('local_a', true, 'New question')]));
+    await settle();
+    const spacer = q('pin-pin-turn-spacer')!.style.height;
+    const top = pinnedRow(env)!.getBoundingClientRect().top;
+    const calls = env.scrollToCalls();
+    await render(list([...longHistory, acked('srv_a', 'local_a', 'New question')]));
+    assert.equal(pinnedRow(env), q('pin-message-srv_a'), 'the ack keeps the pin on the same row');
+    // The newest page slid: the oldest row is gone (31 -> 30 history rows).
+    await render(list([...longHistory.slice(1), acked('srv_a', 'local_a', 'New question')]));
+    assert.equal(pinnedRow(env), q('pin-message-srv_a'), 'the trim never unpins');
+    assert.equal(scroll.dataset.chatPinned, 'true');
+    assert.equal(q('pin-pin-turn-spacer')!.style.height, spacer, 'the exchange spacer is unchanged');
+    assert.equal(pinnedRow(env)!.getBoundingClientRect().top, top, 'the bubble stays where it was pinned');
+    assert.equal(env.scrollToCalls(), calls, 'nothing scrolls to the bottom');
+  });
+});
+
+test('REQ-PIN-4b: with older rows loaded, a refetch that trims the top and appends the reply keeps the pin on the sent row', async () => {
+  await withList(async (env) => {
+    const { q, render, list, geometry, settle } = env;
+    const older = [msg('o1', false, 'Older one'), msg('o2', true, 'Older two')];
+    await render(list(longHistory));
+    geometry();
+    await render(list([...older, ...longHistory]));
+    await render(list([...older, ...longHistory, msg('local_a', true, 'New question')]));
+    await settle();
+    const top = pinnedRow(env)!.getBoundingClientRect().top;
+    const calls = env.scrollToCalls();
+    // Same row count, every index shifted: the old index now points at the reply.
+    await render(list([...older.slice(1), ...longHistory, acked('srv_a', 'local_a', 'New question'), msg('r1', false, 'Reply')]));
+    assert.equal(pinnedRow(env), q('pin-message-srv_a'), 'the pin follows the row, not the index');
+    assert.equal(q('pin-message-r1')!.getAttribute('data-chat-pin-row'), null);
+    assert.equal(pinnedRow(env)!.getBoundingClientRect().top, top, 'no scroll-back');
+    assert.equal(env.scrollToCalls(), calls);
+  });
+});
+
+test('REQ-PIN-4c: the server echo arriving before the POST resolves neither re-pins nor scrolls back', async () => {
+  await withList(async (env) => {
+    const { q, render, list, geometry, settle } = env;
+    await render(list(longHistory));
+    const scroll = geometry();
+    await render(list([...longHistory, msg('local_a', true, 'New question')]));
+    await settle();
+    const top = pinnedRow(env)!.getBoundingClientRect().top;
+    const calls = env.scrollToCalls();
+    // A caller that has not folded the echo yet shows both rows for a moment.
+    await render(list([...longHistory, msg('local_a', true, 'New question'), msg('srv_a', true, 'New question')]));
+    await env.frame(16);
+    assert.equal(env.dom.window.document.querySelectorAll('[data-chat-pin-row="true"]').length, 1, 'no double pin');
+    assert.equal(pinnedRow(env), q('pin-message-local_a'));
+    assert.equal(env.scrollToCalls(), calls, 'the echo never scrolls to the bottom');
+    // The ack folds them into one row with the pinned key.
+    await render(list([...longHistory.slice(1), acked('srv_a', 'local_a', 'New question')]));
+    await env.frame(16);
+    assert.equal(pinnedRow(env), q('pin-message-srv_a'));
+    assert.equal(scroll.dataset.chatPinned, 'true');
+    assert.equal(pinnedRow(env)!.getBoundingClientRect().top, top, 'no scroll-back');
+    assert.equal(env.scrollToCalls(), calls);
+  });
+});
