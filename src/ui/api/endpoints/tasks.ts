@@ -1527,14 +1527,14 @@ export const tasksApi = heimdallApi.injectEndpoints({
         { type: 'Chain' as const, id: chainId },
       ],
     }),
-    fetchTaskEvents: build.query<{ events: any[] }, { chainId: string; taskId: string; beforeId?: number; limit?: number }>({
+    fetchTaskEvents: build.query<{ events: any[]; hasMore: boolean }, { chainId: string; taskId: string; beforeId?: number; limit?: number }>({
       queryFn: async ({ chainId, taskId, beforeId, limit = 50 }) => {
         try {
           let url = `/task-chains/${encodeURIComponent(chainId)}/tasks/${encodeURIComponent(taskId)}/events?limit=${limit}`;
           if (beforeId !== undefined) url += `&before_id=${beforeId}`;
           const data = await cookieJsonFetch(url);
           const rawEvents = Array.isArray(data) ? data : data?.data || data?.events || [];
-          return { data: { events: rawEvents } };
+          return { data: { events: rawEvents, hasMore: Boolean(data?.page?.has_more ?? data?.has_more) } };
         } catch (error: any) {
           return { error: { status: 'CUSTOM_ERROR', error: String(error?.message || error) } as any };
         }
@@ -1757,6 +1757,7 @@ export const {
   useCreateTaskChainMutation,
   useUpdateTaskChainMutation,
   useUpdateTaskDetailMutation,
+  useUpdateTaskPriorityMutation,
   useCancelTaskDetailMutation,
   useAddChainDirectoryMutation,
   useCreateTaskMutation,

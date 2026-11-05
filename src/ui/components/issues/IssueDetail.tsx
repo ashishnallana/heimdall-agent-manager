@@ -5,8 +5,6 @@ import {
   Badge,
   Button,
   Icon,
-  Menu,
-  MenuItem,
   Panel,
   ResourceDetailHeader,
   ResourceSectionCard,
@@ -254,28 +252,14 @@ export function IssueDetail({ issueId, onBack, onEdit, onDelete }: IssueDetailPr
               <span>Edit</span>
             </Button>
 
-            <Menu
-              label="More options"
-              align="end"
-              trigger={
-                <ActionButton
-                  icon="more-horizontal"
-                  label="More"
-                  iconOnly
-                  aria-label="More options"
-                  data-debug-id="issue-detail-more-menu"
-                />
-              }
-            >
-              <MenuItem
-                danger
-                data-debug-id="issue-detail-delete-item"
-                onClick={handleDelete}
-                disabled={isDeleting}
-              >
-                Delete Issue
-              </MenuItem>
-            </Menu>
+            <ActionButton
+              label="Delete Issue"
+              variant="danger"
+              loading={isDeleting}
+              disabled={isDeleting}
+              data-debug-id="issue-detail-delete-item"
+              onClick={handleDelete}
+            />
           </div>
         }
       />

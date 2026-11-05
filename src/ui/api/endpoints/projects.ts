@@ -156,15 +156,29 @@ export const projectsApi = heimdallApi.injectEndpoints({
         { type: 'SidebarProjects' as const, id: 'ALL' },
       ],
     }),
-    // The project destructive verb. There is NO delete route for projects
-    // (`wiring.odin:316-323`): archive is the soft-delete, it does not cascade to
-    // chains/tasks/instances (`project_service.odin:242-244`), and the hub exposes
-    // no way back — `Update_Project_Input` carries no `state` field, so nothing in
-    // this API can un-archive.
+    // The project destructive verb. There is NO delete route for projects: archive
+    // is the soft-delete, it does not cascade to chains/tasks/instances, and
+    // `unarchiveProject` below is the way back.
     archiveProject: build.mutation<any, { projectId: string }>({
       queryFn: async ({ projectId }) => {
         try {
           const data = await cookieMutation(`/projects/${encodeURIComponent(projectId)}/archive`, 'POST');
+          return { data };
+        } catch (error: any) {
+          return { error: { status: 'CUSTOM_ERROR', error: String(error?.message || error) } as any };
+        }
+      },
+      invalidatesTags: (_result, _error, { projectId }) => [
+        { type: 'Project' as const, id: projectId },
+        { type: 'Projects' as const, id: 'LIST' },
+        { type: 'SidebarProjects' as const, id: 'ALL' },
+      ],
+    }),
+    // Returns an archived project to Active (`POST /projects/{id}/unarchive`).
+    unarchiveProject: build.mutation<any, { projectId: string }>({
+      queryFn: async ({ projectId }) => {
+        try {
+          const data = await cookieMutation(`/projects/${encodeURIComponent(projectId)}/unarchive`, 'POST');
           return { data };
         } catch (error: any) {
           return { error: { status: 'CUSTOM_ERROR', error: String(error?.message || error) } as any };
@@ -225,6 +239,7 @@ export const {
   useFetchProjectQuery,
   useCreateProjectMutation,
   useArchiveProjectMutation,
+  useUnarchiveProjectMutation,
   useUpdateProjectMutation,
   useSetProjectBridgePathMutation,
   useDeleteProjectBridgePathMutation,

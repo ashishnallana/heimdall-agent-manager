@@ -36,8 +36,6 @@ import {
   Icon,
   IconButton,
   Link,
-  Menu,
-  MenuItem,
   Panel,
   ResourceDetailHeader,
   ResourceSectionCard,
@@ -54,6 +52,7 @@ import { selectActiveVaultKey } from '../../store/vaultSlice';
 import {
   projectErrorText,
   useArchiveProjectMutation,
+  useUnarchiveProjectMutation,
   useFetchProjectQuery,
   normalizeProject,
   type ProjectBridgePath,
@@ -86,6 +85,7 @@ import {
 export function useProjectDetail(projectId: string, onAfterVerb?: (verb: ProjectVerb) => void) {
   const query = useFetchProjectQuery({ projectId }, { skip: !projectId });
   const [archiveProject] = useArchiveProjectMutation();
+  const [unarchiveProject] = useUnarchiveProjectMutation();
   const [busy, setBusy] = React.useState<ProjectVerb | ''>('');
   const [actionError, setActionError] = React.useState('');
 
@@ -105,7 +105,7 @@ export function useProjectDetail(projectId: string, onAfterVerb?: (verb: Project
       setBusy(verb);
       setActionError('');
       try {
-        await archiveProject({ projectId }).unwrap();
+        await (verb === 'unarchive' ? unarchiveProject : archiveProject)({ projectId }).unwrap();
         onAfterVerb?.(verb);
       } catch (err) {
         setActionError(projectErrorText(err, `Couldn't ${VERB_LABEL[verb].toLowerCase()} this project.`));
@@ -113,7 +113,7 @@ export function useProjectDetail(projectId: string, onAfterVerb?: (verb: Project
         setBusy('');
       }
     },
-    [archiveProject, onAfterVerb, projectId],
+    [archiveProject, unarchiveProject, onAfterVerb, projectId],
   );
 
   return { query, record, busy, actionError, runVerb };
@@ -143,13 +143,13 @@ export function CopyButton({ value, label, debugId }: { value: string; label: st
  * ------------------------------------------------------------------ */
 
 /**
- * The header's action cluster: Edit as the primary verb, Archive in the `…` menu.
+ * The header's action cluster: Edit as the primary verb, then Archive (or
+ * Unarchive, once archived) as a direct button beside it. No `…` menu.
  *
  * Edit is rendered on DESKTOP ONLY. Below `md` the same verb is the sticky bottom
  * bar (`ProjectDetailMobileActions`), and Amendment 6 is explicit about the failure
  * it prevents: a verb in both places puts two of the same button on one phone
- * screen. Archive is not duplicated — it stays in the menu at every width, because
- * a destructive verb should not be the easiest thing to hit with a thumb.
+ * screen.
  */
 export function ProjectDetailActions({
   record,
@@ -161,7 +161,7 @@ export function ProjectDetailActions({
   onVerb: (verb: ProjectVerb) => void;
 }) {
   const verbs = verbsForState(projectState(record));
-  const menuVerbs = verbs.filter((verb) => verb !== 'edit');
+  const directVerbs = verbs.filter((verb) => verb !== 'edit');
 
   return (
     <>
@@ -175,32 +175,17 @@ export function ProjectDetailActions({
           />
         </span>
       ) : null}
-      {menuVerbs.length ? (
-        <Menu
-          label="Project actions"
-          align="end"
-          trigger={
-            <ActionButton
-              icon="more-horizontal"
-              label="More"
-              iconOnly
-              aria-label="Project actions"
-              data-debug-id="project-view-menu"
-            />
-          }
-        >
-          {menuVerbs.map((verb) => (
-            <MenuItem
-              key={verb}
-              danger={verb === 'archive'}
-              data-debug-id={`project-view-${verb}`}
-              onClick={() => onVerb(verb)}
-            >
-              {VERB_LABEL[verb]}
-            </MenuItem>
-          ))}
-        </Menu>
-      ) : null}
+      {directVerbs.map((verb) => (
+        <ActionButton
+          key={verb}
+          label={VERB_LABEL[verb]}
+          variant={verb === 'archive' ? 'danger' : 'secondary'}
+          loading={busy === verb}
+          disabled={Boolean(busy)}
+          data-debug-id={`project-view-${verb}`}
+          onClick={() => onVerb(verb)}
+        />
+      ))}
     </>
   );
 }

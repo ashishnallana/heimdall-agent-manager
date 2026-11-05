@@ -1,5 +1,7 @@
 import React from 'react';
 import { Icon, Menu, type IconName } from '@ui';
+import { VaultText } from '../vault/VaultText';
+import { maskVaultArmored } from '../../utils/vaultContent';
 import {
   NEW_TAB_ID,
   auxTabTitle,
@@ -17,6 +19,7 @@ export const AUX_TAB_ICONS: Record<AuxTabKind, IconName> = {
   preview: 'eye',
   subagentChat: 'chat',
   artifact: 'file',
+  ticket: 'tasks',
 };
 
 export const AUX_TAB_DRAG_MIME = 'application/x-heimdall-aux-tab';
@@ -85,7 +88,10 @@ export function AuxTabStrip({
       >
         {tabs.map((tab, index) => {
           const isActive = tab.id === activeTabId;
+          // A ticket title can be a sealed vault token: decrypt it for display and
+          // never put the ciphertext in a tooltip or an accessible name.
           const title = auxTabTitle(tab);
+          const plainTitle = maskVaultArmored(title);
           return (
             <div
               key={tab.id}
@@ -128,12 +134,10 @@ export function AuxTabStrip({
                 className={isActive ? 'shrink-0 text-accent' : 'shrink-0 text-muted'}
               />
               {renderTabStatus ? renderTabStatus(tab) : null}
-              <span className="truncate" title={title}>
-                {title}
-              </span>
+              <VaultText value={title} className="truncate" title={plainTitle} />
               <button
                 type="button"
-                aria-label={`Close ${title}`}
+                aria-label={`Close ${plainTitle}`}
                 data-debug-id={`aux-tab-close-${tab.id}`}
                 onClick={(e) => {
                   e.stopPropagation();

@@ -386,8 +386,8 @@ export function AuxDock({
                 ctx={ctx}
                 isMobile={isMobile}
                 onOpenTab={openTab}
-                onUpdateTab={(tabId, patch) =>
-                  dispatch(updateAuxTabContent({ treeId, tabId, patch: patch as any }))
+                onUpdateTab={(tabId, patch, title) =>
+                  dispatch(updateAuxTabContent({ treeId, tabId, patch: patch as any, title }))
                 }
                 onRekeyTab={(tabId, content, title) =>
                   dispatch(rekeyAuxTab({ treeId, tabId, content, title }))

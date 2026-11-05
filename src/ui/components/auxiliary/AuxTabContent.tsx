@@ -12,7 +12,8 @@ import {
   projectExplorerUnavailableMessage,
   type ProjectExplorerAccess,
 } from '../chat/projectVcsExperiment';
-import TaskChainOverview from '../taskchain/TaskChainOverview';
+import TaskChainOverview, { openAgentConversation } from '../taskchain/TaskChainOverview';
+import { TicketView } from '../tasks/TicketView';
 import { AgentChatPane } from '../workbench/AgentChatPane';
 import { AgentPtyWorkbenchPane } from '../workbench/AgentPtyWorkbenchPane';
 import { PreviewWorkbenchPane } from '../workbench/PreviewWorkbenchPane';
@@ -29,7 +30,7 @@ export interface AuxTabContentProps {
   ctx: AgentAuxContext;
   isMobile?: boolean;
   onOpenTab: (content: AuxContent, title?: string) => void;
-  onUpdateTab: (tabId: string, patch: Record<string, unknown>) => void;
+  onUpdateTab: (tabId: string, patch: Record<string, unknown>, title?: string) => void;
   onRekeyTab: (tabId: string, content: AuxContent, title?: string) => void;
   onPublishComments?: (markdown: string) => Promise<boolean>;
 }
@@ -194,6 +195,30 @@ function renderAuxTabBody({
           isMobile={isMobile}
           embedded={true}
           hideTitleBar={true}
+          onOpenTicket={(taskId, title, focus) => {
+            // A one-shot `taskId` on the board tab is consumed here, so the board
+            // does not reopen the ticket each time it remounts.
+            if (c.taskId) onUpdateTab(tab.id, { taskId: undefined });
+            onOpenTab({ type: 'ticket', chainId: ctx.chainId!, taskId, ...(focus ? { focus } : {}) }, title);
+          }}
+          onOpenAgent={(agentInstanceId) => openAgentConversation(agentInstanceId, isMobile)}
+        />
+      );
+    case 'ticket':
+      // One tab per ticket (REQ-T1); prev / next swap the ticket in this tab.
+      return (
+        <TicketView
+          key={`${c.chainId}:${c.taskId}`}
+          chainId={c.chainId}
+          taskId={c.taskId}
+          isMobile={isMobile}
+          focus={c.focus}
+          onFocusConsumed={() => onUpdateTab(tab.id, { focus: null })}
+          onShowBoard={() => onOpenTab({ type: 'tasks' })}
+          onOpenTicket={(taskId, title) => onOpenTab({ type: 'ticket', chainId: c.chainId, taskId }, title)}
+          onSwitchTicket={(taskId, title) => onRekeyTab(tab.id, { type: 'ticket', chainId: c.chainId, taskId }, title)}
+          onOpenAgent={(agentInstanceId) => openAgentConversation(agentInstanceId, isMobile)}
+          onTitle={(title) => title !== tab.title && onUpdateTab(tab.id, {}, title)}
         />
       );
     case 'shell': {

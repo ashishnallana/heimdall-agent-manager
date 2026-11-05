@@ -30,8 +30,6 @@ import {
   Button,
   Icon,
   IconButton,
-  Menu,
-  MenuItem,
   Panel,
   ResourceDetailHeader,
   ResourceSectionCard,
@@ -154,11 +152,12 @@ export function MemoryDetailActions({
 }) {
   const status = memoryStatus(record);
   const verbs = verbsForStatus(status);
-  // Approve/Reject are the header's buttons; everything else (Edit, Archive) lives in
-  // the menu. There is no Delete — archive is the permanent answer to delete.
+  // Approve/Reject lead; everything else (Edit, Archive, Restore) is a direct button
+  // beside them, with no `…` menu. There is no Delete — archive is the permanent
+  // answer to delete.
   const primary = verbs.find((verb) => verb === 'approve');
   const secondary = verbs.find((verb) => verb === 'reject');
-  const menuVerbs = verbs.filter((verb) => verb !== primary && verb !== secondary);
+  const directVerbs = verbs.filter((verb) => verb !== primary && verb !== secondary);
 
   return (
     <>
@@ -191,31 +190,17 @@ export function MemoryDetailActions({
           />
         </span>
       ) : null}
-      {menuVerbs.length ? (
-        <Menu
-          label="Memory actions"
-          align="end"
-          trigger={
-            <ActionButton
-              icon="more-horizontal"
-              label="More"
-              aria-label="Memory actions"
-              data-debug-id="memory-view-menu"
-            />
-          }
-        >
-          {menuVerbs.map((verb) => (
-            <MenuItem
-              key={verb}
-              danger={verb === 'archive'}
-              data-debug-id={`memory-view-${verb}`}
-              onClick={() => onVerb(verb)}
-            >
-              {VERB_LABEL[verb]}
-            </MenuItem>
-          ))}
-        </Menu>
-      ) : null}
+      {directVerbs.map((verb) => (
+        <ActionButton
+          key={verb}
+          label={VERB_LABEL[verb]}
+          variant={verb === 'archive' ? 'danger' : 'secondary'}
+          loading={busy === verb}
+          disabled={Boolean(busy)}
+          data-debug-id={`memory-view-${verb}`}
+          onClick={() => onVerb(verb)}
+        />
+      ))}
     </>
   );
 }

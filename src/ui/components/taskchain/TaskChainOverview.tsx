@@ -1,9 +1,14 @@
 import React, { useState, useEffect } from 'react';
 import { Badge, Button, IconButton, Text } from '@ui';
-import { useFetchTaskChainDetailQuery, usePublishTaskChainMutation } from '../../api/endpoints/tasks';
-import { useGetTaskChainFleetsQuery } from '../../api/endpoints/taskChains';
-import { useListBridgesQuery } from '../../api/endpoints/bridgeSupport';
-import { TicketBoardView } from '../tasks/TicketBoardView';
+import { usePublishTaskChainMutation } from '../../api/endpoints/tasks';
+import { TicketBoard } from '../tasks/TicketBoard';
+import { TicketView } from '../tasks/TicketView';
+import { RequirementsEditorModal } from '../tasks/RequirementsEditorModal';
+import { TaskEditModal, type TaskEditField } from '../tasks/TaskEditModal';
+import type { TicketOpenFocus } from '../tasks/BoardTicketCard';
+import { useChainTickets } from '../tasks/useChainTickets';
+import { replacementLinks, ticketTabTitle, keyFor } from '../tasks/ticketModel';
+import { buildRouteHash, navigateTo } from '../../utils/appLocation';
 import { VaultText } from '../vault/VaultText';
 import { WorkflowPipelineView } from '../tasks/WorkflowPipelineView';
 import { useFetchChainWorkflowRunsQuery } from '../../api/endpoints/workflowRuns';
@@ -11,11 +16,8 @@ import { CreateTaskModal } from '../tasks/CreateTaskModal';
 import { TaskBoardSkeleton } from '../tasks/TaskBoardSkeleton';
 import { FleetManagementDrawer } from '../tasks/FleetManagementDrawer';
 import { ReviewRolesModal } from '../tasks/ReviewRolesModal';
-import { TaskWire } from '../../api/taskWire';
-import { resolveSelectedTaskId } from '../tasks/taskV2Types';
 import { useOpenAgentChat } from '../auxiliary/openAgentChatContext';
 import { useFetchAgentInstanceQuery, useFetchAgentIdentityQuery, useListAgentIdentitiesQuery } from '../../api/endpoints/agents';
-import { buildTaskNames } from '../tasks/taskNames';
 import { actionErrorMessage } from '../tasks/useTaskActions';
 import { useIsMobile } from '../shell/responsive';
 import type { WorkflowRunView } from '../../api/endpoints/workflowRuns';
@@ -39,6 +41,21 @@ export interface TaskChainOverviewProps {
   embedded?: boolean;
   hideTitleBar?: boolean;
   onClose?: () => void;
+  /**
+   * Opens a ticket in its own aux tab (REQ-T1). Without it (the Task Chains
+   * page has no aux pane) the ticket opens in place and its breadcrumb returns
+   * to the board.
+   */
+  onOpenTicket?: (taskId: string, title: string, focus?: TicketOpenFocus) => void;
+  /** An agent row: that agent's conversation in Main. Defaults to the chat route. */
+  onOpenAgent?: (instanceId: string, name: string) => void;
+}
+
+/** The existing chat route: the agent's conversation in Main. */
+export function openAgentConversation(instanceId: string, isMobile = false): void {
+  if (!instanceId) return;
+  navigateTo(buildRouteHash(`/conversations/${encodeURIComponent(instanceId)}`, isMobile ? '' : '?panel=tasks'));
+  if (isMobile) window.dispatchEvent(new CustomEvent('heimdall:close-sidebar'));
 }
 
 export function InstanceIdLink({ instanceId, displayName }: { instanceId: string; displayName?: string }) {
@@ -88,31 +105,43 @@ export const TaskChainOverview: React.FC<TaskChainOverviewProps> = ({
   embedded = false,
   hideTitleBar = false,
   onClose,
+  onOpenTicket,
+  onOpenAgent,
 }) => {
-  // The card expanded inline (plan REQ-UI-8). A deep link to a task expands it.
-  const [expandedTaskId, setExpandedTaskId] = useState<string | null>(focusTaskId || null);
+  // Without an aux pane the ticket opens in place; a deep link opens it too.
+  const [inlineTicket, setInlineTicket] = useState<{ taskId: string; focus?: TicketOpenFocus } | null>(focusTaskId && !onOpenTicket ? { taskId: focusTaskId } : null);
   const [showNewTaskModal, setShowNewTaskModal] = useState(false);
   const [showFleetDrawer, setShowFleetDrawer] = useState(false);
   const [showReviewRoles, setShowReviewRoles] = useState(false);
+  const [editing, setEditing] = useState<{ taskId: string; field: TaskEditField } | null>(null);
   const [publishChain, publishChainState] = usePublishTaskChainMutation();
   const [publishError, setPublishError] = useState('');
 
-  // The card scrolls itself into view once mounted (TaskCard scrollIntoView), so
-  // this also works on a cold deep link while the chain is still loading.
-  const [scrollTaskId, setScrollTaskId] = useState<string | null>(focusTaskId || null);
-  const clearScroll = React.useCallback(() => setScrollTaskId(null), []);
-  const expandTask = (taskId: string) => {
-    setExpandedTaskId(taskId);
-    setScrollTaskId(taskId);
-  };
-  const toggleTask = (taskId: string) => setExpandedTaskId((cur) => (cur === taskId ? null : taskId));
+  const ctx = useChainTickets(chainId);
+  const { chain, tasks, tickets, keys, names, fleets, machines } = ctx;
 
+  const openTicket = React.useCallback(
+    (taskId: string, focus?: TicketOpenFocus) => {
+      const t = tasks.find((x) => x.task_id === taskId);
+      if (onOpenTicket) onOpenTicket(taskId, ticketTabTitle(keyFor(keys, taskId), t?.title || ''), focus);
+      else setInlineTicket({ taskId, focus });
+    },
+    [onOpenTicket, tasks, keys],
+  );
+  // Stable, so the memoized cards skip re-rendering when nothing they show changed.
+  const editTicket = React.useCallback((taskId: string, field: TaskEditField) => setEditing({ taskId, field }), []);
+
+  // A deep link to a task (`?panel=tasks&task=` or /chains/:c/tasks/:t) opens that ticket.
+  const consumedFocus = React.useRef('');
   useEffect(() => {
-    if (focusTaskId) expandTask(focusTaskId);
-  }, [focusTaskId]);
+    if (!focusTaskId || consumedFocus.current === focusTaskId) return;
+    if (onOpenTicket && !tasks.length) return;
+    consumedFocus.current = focusTaskId;
+    openTicket(focusTaskId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusTaskId, tasks.length]);
 
-  const { data: chainDetailData, isLoading: isLoadingChain, error: chainError } =
-    useFetchTaskChainDetailQuery({ chainId }, { skip: !chainId });
+  const openAgent = onOpenAgent || ((instanceId: string) => openAgentConversation(instanceId, isMobile));
 
   const workflowRunsQuery = useFetchChainWorkflowRunsQuery({ chainId }, {
     skip: !chainId,
@@ -122,17 +151,10 @@ export const TaskChainOverview: React.FC<TaskChainOverviewProps> = ({
   });
   const workflowRuns = workflowRunsQuery.currentData?.runs || [];
 
-  const { data: fleetsData } = useGetTaskChainFleetsQuery({ chainId }, { skip: !chainId });
-  const { data: bridgesData } = useListBridgesQuery();
-
-  const chain: any = chainDetailData?.chain;
-  const tasks: TaskWire[] = chain?.tasks || [];
-  const fleets = Array.isArray(fleetsData) ? fleetsData : [];
-  const bridges = bridgesData?.bridges || [];
   const { data: identitiesData } = useListAgentIdentitiesQuery();
   // Solo mode: the coordinator also does the work — it is the
   // built-in Soloist, or its own agent has a worker row in the fleet.
-  const coordinatorId = String(chain?.coordinator_agent_instance_id || chain?.coordinatorAgentInstanceId || '');
+  const coordinatorId = ctx.coordinatorInstanceId;
   const { data: coordinatorData } = useFetchAgentInstanceQuery({ instanceId: coordinatorId }, { skip: !coordinatorId });
   const coordinatorAgentId = String((coordinatorData as any)?.instance?.agent_id || (coordinatorData as any)?.instance?.agentId || '');
   const isSolo = React.useMemo(() => {
@@ -141,20 +163,19 @@ export const TaskChainOverview: React.FC<TaskChainOverviewProps> = ({
     if (agent && (agent.slug === 'soloist' || agent.template_id === 'tmpl_soloist' || agent.templateId === 'tmpl_soloist')) return true;
     return fleets.some((f: any) => (f?.agent_id || f?.agentId) === coordinatorAgentId && String(f?.roles_json || JSON.stringify(f?.roles || ['worker'])).includes('worker'));
   }, [coordinatorAgentId, identitiesData, fleets]);
-  // One names resolver per chain view (plan REQ-UI-4): cards, board, pipeline and
-  // detail all show titles / agent names / bridge labels instead of raw ids.
-  const names = React.useMemo(
-    () =>
-      buildTaskNames({
-        tasks,
-        members: chain?.members || [],
-        bridges,
-        identities: identitiesData?.agents || [],
-      }),
-    [tasks, chain?.members, bridges, identitiesData],
-  );
 
-  if (isLoadingChain && !chain) {
+  // Gap G2: a replacement is recorded as a comment; the last comment's preview
+  // is the only place the board sees it without fetching every thread.
+  const replacedBy = React.useMemo(() => {
+    const out: Record<string, string> = {};
+    for (const t of tickets) {
+      const link = replacementLinks(String(t.comment_summary?.last_comment_preview || '')).replacedBy;
+      if (link) out[t.task_id] = link;
+    }
+    return out;
+  }, [tickets]);
+
+  if (ctx.isLoading && !chain) {
     return (
       <div data-debug-id="taskchain-loading" className="h-full overflow-hidden bg-canvas">
         <TaskBoardSkeleton />
@@ -162,21 +183,37 @@ export const TaskChainOverview: React.FC<TaskChainOverviewProps> = ({
     );
   }
 
-  if (chainError || !chain) {
+  if (ctx.error || !chain) {
     return (
       <div
         data-debug-id="taskchain-error"
         className="m-4 rounded-xl border border-danger/40 bg-danger-soft p-4 text-xs text-danger text-left"
       >
-        Failed to load task chain: {String((chainError as any)?.message || chainError || 'Not found')}
+        Failed to load task chain: {String((ctx.error as any)?.message || (ctx.error as any)?.error || ctx.error || 'Not found')}
       </div>
     );
   }
 
-  const tickets = tasks.filter((task) => !task.workflow_run_id);
+  if (inlineTicket && !onOpenTicket) {
+    return (
+      <TicketView
+        key={inlineTicket.taskId}
+        chainId={chainId}
+        taskId={inlineTicket.taskId}
+        isMobile={isMobile}
+        focus={inlineTicket.focus}
+        onFocusConsumed={() => setInlineTicket((cur) => (cur ? { taskId: cur.taskId } : cur))}
+        onShowBoard={() => setInlineTicket(null)}
+        onOpenTicket={(taskId) => setInlineTicket({ taskId })}
+        onSwitchTicket={(taskId) => setInlineTicket({ taskId })}
+        onOpenAgent={openAgent}
+      />
+    );
+  }
+
   const currentTasks = tasks.filter((task) => !task.workflow_run_id || workflowRuns.some((run) => run.run_id === task.workflow_run_id && run.execution_no === task.workflow_execution_no));
-  const openTaskId = resolveSelectedTaskId(expandedTaskId, tasks, Boolean(chain));
   const chainIsDraft = String(chain.publishState || chain.publish_state || '').toLowerCase() === 'draft';
+  const editingTask = editing ? tasks.find((t) => t.task_id === editing.taskId) || null : null;
   const handlePublishChain = async () => {
     setPublishError('');
     try {
@@ -210,24 +247,26 @@ export const TaskChainOverview: React.FC<TaskChainOverviewProps> = ({
       )}
 
       <div className="min-h-0 flex-1 overflow-y-auto">
-          <TicketBoardView
+          <TicketBoard
             chainId={chainId}
             tasks={tickets}
             summaryTasks={currentTasks}
+            keys={keys}
             names={names}
+            machines={machines}
             chainFleets={fleets}
-            expandedTaskId={openTaskId}
-            onToggleTask={toggleTask}
-            onSelectTask={expandTask}
-            scrollTaskId={scrollTaskId}
-            onScrolled={clearScroll}
+            chainKind={String(chain.kind || '')}
+            replacedBy={replacedBy}
+            isMobile={isMobile}
+            onOpenTicket={openTicket}
+            onOpenAgent={openAgent}
+            onEditTicket={editTicket}
             onNewTask={() => setShowNewTaskModal(true)}
             onOpenFleetDrawer={() => setShowFleetDrawer(true)}
             onOpenReviewRoles={() => setShowReviewRoles(true)}
             onPublishChain={chainIsDraft ? handlePublishChain : undefined}
             publishingChain={publishChainState.isLoading}
             publishError={publishError}
-            summaryText={chain.summary}
             hasWorkflowRuns={workflowRuns.length > 0}
             workSlot={
               <div className="flex flex-col gap-4">
@@ -239,14 +278,12 @@ export const TaskChainOverview: React.FC<TaskChainOverviewProps> = ({
                       chainId={chainId} chain={chain} run={run}
                       tasks={tasks.filter((task) => task.workflow_run_id === run.run_id && task.workflow_execution_no === run.execution_no)}
                       names={names} chainFleets={fleets}
-                      expandedTaskId={openTaskId} onToggleTask={toggleTask} onSelectTask={expandTask}
-                      scrollTaskId={scrollTaskId} onScrolled={clearScroll}
+                      expandedTaskId={null} onToggleTask={(taskId) => openTicket(taskId)} onSelectTask={(taskId) => openTicket(taskId)}
                     />
                   </section>
                 ))}
               </div>
             }
-
           />
       </div>
 
@@ -259,6 +296,13 @@ export const TaskChainOverview: React.FC<TaskChainOverviewProps> = ({
           onClose={() => setShowNewTaskModal(false)}
           onSuccess={() => setShowNewTaskModal(false)}
         />
+      )}
+
+      {editing && editingTask && editing.field === 'requirements' && (
+        <RequirementsEditorModal open onClose={() => setEditing(null)} chainId={chainId} task={editingTask} keys={keys} names={names} />
+      )}
+      {editing && editingTask && editing.field !== 'requirements' && (
+        <TaskEditModal chainId={chainId} task={editingTask} field={editing.field} onClose={() => setEditing(null)} tasks={tickets} chainFleets={fleets} names={names} />
       )}
 
       <ReviewRolesModal chainId={chainId} open={showReviewRoles} onClose={() => setShowReviewRoles(false)} names={names} />

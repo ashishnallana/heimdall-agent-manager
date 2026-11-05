@@ -114,6 +114,17 @@ archive_agent_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req))
 }
 
+unarchive_agent_handler :: proc(ctx: rawptr, req: Request) -> Response {
+	h := (^Agent_Handlers)(ctx)
+	auth_ctx, ok, auth_resp := require_auth(h.auth, req)
+	if !ok do return auth_resp
+	agent, restored, err := agent_service.unarchive_agent(h.agents, auth_ctx, path_part(req.path, 4))
+	if !restored do return respond_error(err, req.request_id)
+	publish_agent_changed(h.event_bus, string(agent.owner_user_id), agent.agent_id, "unarchived")
+	b := strings.builder_make(); write_agent_json(&b, h.agents, agent)
+	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req))
+}
+
 list_agent_support_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	h := (^Agent_Handlers)(ctx)
 	auth_ctx, ok, auth_resp := require_auth(h.auth, req)

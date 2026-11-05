@@ -114,3 +114,15 @@ test('lookUpPairing: a candidate without a valid declared origin is never derive
     });
   }
 });
+
+test('the Add a device page has a Back button above the pairing code', async () => {
+  const React = (await import('react')).default;
+  const { Provider } = await import('react-redux');
+  const { renderToStaticMarkup } = await import('react-dom/server');
+  const { makeVaultStore } = await import('./helpers/vaultEndpointHarness.ts');
+  const { default: DeviceApprovalPage } = await import('../src/ui/components/devices/DeviceApprovalPage.tsx');
+  const store = await makeVaultStore();
+  const html = renderToStaticMarkup(React.createElement(Provider, { store, children: React.createElement(DeviceApprovalPage) }));
+  assert.match(html, /data-debug-id="device-approval-back-btn"[^>]*>[\s\S]*?Back/);
+  assert.ok(html.indexOf('device-approval-back-btn') < html.indexOf('device-approval-code-input'), 'Back comes before the code input');
+});

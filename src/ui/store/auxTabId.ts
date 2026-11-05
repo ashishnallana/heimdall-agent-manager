@@ -17,6 +17,7 @@
  *   preview {session, port}  -> 'preview__<sessionId>:<port>' (or 'preview__<sessionId>' when the port is unknown)
  *   subagentChat {agentId}   -> 'subagent_convo__<agentInstanceId>'
  *   artifact {artifactId}    -> 'artifact__<artifactId>'
+ *   ticket {chainId, taskId} -> 'ticket__<chainId>:<taskId>' (one tab per ticket)
  *
  * `__` separates the type tag from the payload; payloads are embedded
  * verbatim, so decoding is by prefix only. Transient parameters (a file path to
@@ -35,6 +36,7 @@ export const AUX_TAB_KINDS = [
   'preview',
   'subagentChat',
   'artifact',
+  'ticket',
 ] as const;
 
 export type AuxTabKind = (typeof AUX_TAB_KINDS)[number];
@@ -56,7 +58,14 @@ export type AuxContent =
   | { type: 'agentPty'; agentInstanceId: string }
   | { type: 'preview'; sessionId: string; port?: number; path?: string }
   | { type: 'subagentChat'; agentInstanceId: string }
-  | { type: 'artifact'; artifactId: string };
+  | { type: 'artifact'; artifactId: string }
+  | {
+      type: 'ticket';
+      chainId: string;
+      taskId: string;
+      /** Transient: the section to scroll to / select once the tab mounts. */
+      focus?: 'decision' | 'requirement_changes' | null;
+    };
 
 export interface AuxTab {
   /** Content-derived id, see {@link auxTabId}. */
@@ -97,6 +106,7 @@ const TAB_ID_PREFIXES = {
   preview: 'preview__',
   subagentChat: 'subagent_convo__',
   artifact: 'artifact__',
+  ticket: 'ticket__',
 } as const;
 
 const FIXED_TAB_IDS: Record<string, AuxContent> = {
@@ -136,6 +146,8 @@ export function auxTabId(content: AuxContent): string {
       return `${TAB_ID_PREFIXES.subagentChat}${clean(content.agentInstanceId)}`;
     case 'artifact':
       return `${TAB_ID_PREFIXES.artifact}${clean(content.artifactId)}`;
+    case 'ticket':
+      return `${TAB_ID_PREFIXES.ticket}${clean(content.chainId)}:${clean(content.taskId)}`;
   }
 }
 
@@ -179,6 +191,13 @@ export function decodeAuxTabId(id: string | null | undefined): AuxContent | null
     const artifactId = id.slice(TAB_ID_PREFIXES.artifact.length);
     return artifactId ? { type: 'artifact', artifactId } : null;
   }
+  if (id.startsWith(TAB_ID_PREFIXES.ticket)) {
+    // Chain ids carry no ':'; the task id is everything after the first one.
+    const payload = id.slice(TAB_ID_PREFIXES.ticket.length);
+    const sep = payload.indexOf(':');
+    if (sep <= 0 || sep === payload.length - 1) return null;
+    return { type: 'ticket', chainId: payload.slice(0, sep), taskId: payload.slice(sep + 1) };
+  }
   return null;
 }
 
@@ -200,6 +219,8 @@ export function isAuxContent(value: unknown): value is AuxContent {
       return clean(v.agentInstanceId).length > 0;
     case 'artifact':
       return clean(v.artifactId).length > 0;
+    case 'ticket':
+      return clean(v.chainId).length > 0 && !clean(v.chainId).includes(':') && clean(v.taskId).length > 0;
     default:
       return false;
   }
@@ -234,6 +255,8 @@ export function normalizeAuxContent(content: AuxContent): AuxContent {
       return { ...content, agentInstanceId: clean(content.agentInstanceId) };
     case 'artifact':
       return { ...content, artifactId: clean(content.artifactId) };
+    case 'ticket':
+      return { ...content, chainId: clean(content.chainId), taskId: clean(content.taskId) };
     default:
       return { ...content };
   }
@@ -311,6 +334,13 @@ export const AUX_TAB_REGISTRY: Record<AuxTabKind, AuxTabDescriptor> = {
     description: 'Inspect an artifact and its versioned content.',
     multiInstance: true,
   },
+  ticket: {
+    kind: 'ticket',
+    label: 'Ticket',
+    shortLabel: 'Ticket',
+    description: 'One ticket: requirements, agents, attempts and activity.',
+    multiInstance: true,
+  },
 };
 
 /** Default human title for a tab (the strip renders this). */
@@ -331,6 +361,9 @@ export function auxTabTitle(tab: Pick<AuxTab, 'content' | 'title'>): string {
       return c.agentInstanceId.slice(0, 12) || 'Sub-agent';
     case 'artifact':
       return c.artifactId.slice(0, 12) || 'Artifact';
+    case 'ticket':
+      // The opener passes "T-21 Bridges auto-update"; this is the bare fallback.
+      return 'Ticket';
     default:
       return AUX_TAB_REGISTRY[c.type].label;
   }
@@ -341,7 +374,7 @@ export function auxTabTitle(tab: Pick<AuxTab, 'content' | 'title'>): string {
  */
 export function resolveLegacyPanelToAuxContent(
   panel: string | null | undefined,
-  params: { filePath?: string | null; taskId?: string | null } = {},
+  params: { filePath?: string | null; taskId?: string | null; chainId?: string | null } = {},
 ): AuxContent | null {
   switch ((panel || '').trim()) {
     case 'files':
@@ -353,8 +386,13 @@ export function resolveLegacyPanelToAuxContent(
     case 'chainOverview':
     case 'overview':
       return { type: 'chainOverview' };
-    case 'tasks':
-      return { type: 'tasks', ...(params.taskId ? { taskId: params.taskId } : {}) };
+    case 'tasks': {
+      // A ticket deep link opens that ticket's own tab when the chain is known.
+      const chainId = clean(params.chainId);
+      const taskId = clean(params.taskId);
+      if (chainId && taskId) return { type: 'ticket', chainId, taskId };
+      return { type: 'tasks', ...(taskId ? { taskId } : {}) };
+    }
     default:
       return null;
   }

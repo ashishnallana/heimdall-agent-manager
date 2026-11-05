@@ -20,16 +20,14 @@
  *     One upside falls out of it: switching tabs re-fetches nothing, because both
  *     tabs are views onto the same loaded stream.
  *
- *  2. **Bulk verbs exist on Active only.** An archived project can be edited but
- *     not restored — no endpoint un-archives (`project_service.odin:245-250`) — so
- *     the Archived tab has no bulk verb at all, and it therefore shows no
- *     checkboxes and no bulk bar. Offering a selection model with nothing to do
- *     with it is the Archived-tab lesson from Memory.
+ *  2. **Bulk verbs exist on Active only.** An archived project is edited or
+ *     unarchived one at a time, so the Archived tab shows no checkboxes and no
+ *     bulk bar.
  *
- *  3. **Archive confirms and does not offer undo.** Memory's single reject is
- *     undoable, so it uses a toast with an Undo. Nothing here is undoable, so
- *     every archive — single or bulk — goes through the confirm, and the confirm
- *     says what archiving does and does not do to the project's chains and agents.
+ *  3. **Archive confirms; Unarchive does not.** Every archive — single or bulk —
+ *     goes through the confirm, which says what archiving does and does not do to
+ *     the project's chains and agents. Unarchive only puts a project back in the
+ *     Active list, so it runs at once.
  */
 import React from 'react';
 import {
@@ -68,6 +66,7 @@ import {
   searchProjectPage,
   projectErrorText,
   useArchiveProjectMutation,
+  useUnarchiveProjectMutation,
   type ProjectHit,
   type ProjectRecord,
 } from '../../api/endpoints/projects';
@@ -269,6 +268,24 @@ export default function ProjectListPage({ selectedId = '' }: { selectedId?: stri
   const [busyRow, setBusyRow] = React.useState('');
 
   const [archiveProject] = useArchiveProjectMutation();
+  const [unarchiveProject] = useUnarchiveProjectMutation();
+
+  // Unarchive is the safe direction, so it runs at once with no confirm.
+  const runUnarchive = React.useCallback(
+    async (projectId: string) => {
+      setBusyRow(projectId);
+      try {
+        const saved = await unarchiveProject({ projectId }).unwrap();
+        list.patchItem(projectId, (prev) => ({ ...prev, state: 'active', updatedAt: String((saved as any)?.updated_at || prev.updatedAt) }));
+        pushToast({ tone: 'success', title: 'Project unarchived' });
+      } catch (err) {
+        pushToast({ tone: 'danger', title: "Couldn't unarchive this project", message: projectErrorText(err) });
+      } finally {
+        setBusyRow('');
+      }
+    },
+    [unarchiveProject, list, pushToast],
+  );
 
   const runArchive = React.useCallback(
     async (projectId: string) => {
@@ -571,6 +588,10 @@ export default function ProjectListPage({ selectedId = '' }: { selectedId?: stri
                 if (verb === 'edit') {
                   rememberRow(target.projectId);
                   navigateTo(projectEditHref(target.projectId));
+                  return;
+                }
+                if (verb === 'unarchive') {
+                  void runUnarchive(target.projectId);
                   return;
                 }
                 // Archive always confirms. Nothing here is undoable, so there is no

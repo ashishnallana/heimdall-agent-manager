@@ -12,8 +12,8 @@
  *     original REQ-UI-3 ruling was about "no provider/model tabs", not state tabs.
  *     Active and Archived tabs are present.
  *
- *  3. **Bulk verbs on Active only.** Archived agents get no bulk action (no
- *     restore endpoint), same ruling as Projects.
+ *  3. **Bulk verbs on Active only.** Archived agents are unarchived one at a
+ *     time (no confirm), same ruling as Projects.
  *
  *  4. **WS live updates via focus-refetch.** The WS patches the RTK `listAgents`
  *     cache for other consumers; the infinite list stays consistent via on-focus
@@ -59,6 +59,7 @@ import {
   searchAgentPage,
   agentErrorText,
   useArchiveAgentIdentityMutation,
+  useUnarchiveAgentIdentityMutation,
   useListAgentInstancesQuery,
   useStopAgentInstanceMutation,
   useRestartAgentInstanceMutation,
@@ -234,6 +235,24 @@ export default function AgentListPage({ selectedId = '' }: { selectedId?: string
   const [busyRow, setBusyRow] = React.useState('');
 
   const [archiveAgent] = useArchiveAgentIdentityMutation();
+  const [unarchiveAgent] = useUnarchiveAgentIdentityMutation();
+
+  // Unarchive is the safe direction, so it runs at once with no confirm.
+  const runUnarchive = React.useCallback(
+    async (agentId: string) => {
+      setBusyRow(agentId);
+      try {
+        const saved = await unarchiveAgent({ agentId }).unwrap();
+        list.patchItem(agentId, (prev) => ({ ...prev, state: 'active', updatedAt: String((saved as any)?.updated_at || prev.updatedAt) }));
+        pushToast({ tone: 'success', title: 'Agent unarchived' });
+      } catch (err) {
+        pushToast({ tone: 'danger', title: "Couldn't unarchive this agent", message: agentErrorText(err) });
+      } finally {
+        setBusyRow('');
+      }
+    },
+    [unarchiveAgent, list, pushToast],
+  );
 
   const runArchive = React.useCallback(
     async (agentId: string) => {
@@ -628,6 +647,10 @@ export default function AgentListPage({ selectedId = '' }: { selectedId?: string
                 if (verb === 'edit') {
                   rememberRow(target.agentId);
                   navigateTo(agentEditHref(target.agentId));
+                  return;
+                }
+                if (verb === 'unarchive') {
+                  void runUnarchive(target.agentId);
                   return;
                 }
                 setConfirm({ ids: [target.agentId] });

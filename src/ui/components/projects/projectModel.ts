@@ -111,38 +111,29 @@ export const FILTER_PAGE_CAP = 5;
  * Verbs
  * ------------------------------------------------------------------ */
 
-export type ProjectVerb = 'edit' | 'archive';
+export type ProjectVerb = 'edit' | 'archive' | 'unarchive';
 
-/**
- * What a row offers, by state.
- *
- * An archived project gets **Edit but no Restore**: `update` has no state
- * precondition so editing genuinely works, while un-archiving has no endpoint at
- * all. Offering a Restore that 404s — or a Restore that silently does nothing —
- * would be worse than offering none, and this is the Archived-tab lesson from
- * Memory applied to a resource whose terminal state really is terminal.
- */
+/** What a row offers, by state: an archived project can be edited and unarchived. */
 export function verbsForState(state: ProjectState): ProjectVerb[] {
-  return state === 'archived' ? ['edit'] : ['edit', 'archive'];
+  return state === 'archived' ? ['edit', 'unarchive'] : ['edit', 'archive'];
 }
 
 export const VERB_LABEL: Record<ProjectVerb, string> = {
   edit: 'Edit',
   archive: 'Archive',
+  unarchive: 'Unarchive',
 };
 
 /**
- * The archive confirm's body. It carries two facts the user cannot recover from
- * afterwards and cannot see anywhere else: archiving does NOT cascade
- * (`project_service.odin:242-244` — chains, tasks and instances are untouched), and
- * the hub has no way back.
+ * The archive confirm's body. Archiving does NOT cascade: chains, tasks and
+ * instances are untouched, and Unarchive puts the project back.
  */
 export function archiveConfirmBody(names: string[]): string {
   const subject =
     names.length === 1
       ? `“${names[0]}”`
       : `${names.length} projects`;
-  return `Archiving ${subject} only takes ${names.length === 1 ? 'it' : 'them'} out of the Active list — chains, agents and memories keep working, and nothing is deleted. Ninjy can't un-archive from here.`;
+  return `Archiving ${subject} only takes ${names.length === 1 ? 'it' : 'them'} out of the Active list — chains, agents and memories keep working, and nothing is deleted. You can unarchive ${names.length === 1 ? 'it' : 'them'} later.`;
 }
 
 /* ------------------------------------------------------------------ *

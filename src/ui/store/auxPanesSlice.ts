@@ -260,8 +260,14 @@ const auxPanesSlice = createSlice({
         return;
       }
       const wasActive = pane.activeTabId === tabId;
+      const closed = pane.tabs[idx];
       pane.tabs.splice(idx, 1);
       if (wasActive) {
+        // Closing a ticket tab returns to the Tickets board (ticket spec click map).
+        if (closed.content.type === 'ticket') {
+          upsertTab(pane, { type: 'tasks' });
+          return;
+        }
         const next = pane.tabs[idx] ?? pane.tabs[idx - 1];
         pane.activeTabId = next ? next.id : NEW_TAB_ID;
       }

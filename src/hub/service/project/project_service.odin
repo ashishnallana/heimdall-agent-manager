@@ -266,6 +266,16 @@ archive_project :: proc(service: ^Project_Service, auth: contracts.Auth_Context,
 	return iface.project_update(service.projects, project)
 }
 
+// unarchive_project returns an archived project to Active (the reverse of
+// archive_project). The slug stays reserved while archived, so it cannot clash.
+unarchive_project :: proc(service: ^Project_Service, auth: contracts.Auth_Context, project_id: domain.Project_ID) -> (domain.Project, bool, domain.Domain_Error) {
+	project, ok, err := get(service, auth, project_id)
+	if !ok do return domain.Project{}, false, err
+	project.state = .Active
+	project.updated_at = platform.clock_now(service.clock)
+	return iface.project_update(service.projects, project)
+}
+
 set_bridge_path :: proc(service: ^Project_Service, auth: contracts.Auth_Context, project_id: domain.Project_ID, bridge_id: string, input: Bridge_Path_Input) -> (domain.Project_Bridge_Path, bool, domain.Domain_Error) {
 	project, ok, err := get(service, auth, project_id)
 	if !ok do return domain.Project_Bridge_Path{}, false, err
