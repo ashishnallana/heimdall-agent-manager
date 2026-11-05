@@ -1189,12 +1189,14 @@ html[data-window-chrome="win-overlay"][data-window-fullscreen] .window-gate-drag
    only changes their opacity. The fade paints the list's own background colour
    (--chat-pin-bg, "r g b") over the strip instead of masking the scroller, whose mask
    change rebuilt WebKit's scrolling layer and stopped the first scroll-up. */
+/* The pin tail starts flush under the header: a solid lead over the scroller's top
+   padding (--chat-pin-lead), then the same fade as before over the slot above the bubble. */
 .ui-chat-pin-tail-fade {
   position: absolute;
   inset: 0 0 auto 0;
   z-index: 10;
   pointer-events: none;
-  background: linear-gradient(to bottom, rgb(var(--chat-pin-bg, 15 15 15) / 1), rgb(var(--chat-pin-bg, 15 15 15) / 0.7) 45%, rgb(var(--chat-pin-bg, 15 15 15) / 0.7) calc(100% - 6px), rgb(var(--chat-pin-bg, 15 15 15) / 0));
+  background: linear-gradient(to bottom, rgb(var(--chat-pin-bg, 15 15 15) / 1), rgb(var(--chat-pin-bg, 15 15 15) / 1) var(--chat-pin-lead, 0px), rgb(var(--chat-pin-bg, 15 15 15) / 0.7) calc(var(--chat-pin-lead, 0px) + (100% - var(--chat-pin-lead, 0px)) * 0.45), rgb(var(--chat-pin-bg, 15 15 15) / 0.7) calc(100% - 6px), rgb(var(--chat-pin-bg, 15 15 15) / 0));
 }
 .ui-chat-pin-tail-blur {
   position: absolute;
@@ -1203,10 +1205,28 @@ html[data-window-chrome="win-overlay"][data-window-fullscreen] .window-gate-drag
   pointer-events: none;
   -webkit-backdrop-filter: blur(1.5px);
   backdrop-filter: blur(1.5px);
-  -webkit-mask-image: linear-gradient(to bottom, transparent, #000 35%, #000 75%, transparent);
-  mask-image: linear-gradient(to bottom, transparent, #000 35%, #000 75%, transparent);
+  -webkit-mask-image: linear-gradient(to bottom, #000, #000 calc(var(--chat-pin-lead, 0px) + (100% - var(--chat-pin-lead, 0px)) * 0.75), transparent);
+  mask-image: linear-gradient(to bottom, #000, #000 calc(var(--chat-pin-lead, 0px) + (100% - var(--chat-pin-lead, 0px)) * 0.75), transparent);
+}
+/* REQ-FADE-1: the always-on edge under the header, the same blur + fade, shorter. */
+.ui-chat-top-edge-fade {
+  position: absolute;
+  inset: 0 0 auto 0;
+  z-index: 10;
+  pointer-events: none;
+  background: linear-gradient(to bottom, rgb(var(--chat-pin-bg, 15 15 15) / 1), rgb(var(--chat-pin-bg, 15 15 15) / 0.7) 45%, rgb(var(--chat-pin-bg, 15 15 15) / 0));
+}
+.ui-chat-top-edge-blur {
+  position: absolute;
+  inset: 0 0 auto 0;
+  z-index: 10;
+  pointer-events: none;
+  -webkit-backdrop-filter: blur(1.5px);
+  backdrop-filter: blur(1.5px);
+  -webkit-mask-image: linear-gradient(to bottom, #000, #000 50%, transparent);
+  mask-image: linear-gradient(to bottom, #000, #000 50%, transparent);
 }
 @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
-  /* The colour fade alone still reads as faded history. */
-  .ui-chat-pin-tail-blur { display: none; }
+  /* REQ-FROST-3 pattern: the colour fade alone still reads as faded history. */
+  .ui-chat-pin-tail-blur, .ui-chat-top-edge-blur { display: none; }
 }

@@ -143,6 +143,15 @@ export function pinFadeFor(distanceFromMax: number): number {
   return distance <= 1 ? 1 : Math.max(0, 1 - distance / PIN_FADE_RANGE_PX);
 }
 
+// REQ-FADE-1..3: the always-on top edge strip, flush under the header. It fades in over
+// the first TOP_FADE_PX of scroll (at the very top there is nothing to dissolve) and
+// hands over to the pin tail as that one fades in, so the two never stack into a
+// double-dark band.
+export const TOP_FADE_PX = 32;
+export function topFadeFor(scrollTop: number, pinFade: number): number {
+  return Math.min(1, Math.max(0, scrollTop) / TOP_FADE_PX) * (1 - pinFade);
+}
+
 function cssPx(el: Element, prop: 'paddingTop' | 'paddingBottom' | 'paddingLeft' | 'borderTopWidth' | 'borderLeftWidth' | 'lineHeight'): number {
   const style = el.ownerDocument.defaultView?.getComputedStyle(el);
   return parseFloat(style?.[prop] ?? '') || 0;
@@ -425,6 +434,8 @@ export default function ChatMessageList({
   const turnSpacerRef = useRef<HTMLDivElement | null>(null);
   const tailBlurRef = useRef<HTMLDivElement | null>(null);
   const tailFadeRef = useRef<HTMLDivElement | null>(null);
+  const edgeBlurRef = useRef<HTMLDivElement | null>(null);
+  const edgeFadeRef = useRef<HTMLDivElement | null>(null);
   const messageCountRef = useRef(messages.length);
   messageCountRef.current = messages.length;
   // How far the exchange reaches past the view (0 for a short reply): the pin position
@@ -485,6 +496,10 @@ export default function ChatMessageList({
     const value = String(Math.round(fade * 1000) / 1000);
     for (const overlay of [tailBlurRef.current, tailFadeRef.current]) {
       if (overlay && overlay.style.opacity !== value) overlay.style.opacity = value;
+    }
+    const edge = String(Math.round(topFadeFor(node.scrollTop, fade) * 1000) / 1000);
+    for (const overlay of [edgeBlurRef.current, edgeFadeRef.current]) {
+      if (overlay && overlay.style.opacity !== edge) overlay.style.opacity = edge;
     }
   }, []);
 
@@ -825,6 +840,14 @@ export default function ChatMessageList({
     }
   }, [clearPinMotion, conversationKey, messages, pinRow, scrollToBottom, setPinKey, sizeTurnSpacer, writeScrollTop]);
 
+  // The strips fade into the list's own background, measured per conversation (and again
+  // at each send, in pinRow).
+  useLayoutEffect(() => {
+    if (!pinEnabled) return;
+    setPinBackground(opaqueBackgroundRgb(scrollRef.current));
+    applyPinFade();
+  }, [applyPinFade, conversationKey, pinEnabled]);
+
   // Record the anchor for the top-trim compensation above, after every layout pass.
   useLayoutEffect(() => {
     const node = scrollRef.current;
@@ -1007,15 +1030,24 @@ export default function ChatMessageList({
     <div className={wrapperClassName}>
       {pinEnabled ? (
         // REQ-PIN-3 rev3: blur only the tail strip above the pinned bubble, then fade it
-        // into the list's own background. Both overlays sit outside the scroller and only
-        // their opacity follows the scroll (applyPinFade).
+        // into the list's own background. REQ-FADE-1..2: the always-on edge strip below the
+        // header is the base layer, handing over to the tail while a send is pinned. All
+        // four overlays sit outside the scroller and only their opacity follows the scroll
+        // (applyPinFade). The gap under the header was the tail starting at the scroller's
+        // top padding (`pinTop`): rows scrolling through that padding were cut at the
+        // wrapper edge. Both strips now start at 0, the tail with a solid lead over it.
         <>
+          <div ref={edgeBlurRef} data-debug-id={`${debugPrefix}-top-edge-blur`} aria-hidden="true"
+            className="ui-chat-top-edge-blur" style={{ height: TOP_FADE_PX, opacity: 0 }} />
+          <div ref={edgeFadeRef} data-debug-id={`${debugPrefix}-top-edge-fade`} aria-hidden="true"
+            className="ui-chat-top-edge-fade"
+            style={{ height: TOP_FADE_PX, opacity: 0, ...(pinBackground ? { ['--chat-pin-bg' as string]: pinBackground } : {}) }} />
           <div ref={tailBlurRef} data-debug-id={`${debugPrefix}-pin-tail-blur`} aria-hidden="true"
             className="ui-chat-pin-tail-blur"
-            style={{ top: pinTop, height: pinOffset - pinTop, opacity: 0 }} />
+            style={{ top: 0, height: pinOffset, opacity: 0, ['--chat-pin-lead' as string]: `${pinTop}px` }} />
           <div ref={tailFadeRef} data-debug-id={`${debugPrefix}-pin-tail-fade`} aria-hidden="true"
             className="ui-chat-pin-tail-fade"
-            style={{ top: pinTop, height: pinOffset - pinTop, opacity: 0, ...(pinBackground ? { ['--chat-pin-bg' as string]: pinBackground } : {}) }} />
+            style={{ top: 0, height: pinOffset, opacity: 0, ['--chat-pin-lead' as string]: `${pinTop}px`, ...(pinBackground ? { ['--chat-pin-bg' as string]: pinBackground } : {}) }} />
         </>
       ) : null}
       {/* Polite live region for scroll-to-match: announces the jump / paging / not-found

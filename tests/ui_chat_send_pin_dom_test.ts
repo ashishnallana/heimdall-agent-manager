@@ -6,7 +6,7 @@ import { createRoot } from 'react-dom/client';
 import { Provider } from 'react-redux';
 import { configureStore } from '@reduxjs/toolkit';
 import { JSDOM } from 'jsdom';
-import ChatMessageList, { PIN_TAIL_PX, PIN_TAIL_MAX_PX, pinOffsetFor, pinTailFor, pinSpacerFor, pinFadeFor, PIN_FADE_RANGE_PX, PIN_TRAVEL_MS, PIN_SETTLE_MS, PIN_ACTIVITY_DELAY_MS, PIN_EASE, PIN_EASE_X, PIN_SCROLL_IDLE_MS, JUMP_THRESHOLD_PX, cubicBezierAt, restingInsetFor } from '../src/ui/components/chat/ChatMessageList.tsx';
+import ChatMessageList, { PIN_TAIL_PX, PIN_TAIL_MAX_PX, pinOffsetFor, pinTailFor, pinSpacerFor, pinFadeFor, PIN_FADE_RANGE_PX, PIN_TRAVEL_MS, PIN_SETTLE_MS, PIN_ACTIVITY_DELAY_MS, PIN_EASE, PIN_EASE_X, PIN_SCROLL_IDLE_MS, JUMP_THRESHOLD_PX, cubicBezierAt, restingInsetFor, TOP_FADE_PX, topFadeFor } from '../src/ui/components/chat/ChatMessageList.tsx';
 import { useComposerDockInset } from '../src/ui/components/chat/MessageComposer.tsx';
 
 // REQ-PIN-1..6: send pin-to-top. JSDOM has no layout, so the fixture models one: a 600px
@@ -717,5 +717,37 @@ test('REQ-PIN-4c: the server echo arriving before the POST resolves neither re-p
     assert.equal(scroll.dataset.chatPinned, 'true');
     assert.equal(pinnedRow(env)!.getBoundingClientRect().top, top, 'no scroll-back');
     assert.equal(env.scrollToCalls(), calls);
+  });
+});
+
+test('REQ-FADE-1..3: the top edge strip is on whenever the list is scrolled off its top, and hands over to the pin tail', async () => {
+  assert.equal(topFadeFor(0, 0), 0, 'nothing to dissolve at the very top');
+  assert.equal(topFadeFor(TOP_FADE_PX / 2, 0), 0.5);
+  assert.equal(topFadeFor(5000, 0), 1);
+  assert.equal(topFadeFor(5000, 1), 0, 'the pin tail replaces it, no double band');
+  await withList(async (env) => {
+    const { q, render, list, geometry, settle } = env;
+    await render(list(longHistory));
+    const scroll = geometry();
+    const edge = () => {
+      assert.equal(q('pin-top-edge-fade')!.style.opacity, q('pin-top-edge-blur')!.style.opacity, 'blur and fade move together');
+      return q('pin-top-edge-fade')!.style.opacity;
+    };
+    assert.equal(q('pin-top-edge-fade')!.style.top, '', 'flush with the header: the strip starts at the wrapper top');
+    assert.equal(q('pin-top-edge-fade')!.style.height, `${TOP_FADE_PX}px`);
+    await scrollTo(scroll, 400);
+    assert.equal(scroll.dataset.chatPinned, undefined);
+    assert.equal(edge(), '1', 'on while not pinned');
+    await scrollTo(scroll, 0);
+    assert.equal(edge(), '0', 'off at the very top');
+    await render(list([...longHistory, msg('local_a', true, 'New question')]));
+    await settle();
+    assert.equal(fade(scroll), '1');
+    assert.equal(edge(), '0', 'the pin tail is the only strip at the pin position');
+    assert.equal(q('pin-pin-tail-fade')!.style.top, '0px', 'the tail starts flush under the header too');
+    await scrollTo(scroll, scroll.scrollTop - 200);
+    assert.equal(fade(scroll), '0');
+    assert.equal(edge(), '1', 'scrolled away from the pin, the edge strip is back');
+    scrollerUntouched(scroll);
   });
 });
