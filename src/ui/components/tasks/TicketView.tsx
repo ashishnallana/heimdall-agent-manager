@@ -27,7 +27,6 @@ import { TicketRequirementsCard } from './TicketRequirementsCard';
 import { TicketLinkedCard } from './TicketLinkedCard';
 import { TicketAttemptsCard } from './TicketAttemptsCard';
 import { TicketChangesCard } from './TicketChangesCard';
-import { TicketDetailsCard } from './TicketDetailsCard';
 import { TicketSkeleton } from './TicketCard';
 
 /** Below this width the side column stacks above the main column (REQ-T3). */
@@ -127,7 +126,6 @@ export const TicketView: React.FC<TicketViewProps> = ({ chainId, taskId, isMobil
   const [reqEditorOpen, setReqEditorOpen] = useState(false);
   const [activityTab, setActivityTab] = useState<ActivityTab>('all');
   const [reqView, setReqView] = useState<'current' | 'changes'>('current');
-  const [detailsOpen, setDetailsOpen] = useState(true);
   const [highlight, setHighlight] = useState(false);
   const decisionRef = useRef<HTMLDivElement>(null);
   const activityRef = useRef<HTMLDivElement>(null);
@@ -318,11 +316,6 @@ export const TicketView: React.FC<TicketViewProps> = ({ chainId, taskId, isMobil
             {it.label}
           </Menu.Item>
         ))}
-        {!workflowOwned && !finished && (
-          <Menu.Item data-debug-id="ticket-view-edit-bridge" onClick={() => setDetailsOpen(true)}>
-            Change bridge pin
-          </Menu.Item>
-        )}
         {more.filter((a) => a !== 'copy_id').map((a) => (
           <Menu.Item key={a} danger={a === 'cancel'} data-debug-id={`ticket-view-menu-${a}`} onClick={() => void runAction(a)}>
             {TASK_ACTION_LABELS[a]}
@@ -428,24 +421,6 @@ export const TicketView: React.FC<TicketViewProps> = ({ chainId, taskId, isMobil
     <TicketAgentsCard task={task} names={ctx.names} machines={ctx.machines} people={people} now={now} onOpenAgent={onOpenAgent} />
   );
 
-  const detailsCard = (
-    <TicketDetailsCard
-      task={task}
-      chainId={chainId}
-      names={ctx.names}
-      keys={ctx.keys}
-      fleets={ctx.fleets}
-      bridges={ctx.bridges}
-      open={detailsOpen}
-      onToggle={() => setDetailsOpen((o) => !o)}
-      actions={actions}
-      now={now}
-      locked={workflowOwned || finished}
-      onOpenTicket={(id) => onOpenTicket(id, ticketTabTitle(keyFor(ctx.keys, id), ctx.tasks.find((t) => t.task_id === id)?.title || ''))}
-      onCopy={copy}
-    />
-  );
-
   const composer = (
     <TaskComposer
       chainId={chainId}
@@ -531,7 +506,6 @@ export const TicketView: React.FC<TicketViewProps> = ({ chainId, taskId, isMobil
               {mainColumn}
               <aside className="flex flex-col gap-4" data-debug-id="ticket-view-side-column">
                 {agentsCard}
-                {detailsCard}
               </aside>
             </div>
           ) : (
@@ -540,7 +514,6 @@ export const TicketView: React.FC<TicketViewProps> = ({ chainId, taskId, isMobil
                 {agentsCard}
               </div>
               {mainColumn}
-              {detailsCard}
             </>
           )}
         </div>

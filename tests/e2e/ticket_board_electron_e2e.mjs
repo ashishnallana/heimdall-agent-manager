@@ -310,7 +310,7 @@ await step('REQ-T1: a card opens its own "T-n Title" tab; a second click focuses
 });
 
 await step('REQ-T3: toolbar, header, requirements, linked tickets, attempts, activity and details render', async () => {
-  for (const id of ['ticket-view-toolbar', 'ticket-view-header', 'ticket-view-title', 'ticket-view-requirements', 'ticket-view-linked', 'ticket-view-attempts', 'ticket-activity', 'ticket-view-details', 'ticket-view-agents']) await visible(id);
+  for (const id of ['ticket-view-toolbar', 'ticket-view-header', 'ticket-view-title', 'ticket-view-requirements', 'ticket-view-linked', 'ticket-view-attempts', 'ticket-activity', 'ticket-view-agents']) await visible(id);
   assert.match(await S('ticket-view-toolbar').innerText(), /T-2 · \d+ of \d+/);
 });
 
@@ -417,24 +417,6 @@ await step('comment send posts the comment and clears the bar', async () => {
   await until('composer cleared', async () => (await box.inputValue()) === '');
   await S('ticket-activity-tab-comments').click();
   await until('comment shows', async () => /E2E comment from the ticket tab/.test(await S('ticket-activity').innerText()), 20_000);
-});
-
-await step('Details: priority select changes the priority; More fields shows the id; Copy ID copies it', async () => {
-  await S('ticket-view-priority-select').click();
-  await page.locator('[role="option"]', { hasText: /P1/ }).first().click();
-  await until('priority saved', async () => String((await taskState(chainId, t1))?.priority).toLowerCase() === 'p1');
-  await S('ticket-view-more-fields-btn').click();
-  assert.match(await S('ticket-view-details').innerText(), new RegExp(t1));
-  await S('ticket-view-copy-id-btn').click();
-  assert.equal(await until('clipboard id', async () => ((await clipboard()) === t1 ? t1 : null)), t1);
-  await S('ticket-view-details-toggle').click();
-  await S('ticket-view-details-toggle').click();
-});
-
-await step('Details: bridge pin select opens its options', async () => {
-  await S('ticket-view-bridge-select').click();
-  assert.ok((await page.locator('[role="option"]').count()) >= 1);
-  await pressEscape();
 });
 
 await step('Changes section expands on first open', async () => {

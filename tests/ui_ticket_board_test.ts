@@ -506,7 +506,7 @@ test('board render: empty chain offers New ticket', async () => {
   assert.match(html, /data-debug-id="task-board-empty-new-task-btn"/);
 });
 
-test('ticket tab render: toolbar, title, decision block, requirements, details and activity tabs', async () => {
+test('ticket tab render: toolbar, title, decision block, requirements and activity tabs, no Details card', async () => {
   const { TicketView } = await import('../src/ui/components/tasks/TicketView.tsx');
   const { tasksApi } = await import('../src/ui/api/endpoints/tasks.ts');
   const task = makeTask({
@@ -536,7 +536,8 @@ test('ticket tab render: toolbar, title, decision block, requirements, details a
   assert.match(html, /data-debug-id="ticket-view-requirements"/);
   assert.match(html, />Edited</);
   assert.match(html, />New</);
-  assert.match(html, /data-debug-id="ticket-view-details"/);
+  assert.doesNotMatch(html, /data-debug-id="ticket-view-details"/, "the Details card is gone");
+  assert.doesNotMatch(html, /data-debug-id="ticket-view-edit-bridge"/);
   assert.match(html, /data-debug-id="ticket-activity-tab-requirements"/);
   assert.match(html, /data-debug-id="comment-composer"/);
 });
@@ -569,7 +570,6 @@ const NEW_FILES = [
   'src/ui/components/tasks/TicketLinkedCard.tsx',
   'src/ui/components/tasks/TicketAttemptsCard.tsx',
   'src/ui/components/tasks/TicketChangesCard.tsx',
-  'src/ui/components/tasks/TicketDetailsCard.tsx',
   'src/ui/components/tasks/HoldReasonDialog.tsx',
   'src/ui/components/tasks/TicketActivity.tsx',
   'src/ui/components/tasks/RequirementsEditorModal.tsx',
