@@ -600,3 +600,16 @@ test('REQ-Q1: every button, input, select and textarea in the new views has a da
     for (const tag of tags) assert.match(tag, /data-debug-id=/, `${rel}: ${tag.slice(0, 80)}`);
   }
 });
+
+test('avatar initials are one letter or digit, never a bracket from a "(model)" suffix', async () => {
+  const { initialsOf } = await import('../src/ui/components/ui/primitives/Avatar.tsx');
+  assert.equal(initialsOf('Safety Reviewer (gpt-6.1-sol)'), 'S');
+  assert.equal(initialsOf('coordinator'), 'C');
+  assert.equal(initialsOf('(gpt) helper'), 'G');
+  assert.equal(initialsOf('   '), '?');
+});
+
+test('activity rows top-align the avatar so a wrapped line does not stretch its ring', () => {
+  const src = fs.readFileSync(path.join(REPO_ROOT, 'src/ui/components/tasks/TicketActivity.tsx'), 'utf8');
+  assert.match(src, /data-debug-id="task-timeline-event" className="flex items-start gap-3"/);
+});

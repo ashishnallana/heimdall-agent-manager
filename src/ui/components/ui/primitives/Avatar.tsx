@@ -39,11 +39,13 @@ const SHAPE_RADIUS: Record<AvatarShape, string> = {
 };
 
 /** First letters of the first two words, uppercased (e.g. "Ada Lovelace" -> "AL"). */
-function initialsOf(name: string): string {
-  const parts = name.trim().split(/\s+/).filter(Boolean);
-  if (parts.length === 0) return '?';
-  if (parts.length === 1) return parts[0].slice(0, 1).toUpperCase();
-  return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
+/**
+ * One glyph: the first letter or digit of the name. A single character keeps
+ * names like "Safety Reviewer (gpt-6.1-sol)" from rendering as "S(".
+ */
+export function initialsOf(name: string): string {
+  const first = name.match(/[\p{L}\p{N}]/u);
+  return first ? first[0].toUpperCase() : '?';
 }
 
 export interface AvatarProps extends RootClassNameProps {

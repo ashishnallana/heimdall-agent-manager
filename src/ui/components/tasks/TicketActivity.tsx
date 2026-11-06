@@ -186,7 +186,7 @@ const EventRow = React.memo(function EventRow({ event: e, chainId, taskId, names
   const text = useMemo(() => describeTaskEvent(e, names).text, [e, names]);
   const attemptNo = Number(e.payload?.attempt_no) || 0;
   return (
-    <li data-debug-id="task-timeline-event" className="flex gap-3">
+    <li data-debug-id="task-timeline-event" className="flex items-start gap-3">
       <TicketAgentAvatar name={actor} state="idle" />
       <span className="min-w-0 flex-1">
         <span className="block text-body-sm text-primary">
