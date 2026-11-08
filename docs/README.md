@@ -109,6 +109,7 @@ Proposals and implementation plans. Check each document's `Status:` line: some a
 
 - [plans/alternate-buffer-handling-plan.md](plans/alternate-buffer-handling-plan.md): plan to support alternate terminal buffers (for example Neovim) across live streaming, late joins and reconnects; implementation not started.
 - [plans/antigravity-provider-extension.md](plans/antigravity-provider-extension.md): architecture and execution plan for an Antigravity provider extension (proposed).
+- [plans/bridge-auth-resume-recovery.md](plans/bridge-auth-resume-recovery.md): plan for Bridge credential recovery after laptop sleep past access-token expiry (expiry-aware acquisition, single-flight fenced refresh, wakeable scheduling); proposed, not implemented.
 - [plans/db-latency-telemetry.md](plans/db-latency-telemetry.md): plan for hub DB call latency and lock-contention telemetry; phase 1 is documented in [reference/db-telemetry.md](reference/db-telemetry.md).
 - [plans/favorite-conversation-launch-plan.md](plans/favorite-conversation-launch-plan.md): favorite-agent cards above the shared conversation composer (implemented in the working tree at the time).
 - [plans/instance-reconfiguration-plan.md](plans/instance-reconfiguration-plan.md): reconfiguring agent instances without context handoff.
