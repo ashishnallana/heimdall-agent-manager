@@ -49,8 +49,16 @@ def check_source_premises():
     assert int(re.search(r"BRIDGE_REFRESH_RETRY_GRACE_SECONDS :: (\d+)", tokens).group(1)) == RETRY_GRACE
     # Any non-"expired" Unauthenticated/Forbidden at upgrade is reported as revoked.
     assert "code := BRIDGE_WS_CREDENTIAL_REVOKED_CODE" in proc(handlers, "bridge_ws_auth_error")
+    # Repository errors are discarded and read as "not found" (-> invalid / invalid_grant).
+    assert "row, ok, _ := iface.bridge_get_token(service.repo, token_id)" in proc(tokens, "refresh_bridge_token")
+    assert "row, ok, _ := iface.bridge_get_token(service.repo, token_id)" in proc(tokens, "verify_access_token_scoped")
+    assert "bridge, bridge_ok, _ := iface.bridge_get_bridge(service.repo, row.bridge_id)" in proc(tokens, "rotate_from")
+    # A bare 401 (no typed body) becomes Unauthenticated, which the refresh path treats as final.
+    assert "if resp.status == 401 do err.code = .Unauthenticated" in proc(src("src/bridge/retry_budget.odin"), "bridge_operation_http_error")
+    assert "if err.code == .Unauthenticated do bridge_hub_stop_traffic(true)" in proc(flow, "bridge_credential_refresh_typed")
     print("SOURCE_PREMISES ok (relative refresh sleep, fixed 60s pause, no renewal on "
-          "bridge_token_expired, unconditional reauth clear, no credential generation)")
+          "bridge_token_expired, unconditional reauth clear, no credential generation, "
+          "Hub repo errors read as invalid, bare 401 final on refresh)")
 
 
 ACCESS_TTL, HUB_SKEW, REFRESH_TTL, RETRY_GRACE = 3600, 60, 30 * 86400, 600
@@ -60,9 +68,11 @@ OLD_DELAY = 2880                           # 80% of 3600 at jitter byte 128
 
 
 class World:
-    def __init__(self, suspends=(), offline=(), hub_down=(), wall_jumps=()):
+    def __init__(self, suspends=(), offline=(), hub_down=(), wall_jumps=(), proxy_401=(), repo_blip=()):
         self.suspends, self.offline, self.hub_down = suspends, offline, hub_down
         self.wall_jumps = wall_jumps
+        self.proxy_401 = proxy_401  # gateway answers a bare 401 (no typed body) before the Hub
+        self.repo_blip = repo_blip  # Hub repository errors (H0: Internal_Error, never invalid)
 
     @staticmethod
     def inside(t, spans):
@@ -88,7 +98,9 @@ class Hub:
         self.gen, self.issued, self.rotated = 1, {1: 0}, {}
         self.used, self.revoked, self.exchanges = set(), False, 0
 
-    def access(self, gen, t):
+    def access(self, gen, t, blip=False):
+        if blip:
+            return "internal_error"  # H0: transient, not "invalid"/revoked
         if self.revoked:
             return "revoked"
         if t > self.issued[gen] + ACCESS_TTL + HUB_SKEW:
@@ -101,8 +113,10 @@ class Hub:
         self.issued[self.gen] = t
         return self.gen
 
-    def refresh(self, gen, rid, t):
+    def refresh(self, gen, rid, t, blip=False):
         self.exchanges += 1
+        if blip:
+            return "internal_error"  # H0: repository error never becomes invalid_grant
         if self.revoked or t > self.issued[gen] + REFRESH_TTL + HUB_SKEW:
             return None
         if gen == self.gen:
@@ -167,7 +181,16 @@ class Bridge:
         if self.window is None or m - self.window > BUDGET_WINDOW:
             self.window, self.attempts = m, 0
         self.exchange_attempts += 1
-        if not self.w.net(t):
+        bare_401 = self.w.inside(t, self.w.proxy_401)
+        blip = self.w.inside(t, self.w.repo_blip)
+        new = None
+        if not bare_401 and self.w.net(t):
+            if self.disk["rid"] is None:
+                self.disk["rid"] = self.rng.randrange(1 << 60)  # durable before send
+            new = self.hub.refresh(self.disk["refresh"], self.disk["rid"], t, blip=blip)
+        # Only a typed invalid_grant body from the Hub is final; a bare 401 and
+        # an Internal_Error are transient and use the bounded budget.
+        if not self.w.net(t) or bare_401 or new == "internal_error":
             self.offline_attempts += 1
             self.attempts += 1
             if self.attempts < BUDGET_ATTEMPTS:
@@ -177,9 +200,6 @@ class Bridge:
                 self.window = None
                 self.next_attempt = m + (self.jitter(PAUSE) if self.design == "new" else PAUSE)
             return
-        if self.disk["rid"] is None:
-            self.disk["rid"] = self.rng.randrange(1 << 60)  # durable before send
-        new = self.hub.refresh(self.disk["refresh"], self.disk["rid"], t)
         if self.crash and self.crash[0] == "after_hub_rotation" and t >= self.crash[1]:
             self.alive, self.crash = False, None  # reply lost; nothing persisted
             return
@@ -228,7 +248,10 @@ class Bridge:
         if not self.w.net(t):
             self.next_dial = m + self.backoff()
             return
-        result = self.hub.access(self.cred, t)
+        result = self.hub.access(self.cred, t, blip=self.w.inside(t, self.w.repo_blip))
+        if result == "internal_error":
+            self.next_dial = m + self.backoff()
+            return
         if result == "ok":
             self.connected, self.session_gen, self.dial_failures = True, self.cred, 0
             if self.connected_since is None:
@@ -246,7 +269,8 @@ class Bridge:
         if self.state != "ok":
             return
         m = self.w.mono(t)
-        if self.connected and (not self.w.net(t) or self.hub.access(self.session_gen, t) != "ok"):
+        if self.connected and (not self.w.net(t) or self.hub.access(
+                self.session_gen, t, blip=self.w.inside(t, self.w.repo_blip)) not in ("ok", "internal_error")):
             self.connected = False
             if self.hub.revoked:
                 self.state = "reenroll_required"
@@ -306,6 +330,16 @@ def scenarios():
     b, hub, _ = run("new", w, until=resume2 + 3600)
     assert b.state == "reenroll_required" and hub.exchanges == 1 and b.dials <= 2
     print(f"S2 sleep_past_refresh state={b.state} exchanges={hub.exchanges} dials_total={b.dials}")
+    # 2b. A gateway's bare 401 at wake is transient: pair kept, recovers after it clears.
+    w = World(suspends=[(600, resume)], proxy_401=[(resume, resume + 300)])
+    b, hub, d = run("new", w, until=resume + 2000)
+    assert b.state == "ok" and b.disk["refresh"] is not None and first_up_after(d, resume + 300) is not None
+    # 2c. Hub repository blip during refresh (H0): Internal_Error, retried, no wipe.
+    w = World(suspends=[(600, resume)], repo_blip=[(resume, resume + 90)])
+    b2, hub2, d2 = run("new", w, until=resume + 2000)
+    assert b2.state == "ok" and not hub2.revoked and first_up_after(d2, resume + 90) - (resume + 90) <= PAUSE * 1.2 + 5
+    print(f"S2b bare_401_at_wake state={b.state} pair_kept=True; S2c hub_repo_blip state={b2.state} "
+          f"recovered_after_blip_s={first_up_after(d2, resume + 90) - (resume + 90)}")
 
     # 3. Wall clock jumps (no suspend; the Hub clock is true time).
     b, hub, d = run("new", World(wall_jumps=[(1000, 7200)]), until=8000)
@@ -314,6 +348,20 @@ def scenarios():
     b2, hub2, d2 = run("new", World(wall_jumps=[(1000, -7200)]), until=8000)
     assert not [t for t, c in d2 if t > 5 and not c] and b2.state == "ok"
     print(f"S3 clock_forward exchanges={hub.exchanges} outage_s=0; clock_back exchanges={hub2.exchanges} outage_s=0")
+    # 3c. Suspend then a backward NTP step at wake: both age terms undercount, so
+    # recovery relies on the rejection-driven path (D3) -- also after a restart
+    # (no process-local anchor).
+    w = World(suspends=[(600, resume)], wall_jumps=[(resume, -7200)])
+    b3, hub3, d3 = run("new", w, until=resume + 600)
+    up3 = first_up_after(d3, resume)
+    assert up3 - resume <= 2 and b3.rejection_renewed and hub3.exchanges == 1
+    def restart(b, hub, t):
+        b.boot(t)
+    b4, hub4, d4 = run("new", w, until=resume + 600, hooks={resume: restart})
+    up4 = first_up_after(d4, resume)
+    assert up4 - resume <= 35 and b4.rejection_renewed and b4.expired_dials <= 1
+    print(f"S3c suspend_plus_backward_step via_rejection outage_s={up3 - resume}; after_restart "
+          f"outage_s={up4 - resume} expired_dials={b4.expired_dials}")
 
     # 4. Network offline at wake for 600s.
     w = World(suspends=[(600, resume)], offline=[(resume, resume + 600)])
@@ -354,7 +402,12 @@ def scenarios():
     b, hub, _ = run("new", World(), until=6000, hooks={1500: revoke})
     assert b.state == "reenroll_required" and b.dials == at_revoke["dials"]
     assert hub.exchanges == at_revoke["exchanges"]
-    print(f"S7 revoked state={b.state} dials_total={b.dials} exchanges={hub.exchanges}")
+    # 7b. Hub repository blip during a WS connect or session recheck (H0): transient, no park.
+    w = World(hub_down=[(2000, 2001)], repo_blip=[(2001, 2120)])
+    b2, hub2, d2 = run("new", w, until=3000)
+    assert b2.state == "ok" and not hub2.revoked and first_up_after(d2, 2120) - 2120 <= 31
+    print(f"S7 revoked state={b.state} dials_total={b.dials} exchanges={hub.exchanges}; "
+          f"S7b repo_blip state={b2.state} reconnect_after_blip_s={first_up_after(d2, 2120) - 2120}")
 
     # 8. Hub restart (tokens are DB-backed): short and past-expiry outages.
     b, hub, d = run("new", World(hub_down=[(2000, 2600)]), until=4000)
@@ -366,18 +419,30 @@ def scenarios():
     print(f"S8 hub_restart_600s reconnect_s={up - 2600} exchanges={hub.exchanges}; "
           f"hub_down_past_expiry reconnect_s={up2 - 5000} dials={b2.dials}")
 
-    # 9. Fencing: a late result for an old (epoch, generation) is never published.
-    def publish(cur, result):
-        return cur if (result["epoch"], result["base_gen"]) != (cur["epoch"], cur["gen"]) else \
-            {"epoch": cur["epoch"], "gen": cur["gen"] + 1}
-    cur = {"epoch": 2, "gen": 5}
-    assert publish(cur, {"epoch": 1, "base_gen": 5}) == cur          # re-enrolled meanwhile
-    assert publish(cur, {"epoch": 2, "base_gen": 4}) == cur          # newer generation exists
-    assert publish(cur, {"epoch": 2, "base_gen": 5})["gen"] == 6
+    # 9. Fencing. After a 200 the old refresh token is spent on the Hub, so a
+    # received pair is ALWAYS made durable within the same epoch. Only an epoch
+    # change (re-enroll) or a final stop prevents the write; a generation
+    # mismatch is an invariant violation that commits and then parks visibly.
+    def receive(cur, disk, result):
+        if result["epoch"] != cur["epoch"] or cur["final_stop"]:
+            return cur, disk, "discarded_other_epoch"
+        disk = dict(disk, pending=result["pair"], refresh=result["pair"], access=result["pair"], pending_after=None)
+        if result["base_gen"] != cur["gen"]:
+            return dict(cur, phase="parked", reason="generation_assertion"), disk, "committed_parked"
+        return dict(cur, gen=cur["gen"] + 1), disk, "committed_published"
+    cur = {"epoch": 2, "gen": 5, "final_stop": False, "phase": "valid"}
+    disk = {"pending": None, "refresh": "P5", "access": "A5"}
+    c, d, r = receive(cur, disk, {"epoch": 1, "base_gen": 5, "pair": "P6"})
+    assert r == "discarded_other_epoch" and d == disk          # other enrollment's files untouched
+    c, d, r = receive(cur, disk, {"epoch": 2, "base_gen": 4, "pair": "P6"})
+    assert r == "committed_parked" and d["refresh"] == "P6" and d["access"] == "P6" and c["phase"] == "parked"
+    c, d, r = receive(cur, disk, {"epoch": 2, "base_gen": 5, "pair": "P6"})
+    assert r == "committed_published" and c["gen"] == 6 and d["refresh"] == "P6"
     # Reauth: ready for a dial made with gen 5 must not clear a gen-6 reauth.
     reauth_wanted, session_gen = 6, 5
     assert reauth_wanted > session_gen
-    print("S9 fencing stale_epoch_ignored stale_generation_ignored reauth_not_cleared_by_old_hello")
+    print("S9 fencing other_epoch_untouched generation_mismatch_committed_on_disk_and_parked "
+          "reauth_not_cleared_by_old_hello")
 
 
 if __name__ == "__main__":

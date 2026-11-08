@@ -15,9 +15,16 @@ A laptop Bridge that sleeps past its one-hour access-token lifetime keeps redial
 - It publishes credentials by local generation, with session-epoch fencing.
 - It keeps and finishes the existing crash-safe pending-pair protocol, recovering a pending pair before the first dial.
 
-Refresh-token rejection stays final and leads to a visible re-enrollment state.
+Refresh-token rejection stays final and leads to a visible re-enrollment state, but **only** for a typed `invalid_grant` from the Hub. A bare 401 from a proxy or gateway and any Hub repository error are transient.
 
-Hub changes are small and backward compatible: a typed expired-access cause on HTTP 401, and a capability-gated `bridge_token_invalid` WS code, which is optional.
+A received pair is always made durable within its epoch, because after a 200 the old refresh token is already spent on the Hub.
+
+Two Hub and classification fixes are **mandatory**:
+
+- **H0** (step 1): repository errors return `Internal_Error`, never `invalid` or `invalid_grant`.
+- **H2** (step 2): a capability-gated `bridge_token_invalid` WS code that a capable Bridge answers with one renewal instead of a permanent park.
+
+**Until H0 and H2 ship, a transient Hub database error or a gateway 401 can still permanently park a Bridge or wipe its pair** (§1.4). The typed expired-access cause (H1) and Bridge attribution (H4) stay optional.
 
 ## 1. Current behavior (source at `846b1b72`)
 
@@ -80,6 +87,9 @@ The newer Bridge-owned work adds more callers of the **same** Hub access credent
 | HTTP: `bridge_hub_http_send_using` reacts only to the `bridge_sunset_pending` and `bridge_credential_revoked` causes. An expired-access 401 is an ordinary failed operation and never triggers refresh | `src/bridge/hub_http.odin:30-41` | C-src |
 | The action-scheduler sync budget parks with `Waiting_Repair`/`Unauthenticated` and is reopened by adoption | `retry_journal.odin:348-356`, called from `enroll_device_flow.odin:1893` | C-src |
 | A refresh endpoint `Unauthenticated` (any `invalid_grant`) is **final immediately**: stop traffic, wipe the pair and mark `Refresh_Rejected` | `enroll_device_flow.odin:1789`, `:1898-1905` | C-src |
+| **A bare 401 (no typed body, for example from a proxy or gateway) is treated as `Unauthenticated`.** On the refresh path that is final: stop traffic, then `apply_rejection` wipes the pair | `src/bridge/retry_budget.odin:71-84` (`:79`); `enroll_device_flow.odin:1789`, `:1898-1905` | C-src (model premise check) |
+| **The Hub discards repository errors and reads them as "not found".** `refresh_bridge_token` (`bridge_token_service.odin:474`) and `rotate_from` (`:580`) then return `invalid_grant`; `verify_access_token_scoped` (`:345`, `:373`) returns `"bridge token is invalid"`, which `bridge_ws_auth_error` maps to `bridge_credential_revoked`. **A database blip can therefore wipe the pair or permanently park a Bridge** | as cited; `bridge_handlers.odin:3902-3911` | C-src (model premise check); the frequency of such blips is **H** |
+| After a 200 the presented refresh token is already spent (`rotate_from` calls `mark_token_rotated`, `:588-603`). Presenting it again after the grace window is treated as reuse and revokes the family (`:501-510`) | as cited | C-src, C-test (`bridge_token_service_test.odin:216`, `:637`) |
 | The Hub comment says "refreshes and retries once", but no Bridge path implements it | `bridge_token_service.odin:318-321` | C-src |
 
 ### 1.5 Refresh serialization
@@ -175,6 +185,7 @@ Clock rules:
 
 - A forward wall jump only makes the token look older. That can cost one early rotation, which is safe.
 - A backward jump is ignored by the `max`, so the monotonic term governs.
+- **Limit: a suspend followed by a backward NTP step at wake undercounts age on both terms.** The suspend-excluding tick misses the sleep, and the wall term loses the step. After a restart there is no tick anchor at all, so only the (understated) wall term remains. In both cases `acquire` may consider an expired token fresh, and **recovery relies on D3**: the first typed `bridge_token_expired` or expired-access 401 triggers one renewal. Matrix row S3c and the model cover both the in-process and the restart case (outage of at most one reconnect backoff plus one exchange, and at most one dial with the expired generation). The optional suspend-inclusive tick in D6 narrows this case on platforms where its semantics are measured.
 - The Bridge never compares Hub timestamps (they are durations by design, `bridge_token_wire.odin:13-14`) and never parses tokens.
 
 ### D3. Bounded renewal driven by rejections
@@ -196,7 +207,11 @@ Handling rules:
 ### D4. Single-flight refresh with generation and epoch fencing
 
 - The renewal worker becomes an **event loop** that waits on the condition variable (D6). It is still the only exchanger. `request_renewal(reason, attempted_gen)` sets `Due` and signals. Concurrent requests coalesce, and every waiter observes the same published generation.
-- Each exchange captures `(epoch, base_generation, request_id)`. Before writing the pending record, before each file commit and before publishing, it rechecks three things: the epoch is unchanged, traffic is not final-stopped and no re-enroll marker exists, and the generation still equals `base_generation`. On a mismatch the result is **discarded and never written**. A pair from a stale epoch must never overwrite a newer enrollment's files, undo a revocation, clear a newer pending record or delete current files.
+- Each exchange captures `(epoch, base_generation, request_id)`.
+- **A received pair is never silently discarded within its epoch.** After a 200 the presented refresh token is already spent on the Hub (`rotate_from` → `mark_token_rotated`, `bridge_token_service.odin:588-603`). Dropping the pair would force a later reuse of the spent token, which after the grace window revokes the family (`:501-510`).
+- **Before the durable write** (pending record, refresh file, access file, metadata) the exchange checks only two things: the epoch is unchanged, and traffic is not final-stopped (no re-enroll marker). If either fails, the pair belongs to an enrollment that no longer exists or has been finally refused. It is not written, and the other enrollment's files, pending record and markers are left untouched. This is the only discard, and it is logged with reason `epoch_changed` or `final_stop`.
+- **Within the same epoch, the pair is always committed durably.** A generation that no longer equals `base_generation` at commit or publish time cannot happen with a single exchanger, so it is treated as an **assertion failure**: the pair is still written, it is still published (it is the only usable refresh token), and then the phase becomes `Parked` with reason `generation_assertion`, a visible status and a diagnostic counter. It is never a silent discard. Matrix row S9 asserts the on-disk files after this path.
+- A pair from a stale epoch must never overwrite a newer enrollment's files, undo a revocation, clear a newer pending record or delete current files.
 - Publishing increments `generation`, swaps the bytes, sets `issued_wall`/`issued_tick`, broadcasts on the condition and sets `reauth_wanted_generation = generation`.
 - **Reauth fencing** replaces `bridge_credential_reauth_pending: bool` with two atomic values: `reauth_wanted_generation` and the connection's `session_generation`, which is the generation captured **before** the dial. `bridge_ready` sets `session_generation = dial_generation` instead of clearing a flag (`hub_runtime_client.odin:422`). The drain sends `bridge_reauth` while `wanted > session_generation` and moves `session_generation` forward only on `bridge_reauth_result ok`.
 - The action-scheduler fence (`action_scheduler.odin:705-709`) and the other per-operation fences compare `(epoch, generation)` instead of token bytes.
@@ -224,10 +239,17 @@ Handling rules:
 
 ### D8. Definitive invalid or revoked refresh handling
 
-- A final refresh rejection (`invalid_grant`, family maximum or spent-token theft) keeps today's semantics: stop traffic, remove the pair and request file **and the new metadata file**, then mark `Refresh_Rejected` (`:1898-1905`).
+- **Refresh is final only on a typed Hub refusal:** an HTTP 401 whose parsed wire error is `unauthenticated` with the Hub's `invalid_grant` body (`bridge_refresh_handlers.odin:52`, `:58`).
+  - A bare 401 or 403 with no parseable Hub error body (a proxy, gateway or captive portal) is **retriable** under the exchange budget and pauses. It never calls `bridge_hub_stop_traffic(true)` or `apply_rejection`. This changes `bridge_credential_refresh_typed` (`enroll_device_flow.odin:1789`) and the refresh-path use of `bridge_operation_http_error` (`retry_budget.odin:79`). Other callers keep the current mapping.
+  - `Internal_Error`, 5xx and transport failures stay retriable (unchanged).
+  - This classification change ships in **step 1**, together with Hub H0.
+- A final refresh rejection (typed `invalid_grant`, family maximum or spent-token theft) keeps today's semantics: stop traffic, remove the pair and request file **and the new metadata file**, then mark `Refresh_Rejected` (`:1898-1905`).
 - In addition, set `phase = Reenroll_Required` and broadcast to the waiters, which fail fast with status `reenroll_required`. No exchange or dial follows. Process parking (`enroll_account_replace.odin:363`) is unchanged.
 - **User-visible status.** Add an `auth` object to `bridgesvc.Runtime_Status` (`status.odin:17`): `{phase, reason, generation, due_in_s, last_error_code, attempts, updated_at}`, with no token material. Show it in `ham-bridge status`. Include `auth` in the next heartbeat's `operation_recovery` so the Hub UI sees why the Bridge was offline after it reconnects. Optional Hub change H4 makes it visible before reconnect.
-- Distinguish expired from rejected access (§1.4). A `bridge_credential_revoked` caused by an **unknown** access token (`"bridge token is invalid"`) currently parks finally even when the refresh token is still valid. With H2, a capable Bridge first tries one renewal and parks only if the refresh is refused.
+- Distinguish expired from rejected access (§1.4). A `bridge_credential_revoked` caused by an **unknown** access token (`"bridge token is invalid"`), or by a Hub repository error read as unknown, currently parks finally even when the refresh token is still valid.
+  - H0 (step 1) removes the repository-error cause.
+  - H2 (step 2) makes a capable Bridge first try one renewal. It parks only if the refresh gets a typed refusal.
+  - Both are **mandatory**. **Until both ship, the permanent park on a transient Hub fault or an unknown-token reply remains possible**, and the plan does not claim otherwise.
 
 ### D9. Persisted-expiry metadata migration
 
@@ -240,10 +262,12 @@ Handling rules:
 | Re-enroll, rejection or offline `resume-refresh` | Remove or ignore `.meta-v1` together with the pair |
 | Explicit `--bridge-token` with no credential file | No metadata and no renewal (unchanged, `:757-770`); status reports `renewal_unavailable` instead of nothing |
 
-### D10. Hub-side changes (all optional for the core fix, all backward compatible)
+### D10. Hub-side changes (H0 and H2 mandatory; H1 and H4 optional; all backward compatible)
 
-- **H1. Typed expired-access cause.** Return `Unauthenticated` with cause `bridge_token_expired` on HTTP for expired access (`bridge_token_service.odin:369`). This adds one field; the message is unchanged. Old Bridges ignore it.
-- **H2. Capability-gated invalid-token code.** When the hello advertises `credential_refresh_on_invalid:true`, `bridge_ws_auth_error` (`bridge_handlers.odin:3902-3911`) sends `bridge_token_invalid` instead of `bridge_credential_revoked` for `"bridge token is invalid"`. Old Bridges keep the current mapping, so no old Bridge starts looping. Family maximum and `Forbidden` revocation stay `bridge_credential_revoked`.
+- **H0 (mandatory, step 1). Repository errors are not authentication answers.** `refresh_bridge_token` (`bridge_token_service.odin:474`), `rotate_from` (`:580`, and every other repository read or write in it), `verify_access_token_scoped` (`:345`, `:373`), `access_token_session_credential` (`:406`) and `session_credential_state` (`:434`, `:441`) must check the repository error result that is currently discarded (`_`). A real not-found keeps today's uniform `invalid`/`invalid_grant` and its equal-work miss path. Any other repository error returns `Internal_Error` (retriable, HTTP 5xx). On WS it goes through `bridge_ws_auth_error`'s non-authentication branch (`:3903-3906`), which sends a plain `bridge_error` and never `bridge_credential_revoked`. A session recheck that cannot read the row keeps the session until the next check instead of returning `.Revoked`. Tests: inject a failing repository into `bridge_token_service_test.odin` and `bridge_session_credential_test.odin`, and assert no family revocation, no `invalid_grant` and no revoked frame.
+
+- **H1 (optional). Typed expired-access cause.** Return `Unauthenticated` with cause `bridge_token_expired` on HTTP for expired access (`bridge_token_service.odin:369`). This adds one field; the message is unchanged. Old Bridges ignore it.
+- **H2 (mandatory, step 2). Capability-gated invalid-token code.** When the hello advertises `credential_refresh_on_invalid:true`, `bridge_ws_auth_error` (`bridge_handlers.odin:3902-3911`) sends `bridge_token_invalid` instead of `bridge_credential_revoked` for `"bridge token is invalid"`. Old Bridges keep the current mapping, so no old Bridge starts looping. Family maximum and `Forbidden` revocation stay `bridge_credential_revoked`. Bridge handling (step 2): on `bridge_token_invalid`, request one renewal (D3). Park only on a typed refresh refusal (D8). Otherwise use the normal backoff.
 - **H3. No change to refresh security.** The 30 s and 600 s graces and reuse revocation stay as they are (see risk R3).
 - **H4 (optional).** After the secret verifies, attribute expired-access upgrade failures to the Bridge ID, which the row already knows, instead of `BRIDGE_ID_UNKNOWN` (`bridge_handlers.odin:1767`). The UI can then show "credential expired, renewing" for a known Bridge. This is metrics and status only.
 - Adding a Hub-side generation to the refresh reply is **not needed**, because the local generation is sufficient.
@@ -255,18 +279,22 @@ Platform evidence columns use these values. **Model** means the scenario is repr
 | # | Scenario | Expected behavior (new) | Test type | Linux | macOS | Windows |
 | --- | --- | --- | --- | --- | --- | --- |
 | S1 | Sleep past access expiry (resume at 2 h, token issued at 0) | Renewal at most 30 s after the process runs again; at most one dial with the expired generation; exactly one exchange. Model: old outage 2326 s with 81 expired dials; new 0 s with 0 expired dials | Sim-clock unit (owner plus scheduler with injected wall, tick and sleep) and integration (fake Hub with fake clock) | Model ✔; Native **unproven** | Native **unproven**; Darwin timer semantics **H** | Native **unproven**; `Sleep`/QPC semantics **H** |
-| S2 | Sleep past refresh expiry (31 days) | One exchange gets `invalid_grant`, then `Reenroll_Required`, pair wiped, status visible, no further dials. Model: 1 exchange, 0 dials after | Sim unit plus Hub service test (existing `:477` edge cases) | Model ✔; Native **unproven** | **unproven** | **unproven** |
+| S2 | Sleep past refresh expiry (31 days) | One exchange gets a **typed** `invalid_grant`, then `Reenroll_Required`, pair wiped, status visible, no further dials. Model: 1 exchange, 0 dials after | Sim unit plus Hub service test (existing `:477` edge cases) | Model ✔; Native **unproven** | **unproven** | **unproven** |
+| S2b | A bare 401 from a proxy or gateway on refresh at wake (no Hub body) | Retriable: budget and pause, pair and metadata **kept**, no stop-traffic, no re-enroll marker; recovers once the gateway passes requests | Bridge unit (`bridge_refresh_response_classify` with a bodyless 401) plus sim | Model ✔ | Logic only | Logic only |
+| S2c | Hub repository error during refresh (H0) | `Internal_Error`: retriable, no `invalid_grant`, no family revocation, pair kept; recovery within one jittered pause (model: 65 s) | Hub service test with failing repository plus Bridge unit | Model ✔ | Logic only | Logic only |
 | S3a | Wall clock jumps forward 2 h | At most one early rotation, no outage, no re-enroll | Sim unit | Model ✔ | Native **unproven** | Native **unproven** |
 | S3b | Wall clock jumps back 2 h | The monotonic term governs; normal renewal at about 55 min; journal `Waiting_Repair` recovers through the jittered pause; no outage | Sim unit plus `retry_budget` unit | Model ✔ | **unproven** | **unproven** |
+| S3c | Suspend past expiry, then a backward NTP step at wake; also with a process restart at wake (no tick anchor) | `acquire` undercounts age and dials once with the expired generation; the typed rejection triggers one renewal (D3). Model: outage 0 s in process, 1 s after restart, at most 1 expired dial, 1 exchange | Sim unit (both variants) | Model ✔ | **unproven** | **unproven** |
 | S4 | Network offline at wake (10 min) | Renewal and dial retries bounded (model: 20 exchange attempts and 29 dials over 600 s); recovery at most about 72 s plus 30 s after the network returns | Sim unit plus integration with a failing transport | Model ✔ | **unproven** | **unproven** |
 | S5 | Concurrent triggers (timer, WS expiry, dial, 3× HTTP 401, resume) | Exactly one exchange; all waiters get the new generation; a late reauth is not cleared by an old-generation hello | Unit with threads and a barrier (`credential_state_test.odin`) | Model ✔ | n/a (logic) | n/a (logic) |
 | S6a | Crash after Hub rotation, before the pending save; restart within 600 s | The same request ID retries and the Hub regrants; no revocation | Unit with injected crash point (extend `refresh_recovery_test.odin:118`) plus Hub test `:497` | Model ✔ | Logic only | Logic only |
 | S6b | Same, restart after more than 600 s | Hub treats it as reuse: family revoked, `Reenroll_Required` (documented Hub contract) | Hub test `:637` plus Bridge unit | Model ✔ | Logic only | Logic only |
 | S6c | Crash after the pending save, before or between file writes | Restart commits before the first dial with no exchange; metadata rebuilt | Unit for each crash point (extend `:23`, `:39`) | Model ✔ | Logic only | Logic only; Windows rename and fsync durability **H** |
-| S7 | Refresh or family revoked while running | WS `bridge_credential_revoked` or `invalid_grant` leads to a final stop; 0 further dials or exchanges | Integration (`bridge_session_credential_test.odin:248`, `:576`) plus Bridge unit | Model ✔ | Logic only | Logic only |
+| S7 | Refresh or family revoked while running | WS `bridge_credential_revoked` or typed `invalid_grant` leads to a final stop; 0 further dials or exchanges | Integration (`bridge_session_credential_test.odin:248`, `:576`) plus Bridge unit | Model ✔ | Logic only | Logic only |
+| S7b | Hub repository error during WS upgrade verification or session recheck (H0); an unknown-token reply to a capable Bridge (H2) | H0: plain `bridge_error` and normal reconnect backoff, never `bridge_credential_revoked`, no park (model: reconnect 23 s after the fault clears). H2: one renewal, then park only on a typed refresh refusal. Old hello: today's mapping is unchanged | Hub integration with failing repository; old and new hello variants | Model ✔ (H0) | Logic only | Logic only |
 | S8a | Hub restart (10 min down) | DB-backed tokens survive; reconnect with the same generation; no extra exchange | Integration (restart fake Hub, same SQLite) | Model ✔ | Logic only | Logic only |
 | S8b | Hub down across access expiry | Renewal retries bounded with jitter; recovery about 60 s after the Hub returns | Integration | Model ✔ | Logic only | Logic only |
-| S9 | Stale response after re-enroll or a newer generation | Discarded before any write or publish; does not clear a newer reauth | Unit (fence predicates plus file-state assertions) | Model ✔ (predicate) | n/a | n/a |
+| S9 | Late exchange result: (a) after re-enroll or final stop (epoch changed); (b) same epoch, generation mismatch | (a) Not written; the other enrollment's files, pending record and markers are byte-identical afterwards. (b) **Pair committed**: refresh, access and metadata files hold the received pair, pending is cleared, phase `Parked/generation_assertion` is visible, no second exchange. Neither clears a newer reauth | Unit with file-state assertions after each path | Model ✔ (policy plus on-disk asserts) | n/a | n/a |
 | S10 | Cold start: no metadata, stale metadata, invalid pending record, explicit token | Renew before the first dial, a visible `pending_record_invalid`, or `renewal_unavailable`; never a silent stop | Unit | planned | n/a | n/a |
 
 Native evidence protocol, run separately and only with user authorization:
@@ -287,16 +315,38 @@ Each step is a separate ticket. Each needs an independent reviewer LGTM **and** 
      - `hub_runtime_client.odin`: dial capture; `:422`; the drain at `:842`.
      - `action_scheduler.odin`: fence by generation.
      - `main.odin`: recover the pending pair before runtime start.
-   - Tests: S5, S6c, S9, S10, metadata migration and rollback, the reauth race, plus the existing `refresh_recovery_test`, `enroll_device_flow_test` and `action_scheduler` suites.
-   - Gate: reviewer checks fence completeness (every write and publish site) and no token in logs or metadata.
+     - Refresh finality (D8): only a typed `invalid_grant` is final; a bare 401 or 403 on the refresh path is retriable (`enroll_device_flow.odin:1789`, refresh-path classification over `retry_budget.odin:71-84`).
+     - **Hub H0** (mandatory): `src/hub/service/bridge/bridge_token_service.odin` (`:345`, `:373`, `:474`, `:580` and the other discarded repository errors), with `Internal_Error` passed through `bridge_refresh_handlers.odin` and `bridge_ws_auth_error`.
+   - Tests: S2b, S2c, S5, S6c, S7b (H0 part), S9 (both on-disk variants), S10, metadata migration and rollback, the reauth race, plus the existing `refresh_recovery_test`, `enroll_device_flow_test`, `action_scheduler`, `bridge_token_service_test` and `bridge_session_credential_test` suites.
+   - Gate: reviewer checks fence completeness (every write and publish site), that no received pair can be dropped within an epoch, that no bare 401 or repository error can reach `apply_rejection`, `revoke_token_family` or `bridge_credential_revoked`, and that no token appears in logs or metadata.
 2. **Wakeable scheduler, acquire before connect, rejection-driven renewal, backoff.**
-   - Files: `enroll_device_flow.odin` (worker becomes an event loop over an injectable `Clock{wall, tick, wait}`), `credential_state.odin`, `hub_runtime_client.odin` (`:378`, `:428-441`, `:881`), `retry_budget.odin` if the clock is injected, `enroll_device_flow.odin:909-915` (jittered escalating pause).
-   - Tests: simulated-clock S1, S2, S3a/b, S4 and S8b. The suite must reproduce the old 2280 s gap with the old scheduler disabled behind a test flag, and fail on it.
-   - Gate: reviewer confirms no long uninterruptible sleep remains on the credential path, and that the tight-loop bounds hold.
+   - Files: `enroll_device_flow.odin` (worker becomes an event loop over an injectable `Clock{wall, tick, wait}`), `credential_state.odin`, `hub_runtime_client.odin` (`:378`, `:428-441`, `:881`, plus a `bridge_token_invalid` case), `retry_budget.odin` if the clock is injected, `enroll_device_flow.odin:909-915` (jittered escalating pause).
+   - **Hub H2** (mandatory): `bridge_handlers.odin:3902-3911` sends `bridge_token_invalid` for a hello with `credential_refresh_on_invalid:true`; the Bridge hello (`bridge_hub_hello_json`) advertises it.
+   - Tests: simulated-clock S1, S2, S3a/b/c, S4 and S8b; S7b (H2, old and new hello). The suite must reproduce the old design's 2326 s outage from S1 with the old scheduler re-enabled behind a test flag, and must fail on it.
+   - Gate: reviewer confirms no long uninterruptible sleep remains on the credential path, the tight-loop bounds hold, and old Bridges keep today's mapping.
 3. **HTTP callers, status, Hub typed causes.**
-   - Files: `hub_http.odin` (expired-access 401 helper that requests renewal), HTTP sites in §1.3 and §1.9 (`owner_local.odin`, `owner_local_executor.odin`, `owner_migration.odin`, `executor_fence_client.odin`, `wrapper_endpoint.odin`, `task_chain_search_refresh.odin`, `agent_wake.odin`, `agent_reconcile.odin`, `shell_reconcile.odin`, `startup_readiness.odin`, `auto_update.odin`) switched to `acquire`; `src/lib/bridgesvc/status.odin` (`auth`); `service_cmds.odin`; Hub H1 in `bridge_token_service.odin` and `src/contracts/errors.odin`; H2 in `bridge_handlers.odin` with a hello capability; optional H4.
-   - Tests: Hub `bridge_session_credential_test.odin` (H2 old versus new hello), `bridge_token_service_test.odin` (H1 cause), a Bridge 401 to single-renewal integration test, S7 and S8a.
-   - Gate: reviewer checks old-Bridge compatibility (no new loops) and the security review of H2.
+   - Files: `hub_http.odin` (expired-access 401 helper that requests renewal), `src/lib/bridgesvc/status.odin` (`auth`), `service_cmds.odin`, optional Hub H1 in `bridge_token_service.odin` and `src/contracts/errors.odin`, and optional H4.
+   - Switch **all** remaining non-test `bridge_credential_snapshot()` call sites to `acquire`. At `846b1b72` there are 34 call sites in 16 files:
+     - `action_scheduler.odin:515`, `:687`, `:705`, `:818`, `:902`, `:1240`
+     - `agent_reconcile.odin:169`, `:182`
+     - `agent_wake.odin:300`, `:303`
+     - `auto_update.odin:65`
+     - `enroll_device_flow.odin:1075`
+     - `executor_fence_client.odin:31`, `:68`
+     - **`executor_local_native.odin:46`**
+     - `hub_runtime_client.odin:345`, `:378`, `:846`, `:5928`
+     - `main.odin:238`, `:241`, `:750`
+     - `owner_local.odin:72`
+     - `owner_local_executor.odin:215`
+     - `owner_migration.odin:31`, `:43`
+     - `shell_reconcile.odin:136`, `:149`
+     - `startup_readiness.odin:228`
+     - `task_chain_search_refresh.odin:71`, `:74`
+     - `wrapper_endpoint.odin:542`, `:558`, `:587`
+
+     Steps 1 and 2 already convert the `hub_runtime_client` and `action_scheduler` sites.
+   - Tests: a Bridge 401 to single-renewal integration test, `bridge_token_service_test.odin` (H1 cause, if taken), S7 and S8a.
+   - Gate: reviewer confirms with a grep that `bridge_credential_snapshot` has no remaining non-test callers, and checks old-Bridge compatibility.
 4. **Native evidence and rollout (user-authorized only).** Run the §3 protocol on Linux, macOS and Windows test enrollments. Ship behind the normal release train. Watch `auth.phase` counts and `bridge_token_expired` upgrade rates.
    - Gate: the user approves each platform row's evidence before claiming that platform is fixed.
 
@@ -307,8 +357,10 @@ Each step is a separate ticket. Each needs an independent reviewer LGTM **and** 
 - **R3. Lost reply plus long sleep.** A rotation in flight when the machine sleeps, followed by a retry more than 600 s later, is treated as theft and revokes the family (S6b). That is intended Hub security. Open question: accept it, or have the Bridge avoid starting exchanges when the token has more than `SKEW_MARGIN` left (already true) and record "rotation in flight at suspend" for diagnosis. Extending the Hub window is **not** proposed.
 - **R4. A wall clock that is wrong forward causes early rotations,** at most one per `REEVAL_MAX × budget`, bounded by the exchange budget and pause. A Hub clock that is wrong produces `rejected_after_renewal` and no loop.
 - **R5. Metadata binding uses the non-secret token record ID.** Confirm with security review that storing `access_token_id` in a 0600 file next to the token adds no exposure. It is already the plain prefix of the file contents.
-- **R6. Changing the WS mapping (H2)** must stay capability-gated. Unconditional `bridge_token_invalid` would turn today's final park into an endless backoff loop on old Bridges.
-- **R7. Many new `acquire` call sites (§1.9).** A missed caller degrades to today's behavior (401 until the owner renews), not to a new failure. Step 3's reviewer checks with a grep that `bridge_credential_snapshot` has no remaining callers.
+- **R6. Changing the WS mapping (H2)** is mandatory but must stay capability-gated. Unconditional `bridge_token_invalid` would turn today's final park into an endless backoff loop on old Bridges.
+- **R7. Many new `acquire` call sites (34 sites in 16 files, listed in step 3, including `executor_local_native.odin:46`).** A missed caller degrades to today's behavior (401 until the owner renews), not to a new failure. Step 3's reviewer checks with a grep that `bridge_credential_snapshot` has no remaining non-test callers.
+- **R9. Permanent park until H0 and H2 ship.** Today a transient Hub repository error, or a gateway's bare 401 on refresh, can wipe the pair or park the Bridge permanently (§1.4). The sleep fix alone does not remove this. Steps 1 and 2 must ship H0, the refresh-finality change and H2 before the plan is reported as complete.
+- **R10. A suspend plus a backward NTP step undercounts age** (D2, S3c). Correctness then rests on the rejection-driven path D3, costing at most one dial with the expired generation and one reconnect backoff.
 - **R8. Explicit-token deployments** (`--bridge-token` with no file) remain non-renewing by design. Should startup refuse an expiring `hba_` token without a credential file instead of only reporting `renewal_unavailable`?
 - **Q1.** Is `SKEW_MARGIN = max(300 s, 10%)` acceptable, given the Hub's 60 s grace and refresh latency of up to 10 s?
 - **Q2.** Should an OS resume or network-change hook (Electron `powerMonitor`, systemd-logind `PrepareForSleep`, `WM_POWERBROADCAST`) be added later as a wake signal? It is not required for correctness.
@@ -320,6 +372,7 @@ Each step is a separate ticket. Each needs an independent reviewer LGTM **and** 
 `python3 -I docs/plans/bridge-auth-resume-recovery-model.py` (offline, simulated clocks):
 
 1. It first asserts current-source premises at the working tree: the relative refresh sleep, the fixed 60 s pause, no renewal on `bridge_token_expired`, the unconditional reauth clear at ready, no generation in adopt, the Hub TTL, skew and retry-grace constants, and the WS revoked mapping.
-2. It then runs S1–S9 against the old and new designs and asserts the orderings in §3.
+2. It also asserts the premises behind the revision: Hub repository errors discarded in `refresh_bridge_token`, `verify_access_token_scoped` and `rotate_from`; a bare 401 mapped to `Unauthenticated`; and refresh `Unauthenticated` stopping traffic.
+3. It then runs S1–S9, including S2b, S2c, S3c, S7b and both S9 on-disk variants, against the old and new designs and asserts the orderings in §3.
 
 Its output is ordering evidence only, not native suspend evidence.
