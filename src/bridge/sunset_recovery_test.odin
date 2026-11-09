@@ -148,7 +148,7 @@ test_sunset_final_refresh_refusal_still_marks_reenrollment :: proc(t: ^testing.T
     testing.expect(t, bridge_retry_atomic_write(path, transmute([]byte)string("access")))
     testing.expect(t, bridge_retry_atomic_write(refresh, transmute([]byte)string("refresh")))
     testing.expect(t, bridge_retry_atomic_write(request, transmute([]byte)string("request")))
-    testing.expect(t, bridge_refresh_apply_rejection(fmt.tprintf("%s/config.toml", dir), "https://hub", "brg_final", path, refresh, request, contracts.wire_error(.Unauthenticated)))
+    testing.expect(t, bridge_refresh_apply_rejection(fmt.tprintf("%s/config.toml", dir), "https://hub", "brg_final", path, refresh, request, contracts.wire_error(.Unauthenticated, "invalid_grant", "invalid_grant")))
     testing.expect(t, !os.exists(path) && !os.exists(refresh) && !os.exists(request))
     _, marker := bridgesvc.read_reenroll_marker(dir)
     testing.expect(t, marker, "final revocation still parks the profile")

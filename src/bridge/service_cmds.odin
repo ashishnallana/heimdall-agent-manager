@@ -249,6 +249,18 @@ bridge_status_print :: proc(host: bridgesvc.Host, name: string, as_json: bool) -
 	fmt.printfln("vault      %s  version %s  bridge %s", s.vault, s.version if s.version != "" else "-", s.bridge_id if s.bridge_id != "" else "-")
 	fmt.printfln("ports      bridge %d  endpoint %d", s.bridge_port, s.endpoint_port)
 	fmt.printfln("state      %s", s.state)
+	if s.auth.phase != "" {
+		line := fmt.tprintf("auth       %s", s.auth.phase)
+		if s.auth.reason != "" do line = fmt.tprintf("%s (%s)", line, s.auth.reason)
+		if s.auth.last_error_code != "" do line = fmt.tprintf("%s  last_error %s attempts %d", line, s.auth.last_error_code, s.auth.attempts)
+		fmt.println(line)
+		switch s.auth.phase {
+		case "parked":
+			fmt.println("           renewal and Hub traffic are parked; the credential files hold the newest pair: restart the bridge")
+		case "renewal_stopped":
+			fmt.println("           credential renewal stopped; repair with: ham-bridge recovery resume-refresh")
+		}
+	}
 	if s.needs_reenrollment {
 		fmt.printfln("           the hub no longer accepts this bridge (%s); recover with: %s", s.reenroll_reason, s.reenroll_hint if s.reenroll_hint != "" else "ham-bridge enroll --hub <url>")
 	}
@@ -306,6 +318,7 @@ bridge_local_status_write :: proc(connected: bool) {
 		version    = contracts.APP_VERSION,
 		bridge_id  = strings.trim_space(bridge_config.daemon_id),
 		updated_at = time.to_unix_seconds(time.now()),
+		auth       = bridge_credential_auth_status(),
 	}
 	text := bridgesvc.runtime_status_json(rt, context.temp_allocator)
 	final := bridgesvc.pjoin(dir, bridgesvc.RUNTIME_STATUS_FILE)

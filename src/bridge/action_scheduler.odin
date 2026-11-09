@@ -702,7 +702,8 @@ bridge_action_scheduler_sync :: proc(fetch: Action_Scheduler_Fetch = bridge_hub_
         finished := bridge_retry_finish(key, bridge_runtime_now_ms(), success, err)
         sync.mutex_lock(&s.mutex); s.sync_state = finished.state; sync.mutex_unlock(&s.mutex)
     }
-    current_credential := bridge_credential_snapshot()
+    // A fence, not a request: compare without the expiry-aware wait.
+    current_credential, _ := bridge_credential_peek()
     defer delete(current_credential)
     sync.mutex_lock(&s.mutex)
     current := generation == s.connection_generation && epoch == s.wanted_epoch && credential == current_credential

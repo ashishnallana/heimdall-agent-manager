@@ -21,6 +21,22 @@ Runtime_Status :: struct {
 	version:    string `json:"version"`,
 	bridge_id:  string `json:"bridge_id"`,
 	updated_at: i64    `json:"updated_at"`, // unix seconds
+	// Credential renewal state (bridge auth recovery). No token material. Absent
+	// (zero) in files written by older bridges.
+	auth:       Auth_Status `json:"auth"`,
+}
+
+// Auth_Status is the Bridge credential owner's phase: valid|due|renewing|
+// pending_commit|offline_retry|renewal_stopped|parked|reenroll_required|
+// renewal_unavailable, with the reason and the last error code. Never a token.
+Auth_Status :: struct {
+	phase:           string `json:"phase,omitempty"`,
+	reason:          string `json:"reason,omitempty"`,
+	generation:      u64    `json:"generation,omitempty"`,
+	due_in_s:        i64    `json:"due_in_s,omitempty"`,
+	last_error_code: string `json:"last_error_code,omitempty"`,
+	attempts:        int    `json:"attempts,omitempty"`,
+	updated_at:      i64    `json:"updated_at,omitempty"`,
 }
 
 Status :: struct {
@@ -44,6 +60,8 @@ Status :: struct {
 	needs_reenrollment: bool   `json:"needs_reenrollment"`,
 	reenroll_reason: string `json:"reenroll_reason,omitempty"`,
 	reenroll_hint:   string `json:"reenroll_hint,omitempty"`,
+	// The running bridge's credential renewal state (from runtime-status.json).
+	auth:            Auth_Status `json:"auth"`,
 }
 
 // NEEDS_REENROLL_FILE marks a profile whose credential the hub refused (revoked
@@ -168,6 +186,7 @@ gather_status :: proc(host: Host, name: string, now: time.Time, since: i64 = 0, 
 		if r.vault != "" do s.vault = r.vault
 		s.version = r.version
 		if s.bridge_id == "" do s.bridge_id = r.bridge_id
+		if fresh && current do s.auth = r.auth
 	}
 	s.state = status_state(s)
 	return s

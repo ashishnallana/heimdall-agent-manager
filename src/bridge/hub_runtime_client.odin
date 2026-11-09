@@ -338,7 +338,7 @@ bridge_hub_take_replaced_backoff :: proc() -> (backoff_s: int, replaced: bool) {
 }
 
 bridge_hub_runtime_worker :: proc() {
-	credential_snapshot_337 := bridge_credential_snapshot()
+	credential_snapshot_337, _ := bridge_credential_peek()
 	defer delete(credential_snapshot_337)
 	if strings.trim_space(bridge_config.daemon_url) == "" || strings.trim_space(credential_snapshot_337) == "" {
 		fmt.println("bridge hub runtime disabled: missing daemon_url or bridge_token (has the bridge enrolled? check the bridge_token/--bridge-token-file)")
@@ -371,7 +371,18 @@ bridge_hub_runtime_worker :: proc() {
 			fmt.println("bridge hub runtime disabled: daemon_url must be an http:// or https:// base URL")
 			return
 		}
-		credential := bridge_credential_snapshot()
+		// D2: expiry-aware acquisition before EVERY dial. An access token that expired
+		// while the machine slept (or is inside the skew margin, or of unknown age) is
+		// renewed first, so the dial after wake does not present a dead credential.
+		credential, dial_generation, credential_ok := bridge_credential_acquire()
+		if !credential_ok {
+			// Parked or re-enrollment required: no dial (credential_state.odin).
+			delete(credential)
+			bridge_credential_status_changed()
+			time.sleep(time.Duration(BRIDGE_CREDENTIAL_REEVAL_MAX_MS) * time.Millisecond)
+			continue
+		}
+		sync.atomic_store(&bridge_hub_dial_generation, dial_generation)
         conn, ok := ws.connect_with_bearer(ws_url, credential)
         delete(credential)
 		conn.send_disabled = &bridge_hub_traffic_stopped
@@ -402,6 +413,7 @@ bridge_hub_runtime_worker :: proc() {
 		plan_disabled := false
 		hub_error := ""
 		hub_catalog_etag := ""
+		auth_rejected := false
 		for time.to_unix_nanoseconds(time.now()) < ready_deadline {
 			if text, got := ws.poll_text(&conn); got {
 				msg_type := extract_json_string(text, "type", "")
@@ -414,8 +426,11 @@ bridge_hub_runtime_worker :: proc() {
 					}
 					hub_catalog_etag = extract_json_string(text, "catalog_etag", "")
 					bridge_hub_apply_ready_settings(text)
-					// This connection was opened with the current credential.
-					sync.atomic_store(&bridge_credential_reauth_pending, false)
+					// D4 reauth fencing: this session is authenticated with the generation
+					// captured BEFORE the dial, not "the current credential". A renewal that
+					// published meanwhile is still sent in-band by the drain.
+					sync.atomic_store(&bridge_hub_session_generation, dial_generation)
+					sync.atomic_store(&bridge_hub_reauth_sent_generation, 0)
 					ready = true
 					delete(msg_type)
 					delete(text)
@@ -426,6 +441,7 @@ bridge_hub_runtime_worker :: proc() {
 					hub_error = bridge_hub_error_log_message(text)
 					code := extract_json_string(text, "code", "")
 					plan_disabled = code == "plan_limit_reached"
+					auth_rejected = bridge_hub_is_auth_rejection_frame(code, text)
 					delete(code)
 					// REQ-EA-4: an atomic enrollment whose credential the hub now refuses
 					// was rolled back (cancel or deadline), whether or not the
@@ -509,8 +525,26 @@ bridge_hub_runtime_worker :: proc() {
 			time.sleep(60 * time.Second)
 			continue
 		}
+		// D3/D7: a typed rejection asked for (at most) one renewal of this generation.
+		// When a newer generation is published, dial again at once (250 ms spacing)
+		// instead of backing off with the dead credential.
+		if auth_rejected && bridge_credential_wait_newer(dial_generation, BRIDGE_CREDENTIAL_ACQUIRE_WAIT_MS) {
+			reconnect_failures = 0
+			time.sleep(250 * time.Millisecond)
+			continue
+		}
 		bridge_hub_reconnect_sleep(&reconnect_failures)
 	}
+}
+
+// bridge_hub_is_auth_rejection_frame: a bridge_error that rejected the access token
+// itself (expired, or unknown to the Hub) rather than the bridge's enrollment.
+bridge_hub_is_auth_rejection_frame :: proc(code, text: string) -> bool {
+	if code == "bridge_token_expired" || code == "bridge_token_invalid" do return true
+	if code != "bridge_credential_revoked" do return false
+	msg := extract_json_string(text, "message", "")
+	defer delete(msg)
+	return msg == BRIDGE_HUB_ACCESS_INVALID_MESSAGE
 }
 
 // bridge_hub_runtime_up: true while a hub runtime session is established
@@ -827,7 +861,6 @@ bridge_should_debounce_nudge :: proc(instance_id, task_id: string) -> bool {
 // closes the session with bridge_token_expired and the reconnect loop dials again
 // with the current (refreshed) credential.
 bridge_hub_credential_reauth_supported: bool
-bridge_credential_reauth_pending: bool
 
 BRIDGE_REAUTH_FRAME :: struct {
 	type:         string,
@@ -835,12 +868,18 @@ BRIDGE_REAUTH_FRAME :: struct {
 }
 
 bridge_credential_reauth_drain :: proc(conn: ^ws.Connection) {
-	if !sync.atomic_load(&bridge_credential_reauth_pending) do return
-	sync.atomic_store(&bridge_credential_reauth_pending, false)
+	// D4: renew while a newer generation is wanted than the session holds, once per
+	// generation (a refused renewal is not resent; the Hub ends the session at the
+	// old credential's expiry and the reconnect dials with the newest one).
+	wanted := sync.atomic_load(&bridge_credential_reauth_wanted_generation)
+	if wanted <= sync.atomic_load(&bridge_hub_session_generation) do return
+	if sync.atomic_load(&bridge_hub_reauth_sent_generation) >= wanted do return
+	if sync.atomic_load(&bridge_hub_traffic_stopped) do return
 	if !sync.atomic_load(&bridge_hub_credential_reauth_supported) do return
-	credential := bridge_credential_snapshot()
+	credential, generation := bridge_credential_peek()
 	defer delete(credential)
 	if strings.trim_space(credential) == "" do return
+	sync.atomic_store(&bridge_hub_reauth_sent_generation, generation)
 	data, err := json.marshal(BRIDGE_REAUTH_FRAME{type = "bridge_reauth", access_token = credential}, allocator = context.temp_allocator)
 	if err != nil do return
 	_ = ws.send_text(conn, string(data))
@@ -851,6 +890,7 @@ bridge_credential_reauth_drain :: proc(conn: ^ws.Connection) {
 bridge_hub_session_frame :: proc(type, text: string) -> bool {
 	if type == "bridge_reauth_result" {
 		if extract_json_bool(text, "ok", false) {
+			sync.atomic_store(&bridge_hub_session_generation, sync.atomic_load(&bridge_hub_reauth_sent_generation))
 			fmt.printfln("bridge hub session renewed with the refreshed credential (valid for %ds)", extract_json_int(text, "expires_in", 0))
 		} else {
 			code := extract_json_string(text, "code", "")
@@ -872,15 +912,32 @@ bridge_hub_session_frame :: proc(type, text: string) -> bool {
 		defer delete(code)
 		msg := extract_json_string(text, "message", "")
 		defer delete(msg)
+		// The generation this frame refers to: the live session's, or (before
+		// bridge_ready) the one this dial presented.
+		attempted := sync.atomic_load(&bridge_hub_session_generation) if sync.atomic_load(&bridge_hub_runtime_up) else sync.atomic_load(&bridge_hub_dial_generation)
 		switch code {
 		case "bridge_token_expired":
-			fmt.eprintfln("bridge hub ended the session: the access token expired (%s); reconnecting with the current credential", msg)
+			action := bridge_credential_note_rejection(attempted, .Access_Expired)
+			fmt.eprintfln("bridge hub ended the session: the access token expired (%s); renewal=%v; reconnecting with the current credential", msg, action)
+		case "bridge_token_invalid":
+			// H2: the Hub does not recognise this access token. One renewal decides:
+			// only a typed invalid_grant from the refresh endpoint is final.
+			action := bridge_credential_note_rejection(attempted, .Access_Invalid)
+			fmt.eprintfln("bridge hub refused the access token (%s); renewal=%v; reconnecting", msg, action)
 		case "bridge_sunset_pending":
 			// The hub may restore this machine if replacement enrollment rolls
 			// back. Keep credential files and the profile intact across restarts.
 			bridge_hub_stop_traffic(false)
 			fmt.eprintfln("bridge retirement is pending enrollment (%s); Hub traffic paused; retain credentials and explicitly resume after rollback", msg)
 		case "bridge_credential_revoked":
+			if msg == BRIDGE_HUB_ACCESS_INVALID_MESSAGE {
+				// Older Hubs map an UNKNOWN access token (including, before H0, a Hub
+				// database error read as unknown) to revoked. That is not proof the
+				// enrollment is gone: renew once and let the refresh endpoint decide.
+				action := bridge_credential_note_rejection(attempted, .Access_Invalid)
+				fmt.eprintfln("bridge hub refused the access token as unknown (%s); renewal=%v; not parking", msg, action)
+				break
+			}
 			bridge_hub_stop_traffic(true)
 			fmt.eprintfln("bridge hub ended the session: this bridge's credential is revoked (%s); re-enrollment is required", msg)
 			// Stay parked. The runtime owner joins stream writers before closing
@@ -4292,6 +4349,7 @@ Bridge_Hello_Wire :: struct {
 	capabilities:             []string,
 	features:                 []string,
 	active_instance_ids:      []string,
+	credential_refresh_on_invalid: bool,
 }
 
 // BRIDGE_RUNTIME_FEATURES is the single source for the features bridge_hello and the
@@ -4314,6 +4372,9 @@ bridge_hub_hello_json :: proc() -> string {
 		public_key = bridge_get_public_key_hex(),
 		capabilities = []string{},
 		features = BRIDGE_RUNTIME_FEATURES[:],
+		// H2: answer an unknown-token refusal with bridge_token_invalid (one renewal)
+		// instead of bridge_credential_revoked (permanent park).
+		credential_refresh_on_invalid = true,
 	}
 	unseal := bridge_unseal_hello_fields(bridge_config.daemon_id)
 	hello.identity_state = unseal.identity_state
@@ -6022,7 +6083,7 @@ bridge_hub_runtime_start :: proc() {
 	// forever. Must follow init (it appends to the queue init makes) and precede the
 	// worker that drains it.
 	bridge_shell_exited_outbox_restore()
-	credential_snapshot_5593 := bridge_credential_snapshot()
+	credential_snapshot_5593, _ := bridge_credential_peek()
 	defer delete(credential_snapshot_5593)
 	if strings.trim_space(credential_snapshot_5593) != "" && strings.trim_space(bridge_config.daemon_url) != "" {
 		thread.run(bridge_hub_runtime_worker)

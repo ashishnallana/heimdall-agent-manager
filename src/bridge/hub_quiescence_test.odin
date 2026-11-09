@@ -53,7 +53,7 @@ test_hub_pause_blocks_http_retries_refresh_and_reconnect :: proc(t: ^testing.T) 
     refreshed, refresh_err := bridge_refresh_recovery_step(&recovery, "", "", "", "", "", "", {}, 1000)
     testing.expect(t, !refreshed && refresh_err.code == .Bridge_Offline)
     // A delayed successful renewal never re-opens the fence.
-    sync.atomic_store(&bridge_credential_reauth_pending, true)
+    sync.atomic_store(&bridge_credential_reauth_wanted_generation, sync.atomic_load(&bridge_hub_session_generation) + 1)
     c: ws.Connection
     bridge_credential_reauth_drain(&c)
     testing.expect(t, sync.atomic_load(&bridge_hub_traffic_stopped))

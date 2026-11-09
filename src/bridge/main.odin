@@ -269,11 +269,13 @@ main :: proc() {
 	// would read `", httpc.lib...` between two string literals as a path.)
 	https_version, https_tls, https_ca := httpc.libcurl_version(), httpc.libcurl_tls_version(), httpc.trust_summary()
 	fmt.println("bridge https client: libcurl", https_version, https_tls, "CA:", https_ca)
-	bridge_hub_runtime_start()
-	// REQ-IMPL-4 / design §7.5: renew the access token at 80% of its lifetime with
-	// jitter, rather than waiting for a 401 — by which time in-flight work has
-	// already failed. No-ops for a non-expiring legacy credential.
+	// REQ-IMPL-4 / design §7.5 + bridge auth recovery (D5): activate the credential
+	// owner, finish a pending rotated pair, and start the renewal worker BEFORE the
+	// Hub runtime dials, so the first dial after a restart (or a wake) never presents
+	// a credential whose replacement is already on disk or due. Renewal stays a no-op
+	// for a non-expiring legacy credential.
 	bridge_credential_refresh_start(bridge_config.credential_file)
+	bridge_hub_runtime_start()
 	bridge_task_chain_search_start()
 	bridge_action_scheduler_start()
 	bridge_auto_update_start()
@@ -740,7 +742,8 @@ handle_bridge_client :: proc(client: net.TCP_Socket) {
 // loopback. That is the correct posture — an unenrolled bridge has no owner, so
 // there is no one whose authority it could be acting on.
 bridge_loopback_authorized :: proc(request: string) -> bool {
-	credential_snapshot_633 := bridge_credential_snapshot()
+	// A local check, not a Hub request: never waits for renewal.
+	credential_snapshot_633, _ := bridge_credential_peek()
 	defer delete(credential_snapshot_633)
 	configured := strings.trim_space(credential_snapshot_633)
 	if configured == "" do return false
