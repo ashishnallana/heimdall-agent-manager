@@ -87,8 +87,18 @@ bridge_list_tokens_by_family_sqlite :: proc(ctx: rawptr, family_id: string) -> (
 	defer sqlite3_finalize(stmt)
 	bind_text(stmt, 1, family_id)
 	out := make([dynamic]domain.Bridge_Token)
-	for sqlite3_step(stmt) == SQLITE_ROW {
+	rc := sqlite3_step(stmt)
+	for rc == SQLITE_ROW {
 		append(&out, bridge_token_from_stmt(stmt))
+		rc = sqlite3_step(stmt)
+	}
+	// FAIL CLOSED: a lineage cut short by BUSY/LOCKED/IO is not the lineage. A
+	// partial (or empty) family would let the grace check re-grant a reused refresh
+	// token, so anything but SQLITE_DONE is an error and the rows are dropped.
+	if rc != SQLITE_DONE {
+		for i in 0..<len(out) do domain.bridge_token_destroy(&out[i])
+		delete(out)
+		return nil, domain.domain_error(.Internal_Error, "failed to read bridge token family")
 	}
 	return out[:], domain.Domain_Error{}
 }

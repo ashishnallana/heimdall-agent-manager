@@ -1807,7 +1807,13 @@ bridge_ws_upgrade_handler :: proc(ctx: rawptr, req: Request, client: net.TCP_Soc
 	// Bind the session to the credential that opened it, for its whole lifetime:
 	// the reader closes it at expiry (unless renewed in-band with bridge_reauth) or
 	// on revocation, and command senders refuse it once expired.
-	session_cred, session_ok := bridge_service.access_token_session_credential(h.bridges, token)
+	session_cred, session_ok, session_err := bridge_service.access_token_session_credential_checked(h.bridges, token)
+	if !session_ok && session_err.code != .None {
+		// H0: a repository failure is transient, not an expired credential.
+		bridge_metrics_connect_result(admitted_bridge.bridge_id, "auth_failed")
+		_ = write_ws_text_frame(client, bridge_ws_error_payload(session_err.message))
+		return
+	}
 	if !session_ok {
 		bridge_metrics_connect_result(admitted_bridge.bridge_id, "auth_failed")
 		_ = write_ws_text_frame(client, bridge_ws_session_error_payload(BRIDGE_WS_TOKEN_EXPIRED_CODE, "bridge access token could not be bound to the session"))

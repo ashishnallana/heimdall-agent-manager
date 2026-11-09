@@ -142,6 +142,10 @@ Bridge_Enroll_Credential :: struct {
 	refresh_token:      string,
 	expires_in:         int,
 	refresh_expires_in: int,
+	// Bridge wall ms when a refreshed pair was RECEIVED. Persisted inside the pending
+	// record, so a pair recovered after a crash (possibly hours later) keeps its true
+	// age. 0 = unknown. Older binaries ignore the field.
+	received_wall_ms:   i64,
 	vault_delivery_expected: bool,
 	// REQ-EA-4: the hub holds this credential PENDING until the vault key is
 	// delivered; see enroll_atomic.odin. False from a hub that predates it.
@@ -1769,7 +1773,9 @@ bridge_refresh_pair_commit :: proc(path, refresh_path, api_base, bridge_id: stri
     if !bridge_write_credential_file(path, api_base, bridge_id, cred.access_token) do return false
     // Metadata last (D5): a crash before it leaves the age "unknown" (one early
     // renewal), never wrong. Its failure is not a commit failure.
-    if !bridge_credential_meta_write(path, api_base, bridge_id, cred.access_token, bridge_runtime_now_ms(), cred.expires_in, cred.refresh_expires_in, bridge_credential_current_generation() + 1) {
+    // Issued at RECEIPT, not at this (possibly much later) commit.
+    issued := cred.received_wall_ms if cred.received_wall_ms > 0 else bridge_runtime_now_ms()
+    if !bridge_credential_meta_write(path, api_base, bridge_id, cred.access_token, issued, cred.expires_in, cred.refresh_expires_in, bridge_credential_current_generation() + 1) {
         fmt.eprintln("bridge credential: expiry metadata could not be written; the next start renews early")
     }
     return true
@@ -1786,6 +1792,7 @@ bridge_refresh_recovery_step :: proc(
         recovery.unknown_outcome = unknown
         if !ok do return false, err
         recovery.pending.credential = cred
+        recovery.pending.credential.received_wall_ms = bridge_runtime_now_ms()
         recovery.pending.first_ms = budget.first_ms
         recovery.has_pair = true
     }

@@ -9,6 +9,7 @@ package main
 import "core:fmt"
 import "core:os"
 import "core:strings"
+import "core:sync"
 import "core:time"
 import bridgesvc "odin_test:lib/bridgesvc"
 import cfg_lib "odin_test:lib/config"
@@ -306,7 +307,13 @@ bridge_list_command :: proc(args: []string) -> bool {
 // bridge's config.toml (the profile state dir), owner-only, so `status --json` can
 // report them without the bridge token. Best effort: a failure only makes status
 // show "unknown".
+// Serialised: the hub runtime and the credential worker both write it, through
+// one fixed temp path.
+bridge_local_status_mu: sync.Mutex
+
 bridge_local_status_write :: proc(connected: bool) {
+	sync.mutex_lock(&bridge_local_status_mu)
+	defer sync.mutex_unlock(&bridge_local_status_mu)
 	cfg_path := cfg_lib.expand_home(cfg_lib.config_path_from_args(os.args))
 	if cfg_path == "" do return
 	dir := bridgesvc.pdir(cfg_path)

@@ -923,6 +923,10 @@ bridge_hub_session_frame :: proc(type, text: string) -> bool {
 			// H2: the Hub does not recognise this access token. One renewal decides:
 			// only a typed invalid_grant from the refresh endpoint is final.
 			action := bridge_credential_note_rejection(attempted, .Access_Invalid)
+			if action == .Not_Renewable {
+				bridge_hub_park_unrenewable_invalid(msg)
+				break
+			}
 			fmt.eprintfln("bridge hub refused the access token (%s); renewal=%v; reconnecting", msg, action)
 		case "bridge_sunset_pending":
 			// The hub may restore this machine if replacement enrollment rolls
@@ -935,6 +939,10 @@ bridge_hub_session_frame :: proc(type, text: string) -> bool {
 				// database error read as unknown) to revoked. That is not proof the
 				// enrollment is gone: renew once and let the refresh endpoint decide.
 				action := bridge_credential_note_rejection(attempted, .Access_Invalid)
+				if action == .Not_Renewable {
+					bridge_hub_park_unrenewable_invalid(msg)
+					break
+				}
 				fmt.eprintfln("bridge hub refused the access token as unknown (%s); renewal=%v; not parking", msg, action)
 				break
 			}
@@ -948,6 +956,15 @@ bridge_hub_session_frame :: proc(type, text: string) -> bool {
 		return true
 	}
 	return false
+}
+
+// bridge_hub_park_unrenewable_invalid: an unknown access token that this process
+// cannot renew (explicit --bridge-token, no refresh file, renewal stopped) has no
+// recovery but re-enrollment. Park and mark it, as before H2, instead of redialling
+// the dead credential forever.
+bridge_hub_park_unrenewable_invalid :: proc(msg: string) {
+	bridge_hub_stop_traffic(true)
+	fmt.eprintfln("bridge hub refused the access token (%s) and this bridge cannot renew it; re-enrollment is required", msg)
 }
 
 bridge_hub_handle_command :: proc(conn: ^ws.Connection, text: string) {

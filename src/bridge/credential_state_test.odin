@@ -449,10 +449,6 @@ cred_ws_unknown_token_is_not_classified_as_revoked :: proc(t: ^testing.T) {
 	testing.expect(t, bridge_hub_session_frame("bridge_error", `{"payload":{"code":"bridge_token_expired","message":"bridge access token has expired"}}`))
 	testing.expect(t, !sync.atomic_load(&bridge_hub_traffic_stopped))
 	testing.expect_value(t, cs_hub.exchanges, 0)
-	// Without a renewal owner the unknown token still does not park.
-	g_bridge_cred.renewable = false
-	testing.expect(t, bridge_hub_session_frame("bridge_error", `{"payload":{"code":"bridge_credential_revoked","message":"bridge token is invalid"}}`))
-	testing.expect(t, !sync.atomic_load(&bridge_hub_traffic_stopped))
 	// A real revocation (Forbidden on the Hub) parks as before.
 	testing.expect(t, bridge_hub_session_frame("bridge_error", `{"payload":{"code":"bridge_credential_revoked","message":"bridge credential is revoked"}}`))
 	testing.expect(t, sync.atomic_load(&bridge_hub_traffic_stopped) && bridge_hub_traffic_final)
@@ -567,4 +563,82 @@ cred_metadata_is_bound_to_the_access_token :: proc(t: ^testing.T) {
 	token, _, acquired := bridge_credential_acquire(0)
 	testing.expect(t, acquired && token == "hba_g0.secret", "an explicit token passes through")
 	delete(token)
+}
+
+// M1: an unknown token this process CANNOT renew (explicit --bridge-token, no
+// refresh file, renewal stopped) parks and marks re-enrollment as before H2,
+// instead of redialling a dead credential forever.
+@(test)
+cred_ws_unknown_token_without_renewal_parks :: proc(t: ^testing.T) {
+	sync.mutex_lock(&bridge_test_config_mutex); defer sync.mutex_unlock(&bridge_test_config_mutex)
+	context.allocator = runtime.heap_allocator()
+	for frame, i in ([]string{
+		`{"payload":{"code":"bridge_credential_revoked","message":"bridge token is invalid"}}`,
+		`{"payload":{"code":"bridge_token_invalid","message":"bridge token is invalid"}}`,
+	}) {
+		for phase in ([]Bridge_Credential_Phase{.Renewal_Unavailable, .Renewal_Stopped}) {
+			f := cs_setup(fmt.tprintf("m1%d%v", i, phase))
+			g_bridge_cred.renewable = phase == .Renewal_Stopped
+			g_bridge_cred.phase = phase
+			testing.expect(t, bridge_hub_session_frame("bridge_error", frame))
+			testing.expectf(t, sync.atomic_load(&bridge_hub_traffic_stopped) && bridge_hub_traffic_final, "frame %d phase %v parks finally", i, phase)
+			testing.expect_value(t, cs_hub.exchanges, 0)
+			cs_teardown(f)
+		}
+	}
+	// With a config path the park writes the re-enrollment marker.
+	f := cs_setup("m1mark"); defer cs_teardown(f)
+	g_bridge_cred.renewable = false
+	testing.expect(t, os.make_directory_all(f.dir) == nil || os.exists(f.dir))
+	bridge_hub_traffic_config_path = fmt.tprintf("%s/config.toml", f.dir)
+	testing.expect(t, bridge_hub_session_frame("bridge_error", `{"payload":{"code":"bridge_token_invalid","message":"bridge token is invalid"}}`))
+	marker := fmt.tprintf("%s/needs-reenrollment.json", f.dir)
+	testing.expect(t, os.exists(marker), "re-enrollment is marked")
+}
+
+// M2: a pending pair recovered long after it was received is aged from its
+// persisted receipt time, not from the recovery: after a 2 h gap it is due at once.
+@(test)
+cred_recovered_pair_keeps_its_receipt_age :: proc(t: ^testing.T) {
+	sync.mutex_lock(&bridge_test_config_mutex); defer sync.mutex_unlock(&bridge_test_config_mutex)
+	context.allocator = runtime.heap_allocator()
+	f := cs_setup("m2"); defer cs_teardown(f)
+	pending := Bridge_Refresh_Pending{version = 1, key = f.env.key, api_base = CS_HUB, bridge_id = bridge_config.daemon_id, first_ms = CS_T0_WALL - 5_000,
+		credential = {access_token = "hba_old.secret", refresh_token = "hbf_old.secret", expires_in = 3600, received_wall_ms = CS_T0_WALL}}
+	testing.expect(t, bridge_refresh_pending_save(f.env.pending_path, pending))
+	// The process restarts two hours later (fresh monotonic clock).
+	cs_advance(7_200_000, 0)
+	g_bridge_cred.issued_mono_ms = 0
+	testing.expect(t, bridge_credential_recover_at_start(&f.env))
+	testing.expect_value(t, g_bridge_cred.issued_wall_ms, CS_T0_WALL)
+	testing.expect_value(t, g_bridge_cred.issued_mono_ms, i64(0))
+	needs, _ := bridge_credential_evaluate(cs_wall_ms(), cs_mono_ms())
+	testing.expect(t, needs, "a recovered pair received 2 h ago is due immediately")
+	meta, ok := bridge_credential_meta_load(f.credential_file, CS_HUB, bridge_config.daemon_id, "hba_old.secret")
+	testing.expect(t, ok && meta.issued_wall_ms == CS_T0_WALL, "metadata records the receipt time")
+	// A record from an older binary (no receipt time) falls back to first_ms.
+	f2 := cs_setup("m2old"); defer cs_teardown(f2)
+	pending.key = f2.env.key; pending.bridge_id = bridge_config.daemon_id
+	pending.credential.received_wall_ms = 0
+	testing.expect(t, bridge_refresh_pending_save(f2.env.pending_path, pending))
+	cs_advance(7_200_000, 0)
+	testing.expect(t, bridge_credential_recover_at_start(&f2.env))
+	testing.expect_value(t, g_bridge_cred.issued_wall_ms, CS_T0_WALL - 5_000)
+	needs, _ = bridge_credential_evaluate(cs_wall_ms(), cs_mono_ms())
+	testing.expect(t, needs)
+}
+
+// L5: no acquire wait while a received pair sits in a local-commit backoff.
+@(test)
+cred_acquire_does_not_wait_during_pending_commit :: proc(t: ^testing.T) {
+	sync.mutex_lock(&bridge_test_config_mutex); defer sync.mutex_unlock(&bridge_test_config_mutex)
+	context.allocator = runtime.heap_allocator()
+	f := cs_setup("l5"); defer cs_teardown(f)
+	cs_advance(7_200_000, 0)
+	g_bridge_cred.phase = .Pending_Commit
+	started := time.tick_now()
+	token, _, ok := bridge_credential_acquire(5_000)
+	delete(token)
+	testing.expect(t, ok)
+	testing.expect(t, time.tick_since(started) < time.Second, "returned without waiting")
 }

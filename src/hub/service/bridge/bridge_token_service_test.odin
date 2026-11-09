@@ -810,3 +810,29 @@ test_invalid_grant_is_typed :: proc(t: ^testing.T) {
 	testing.expect_value(t, err.message, "invalid_grant")
 	testing.expect_value(t, err.cause, BRIDGE_INVALID_GRANT_CAUSE)
 }
+
+// L4: a family read that the database cuts short (here: SQLITE_BUSY under another
+// connection's EXCLUSIVE lock) is an error, never an empty lineage. Otherwise the
+// grace check would see "no newer generation" and re-grant a reused refresh token.
+@(test)
+test_busy_family_read_fails_closed :: proc(t: ^testing.T) {
+	f := setup_token_fixture(t, "busyfamily")
+	defer teardown_token_fixture(f)
+	enrolled := enrol_one(t, f, "busyfamily-host")
+	pair, ok, err := refresh_bridge_token(&f.svc, enrolled.refresh_token)
+	testing.expect(t, ok, err.message)
+	_ = sqlite.exec(&f.conn, "PRAGMA busy_timeout = 0;")
+	other, other_ok, _ := sqlite.open(f.db_path)
+	testing.expect(t, other_ok)
+	testing.expect(t, sqlite.exec(&other, "BEGIN EXCLUSIVE;"), "hold an exclusive lock")
+	family, family_err := iface.bridge_list_tokens_by_family(&f.repo, pair.family_id)
+	testing.expect(t, family == nil && family_err.code == .Internal_Error, "a BUSY family read is an error, not an empty lineage")
+	_, rok, rerr := refresh_bridge_token(&f.svc, enrolled.refresh_token)
+	testing.expect(t, !rok)
+	testing.expect_value(t, rerr.code, domain.Error_Code.Internal_Error)
+	_ = sqlite.exec(&other, "ROLLBACK;")
+	sqlite.close(&other)
+	_ = sqlite.exec(&f.conn, "PRAGMA busy_timeout = 5000;")
+	_, vok, _ := verify_bridge_token(&f.svc, pair.access_token)
+	testing.expect(t, vok, "nothing was revoked while the database was busy")
+}

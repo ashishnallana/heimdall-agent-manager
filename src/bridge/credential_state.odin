@@ -249,7 +249,7 @@ bridge_credential_acquire :: proc(wait_ms := BRIDGE_CREDENTIAL_ACQUIRE_WAIT_MS, 
 			bridge_credential_request_renewal_locked("acquire_due")
 			start := s.generation
 			started := time.tick_now()
-			for s.generation == start && s.phase != .Offline_Retry && !bridge_credential_phase_blocks_renewal(s.phase) {
+			for s.generation == start && s.phase != .Offline_Retry && s.phase != .Pending_Commit && !bridge_credential_phase_blocks_renewal(s.phase) {
 				spent := i64(time.tick_since(started) / time.Millisecond)
 				if spent >= wait_ms do break
 				_ = sync.cond_wait_with_timeout(&g_bridge_credential_cond, &g_bridge_credential_mu, time.Duration(min(wait_ms - spent, 1000)) * time.Millisecond)
@@ -287,7 +287,11 @@ bridge_credential_traffic_blocked :: proc() -> bool {
 // unspent) and the owner then parks with reason generation_assertion. The caller
 // has already written the pair to disk. Returns the new generation and whether the
 // publish was consistent.
-bridge_credential_publish :: proc(cred: Bridge_Enroll_Credential, base_generation: u64, check_base := true) -> (generation: u64, consistent: bool) {
+//
+// recovered=true is a pair read back from a pending record: its age is measured
+// from its persisted receipt time (wall only; the monotonic anchor of another
+// process or boot is meaningless), never from now.
+bridge_credential_publish :: proc(cred: Bridge_Enroll_Credential, base_generation: u64, check_base := true, recovered := false) -> (generation: u64, consistent: bool) {
 	now_wall, now_mono := bridge_credential_now()
 	sync.mutex_lock(&g_bridge_credential_mu)
 	s := &g_bridge_cred
@@ -297,6 +301,11 @@ bridge_credential_publish :: proc(cred: Bridge_Enroll_Credential, base_generatio
 	s.known = true
 	s.issued_wall_ms = now_wall
 	s.issued_mono_ms = now_mono
+	if recovered {
+		s.issued_wall_ms = cred.received_wall_ms if cred.received_wall_ms > 0 else 0
+		s.issued_mono_ms = 0
+		s.known = s.issued_wall_ms > 0
+	}
 	s.expires_in_s = cred.expires_in
 	s.refresh_expires_in_s = cred.refresh_expires_in
 	s.renewal_requested = false
@@ -416,7 +425,7 @@ bridge_credential_wait_newer :: proc(generation: u64, wait_ms: i64) -> bool {
 	defer sync.mutex_unlock(&g_bridge_credential_mu)
 	s := &g_bridge_cred
 	started := time.tick_now()
-	for s.generation <= generation && s.renewable && s.phase != .Offline_Retry && !bridge_credential_phase_blocks_renewal(s.phase) {
+	for s.generation <= generation && s.renewable && s.phase != .Offline_Retry && s.phase != .Pending_Commit && !bridge_credential_phase_blocks_renewal(s.phase) {
 		spent := i64(time.tick_since(started) / time.Millisecond)
 		if spent >= wait_ms do break
 		_ = sync.cond_wait_with_timeout(&g_bridge_credential_cond, &g_bridge_credential_mu, time.Duration(min(wait_ms - spent, 1000)) * time.Millisecond)
@@ -580,6 +589,7 @@ Bridge_Renewal_Env :: struct {
 	// renewal never bypasses a pause or a budget backoff (D7).
 	hold_wall_ms, hold_mono_ms, hold_ms: i64,
 	jitter_seed:  u64, // 0 = random
+	recovered:    bool, // the pair came from a pending record on disk
 }
 
 Bridge_Renewal_Outcome :: enum {
@@ -641,7 +651,7 @@ bridge_renewal_hold_remaining :: proc(env: ^Bridge_Renewal_Env) -> i64 {
 
 bridge_renewal_finish_published :: proc(env: ^Bridge_Renewal_Env) -> Bridge_Renewal_Outcome {
 	cred := env.recovery.pending.credential
-	_, consistent := bridge_credential_publish(cred, env.recovery.base_generation)
+	_, consistent := bridge_credential_publish(cred, env.recovery.base_generation, recovered = env.recovered)
 	bridge_refresh_after_publish()
 	_ = os.remove(env.pending_path); _ = os.remove(env.request_path)
 	// The journal receipt for this rotation is complete; the next rotation starts fresh.
@@ -649,6 +659,7 @@ bridge_renewal_finish_published :: proc(env: ^Bridge_Renewal_Env) -> Bridge_Rene
 	fmt.printfln("bridge credential refreshed (access token valid for %ds)", cred.expires_in)
 	env.recovery = {}
 	env.loaded = false
+	env.recovered = false
 	env.pauses = 0
 	env.commit_failures = 0
 	env.hold_ms = 0
@@ -672,6 +683,12 @@ bridge_renewal_attempt :: proc(env: ^Bridge_Renewal_Env, now_ms: i64) -> (Bridge
 		env.recovery.pending.key = env.key; env.recovery.pending.api_base = env.api_base; env.recovery.pending.bridge_id = env.bridge_id
 		env.recovery.epoch = bridge_credential_epoch()
 		env.recovery.base_generation = bridge_credential_current_generation()
+		env.recovered = env.recovery.has_pair
+		if env.recovered && env.recovery.pending.credential.received_wall_ms <= 0 {
+			// A record written before receipt times were persisted: the first attempt
+			// precedes the receipt, so this over-states the age (renews early, safely).
+			env.recovery.pending.credential.received_wall_ms = env.recovery.pending.first_ms
+		}
 		if !env.recovery.has_pair {
 			bridge_retry_reopen_success(env.key)
 			// A receipt left terminal by a RETRIABLE failure gets a fresh bounded budget

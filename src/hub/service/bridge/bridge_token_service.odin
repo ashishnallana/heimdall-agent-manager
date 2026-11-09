@@ -406,22 +406,31 @@ Session_Credential :: struct {
 // session bound. valid_for_ms runs to the same instant verify_access_token stops
 // accepting it: expires_at plus the clock-skew grace, never past the family cap.
 access_token_session_credential :: proc(service: ^Bridge_Service, token: string) -> (Session_Credential, bool) {
-	if service == nil || service.repo == nil do return {}, false
+	cred, ok, _ := access_token_session_credential_checked(service, token)
+	return cred, ok
+}
+
+// access_token_session_credential_checked also reports a repository failure (H0) as
+// a retriable Internal_Error, so the upgrade answers a plain bridge_error instead of
+// bridge_token_expired (which spends a rotation on the bridge).
+access_token_session_credential_checked :: proc(service: ^Bridge_Service, token: string) -> (Session_Credential, bool, domain.Domain_Error) {
+	if service == nil || service.repo == nil do return {}, false, {}
 	token_id, _, split_ok := split_credential(ACCESS_TOKEN_PREFIX, token)
-	if !split_ok do return {}, false
-	row, ok, _ := iface.bridge_get_token(service.repo, token_id)
-	if !ok || row.kind != .Access do return {}, false
+	if !split_ok do return {}, false, {}
+	row, ok, row_err := iface.bridge_get_token(service.repo, token_id)
+	if !ok && bridge_repository_read_failed(row_err) do return {}, false, bridge_repository_unavailable_error()
+	if !ok || row.kind != .Access do return {}, false, {}
 	defer domain.bridge_token_destroy(&row)
 	now_ms, now_ok := platform.rfc3339_to_unix_ms(platform.clock_now(service.clock))
 	exp_ms, exp_ok := platform.rfc3339_to_unix_ms(row.expires_at)
-	if !now_ok || !exp_ok do return {}, false
+	if !now_ok || !exp_ok do return {}, false, {}
 	until := exp_ms + i64(BRIDGE_TOKEN_CLOCK_SKEW_SECONDS) * 1000
 	if row.family_expires_at != "" {
 		if cap_ms, cap_ok := platform.rfc3339_to_unix_ms(row.family_expires_at); cap_ok {
 			until = min(until, cap_ms + i64(BRIDGE_TOKEN_CLOCK_SKEW_SECONDS) * 1000)
 		}
 	}
-	return Session_Credential{token_id = strings.clone(token_id, context.temp_allocator), valid_for_ms = until - now_ms}, true
+	return Session_Credential{token_id = strings.clone(token_id, context.temp_allocator), valid_for_ms = until - now_ms}, true, {}
 }
 
 // Session_Credential_State is the outcome of re-checking a live session's token row.
