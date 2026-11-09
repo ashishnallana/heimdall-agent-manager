@@ -342,7 +342,12 @@ verify_access_token_scoped :: proc(service: ^Bridge_Service, token: string, scop
 	invalid := domain.domain_error(.Unauthenticated, "bridge token is invalid")
 	token_id, presented_secret, split_ok := split_credential(ACCESS_TOKEN_PREFIX, token)
 	if !split_ok do return contracts.Auth_Context{}, "", false, invalid
-	row, ok, _ := iface.bridge_get_token(service.repo, token_id)
+	row, ok, row_err := iface.bridge_get_token(service.repo, token_id)
+	// H0: a repository failure is not an authentication answer. Only a real miss
+	// keeps the uniform "invalid" reply (and its equal-work path below); anything
+	// else is a retriable Internal_Error, which the WS upgrade sends as a plain
+	// bridge_error and never as bridge_credential_revoked.
+	if !ok && bridge_repository_read_failed(row_err) do return {}, "", false, bridge_repository_unavailable_error()
 	if !ok {
 		// Not an early return: burn the same work a wrong secret would. See
 		// verify_credential_miss, and read its header before touching this.
@@ -370,7 +375,8 @@ verify_access_token_scoped :: proc(service: ^Bridge_Service, token: string, scop
 	if row.family_expires_at != "" && token_is_expired(row.family_expires_at, now) {
 		return contracts.Auth_Context{}, "", false, domain.domain_error(.Forbidden, "bridge credential has reached its maximum lifetime; re-enrollment is required")
 	}
-	bridge, bridge_ok, _ := iface.bridge_get_bridge(service.repo, row.bridge_id)
+	bridge, bridge_ok, bridge_err := iface.bridge_get_bridge(service.repo, row.bridge_id)
+	if !bridge_ok && bridge_repository_read_failed(bridge_err) do return {}, "", false, bridge_repository_unavailable_error()
 	if !bridge_ok do return contracts.Auth_Context{}, "", false, invalid
 	// A revoked BRIDGE and a revoked TOKEN are two separate records and both are
 	// checked: revoke_bridge stamps both, but a token row written before that change
@@ -431,14 +437,18 @@ Session_Credential_State :: enum {
 // vanished is treated as revoked.
 session_credential_state :: proc(service: ^Bridge_Service, token_id: string) -> Session_Credential_State {
 	if service == nil || service.repo == nil || token_id == "" do return .Revoked
-	row, ok, _ := iface.bridge_get_token(service.repo, token_id)
+	row, ok, row_err := iface.bridge_get_token(service.repo, token_id)
+	// H0: a recheck that cannot read the row keeps the session until the next
+	// check. Only a row that is really gone ends it as revoked.
+	if !ok && bridge_repository_read_failed(row_err) do return .Valid
 	if !ok do return .Revoked
 	defer domain.bridge_token_destroy(&row)
 	if row.revoked_at != "" {
 		if credential_revocation_is_recoverable(service, token_id) do return .Pending_Sunset
 		return .Revoked
 	}
-	bridge, bridge_ok, _ := iface.bridge_get_bridge(service.repo, row.bridge_id)
+	bridge, bridge_ok, bridge_err := iface.bridge_get_bridge(service.repo, row.bridge_id)
+	if !bridge_ok && bridge_repository_read_failed(bridge_err) do return .Valid
 	if !bridge_ok do return .Revoked
 	defer domain.bridge_destroy(&bridge)
 	if bridge.status == .Revoked {
@@ -466,12 +476,15 @@ session_credential_state :: proc(service: ^Bridge_Service, token_id: string) -> 
 // require re-enrollment, DO NOT LOOP), so distinguishing them on the wire would add
 // an oracle and no capability. The server log distinguishes them.
 refresh_bridge_token :: proc(service: ^Bridge_Service, presented: string, request_id := "") -> (Bridge_Token_Pair, bool, domain.Domain_Error) {
-	invalid_grant := domain.domain_error(.Unauthenticated, "invalid_grant")
+	invalid_grant := bridge_invalid_grant_error()
 	request_id := request_id if refresh_request_id_valid(request_id) else ""
 	if service == nil || service.repo == nil do return Bridge_Token_Pair{}, false, domain.domain_error(.Internal_Error, "bridge service is not configured")
 	token_id, presented_secret, split_ok := split_credential(REFRESH_TOKEN_PREFIX, presented)
 	if !split_ok do return Bridge_Token_Pair{}, false, invalid_grant
-	row, ok, _ := iface.bridge_get_token(service.repo, token_id)
+	row, ok, row_err := iface.bridge_get_token(service.repo, token_id)
+	// H0: never answer invalid_grant for a lookup that failed. invalid_grant makes
+	// the bridge wipe its pair and demand re-enrollment; a database blip must not.
+	if !ok && bridge_repository_read_failed(row_err) do return {}, false, bridge_repository_unavailable_error()
 	if !ok {
 		_ = verify_credential_miss(presented_secret)
 		return Bridge_Token_Pair{}, false, invalid_grant
@@ -501,7 +514,17 @@ refresh_bridge_token :: proc(service: ^Bridge_Service, presented: string, reques
 	if row.rotated_at != "" {
 		// SPENT. A retry of this exact rotation, a crash-recovery replay inside the
 		// grace window, or theft.
-		if refresh_is_retry_of_rotation(service, row, request_id, now) || refresh_within_grace(service, row, now) {
+		// H0: the family read behind both checks must succeed. An unreadable family
+		// would otherwise look like "no grace" and revoke the lineage as theft.
+		is_retry, retry_err := refresh_is_retry_of_rotation_checked(service, row, request_id, now)
+		if retry_err.code != .None do return {}, false, retry_err
+		in_grace := false
+		if !is_retry {
+			grace, grace_err := refresh_within_grace_checked(service, row, now)
+			if grace_err.code != .None do return {}, false, grace_err
+			in_grace = grace
+		}
+		if is_retry || in_grace {
 			return rotate_from(service, row, now, revoke_newer_generations = true)
 		}
 		// THEFT (§7.4.3): revoke the whole lineage, both kinds, every generation,
@@ -525,31 +548,45 @@ refresh_bridge_token :: proc(service: ^Bridge_Service, presented: string, reques
 // A row whose rotated_at does not parse is NOT graced. Fail closed: an unreadable
 // timestamp must not become an unbounded grace window.
 refresh_within_grace :: proc(service: ^Bridge_Service, row: domain.Bridge_Token, now: string) -> bool {
+	grace, _ := refresh_within_grace_checked(service, row, now)
+	return grace
+}
+
+// refresh_within_grace_checked is refresh_within_grace that reports a failed
+// family read as a repository error instead of "not in grace" (H0).
+refresh_within_grace_checked :: proc(service: ^Bridge_Service, row: domain.Bridge_Token, now: string) -> (bool, domain.Domain_Error) {
 	rotated_ms, rot_ok := platform.rfc3339_to_unix_ms(row.rotated_at)
 	now_ms, now_ok := platform.rfc3339_to_unix_ms(now)
-	if !rot_ok || !now_ok do return false
-	if now_ms - rotated_ms > i64(BRIDGE_REFRESH_REUSE_GRACE_SECONDS) * 1000 do return false
-	family, _ := iface.bridge_list_tokens_by_family(service.repo, row.family_id)
+	if !rot_ok || !now_ok do return false, {}
+	if now_ms - rotated_ms > i64(BRIDGE_REFRESH_REUSE_GRACE_SECONDS) * 1000 do return false, {}
+	family, family_err := iface.bridge_list_tokens_by_family(service.repo, row.family_id)
+	if bridge_repository_read_failed(family_err) do return false, bridge_repository_unavailable_error()
 	defer free_bridge_tokens(family)
 	newest := row.generation
 	for t in family {
 		if t.generation > newest do newest = t.generation
 	}
-	return newest <= row.generation + 1 && !family_descendant_delivered(family, row.generation)
+	return newest <= row.generation + 1 && !family_descendant_delivered(family, row.generation), {}
 }
 
 // refresh_is_retry_of_rotation decides the BRIDGE_REFRESH_RETRY_GRACE_SECONDS case:
 // see that constant for the three conditions, all of which are checked here.
 refresh_is_retry_of_rotation :: proc(service: ^Bridge_Service, row: domain.Bridge_Token, request_id, now: string) -> bool {
-	if request_id == "" || row.rotation_request_hash == "" do return false
-	if !verify_credential(row.rotation_request_hash, request_id) do return false
+	retry, _ := refresh_is_retry_of_rotation_checked(service, row, request_id, now)
+	return retry
+}
+
+refresh_is_retry_of_rotation_checked :: proc(service: ^Bridge_Service, row: domain.Bridge_Token, request_id, now: string) -> (bool, domain.Domain_Error) {
+	if request_id == "" || row.rotation_request_hash == "" do return false, {}
+	if !verify_credential(row.rotation_request_hash, request_id) do return false, {}
 	rotated_ms, rot_ok := platform.rfc3339_to_unix_ms(row.rotated_at)
 	now_ms, now_ok := platform.rfc3339_to_unix_ms(now)
-	if !rot_ok || !now_ok do return false
-	if now_ms - rotated_ms > i64(BRIDGE_REFRESH_RETRY_GRACE_SECONDS) * 1000 do return false
-	family, _ := iface.bridge_list_tokens_by_family(service.repo, row.family_id)
+	if !rot_ok || !now_ok do return false, {}
+	if now_ms - rotated_ms > i64(BRIDGE_REFRESH_RETRY_GRACE_SECONDS) * 1000 do return false, {}
+	family, family_err := iface.bridge_list_tokens_by_family(service.repo, row.family_id)
+	if bridge_repository_read_failed(family_err) do return false, bridge_repository_unavailable_error()
 	defer free_bridge_tokens(family)
-	return !family_descendant_delivered(family, row.generation)
+	return !family_descendant_delivered(family, row.generation), {}
 }
 
 // family_descendant_delivered reports whether any generation minted from (after)
@@ -574,10 +611,11 @@ family_descendant_delivered :: proc(family: []domain.Bridge_Token, generation: i
 // old one) is revoked, so it cannot be redeemed by whoever else may hold it. Without
 // that, a graced rotation would leave TWO live generations from one token.
 rotate_from :: proc(service: ^Bridge_Service, row: domain.Bridge_Token, now: string, revoke_newer_generations: bool, request_id := "") -> (Bridge_Token_Pair, bool, domain.Domain_Error) {
-	invalid_grant := domain.domain_error(.Unauthenticated, "invalid_grant")
+	invalid_grant := bridge_invalid_grant_error()
 	// The bridge must still exist and still be allowed to connect. Checked before
 	// minting so a revoked bridge cannot renew its way back in.
-	bridge, bridge_ok, _ := iface.bridge_get_bridge(service.repo, row.bridge_id)
+	bridge, bridge_ok, bridge_err := iface.bridge_get_bridge(service.repo, row.bridge_id)
+	if !bridge_ok && bridge_repository_read_failed(bridge_err) do return {}, false, bridge_repository_unavailable_error()
 	if !bridge_ok do return Bridge_Token_Pair{}, false, invalid_grant
 	if bridge.status == .Revoked {
 		if credential_revocation_is_recoverable(service, row.token_id) do return {}, false, pending_sunset_error()
@@ -608,7 +646,7 @@ rotate_from :: proc(service: ^Bridge_Service, row: domain.Bridge_Token, now: str
 			// Rollback may have completed between the rejected spend and this
 			// read. An unspent token is not evidence of a second holder.
 			current, current_ok, current_err := iface.bridge_get_token(service.repo, row.token_id)
-			if current_err.code != .None do return {}, false, current_err
+			if bridge_repository_read_failed(current_err) do return {}, false, bridge_repository_unavailable_error()
 			if current_ok {
 				unspent := current.rotated_at == ""
 				domain.bridge_token_destroy(&current)
@@ -620,7 +658,9 @@ rotate_from :: proc(service: ^Bridge_Service, row: domain.Bridge_Token, now: str
 		}
 	}
 
-	family, _ := iface.bridge_list_tokens_by_family(service.repo, row.family_id)
+	family, family_err := iface.bridge_list_tokens_by_family(service.repo, row.family_id)
+	// H0: minting from an unread family could collide with an existing generation.
+	if bridge_repository_read_failed(family_err) do return {}, false, bridge_repository_unavailable_error()
 	newest := row.generation
 	family_expires_at := row.family_expires_at
 	for t in family {
@@ -660,7 +700,7 @@ rotate_from :: proc(service: ^Bridge_Service, row: domain.Bridge_Token, now: str
 				// A sunset can reject the CAS and roll back before we classify
 				// it. An unchanged claim is a retry, not proof of token theft.
 				current, current_ok, current_err := iface.bridge_get_token(service.repo, row.token_id)
-				if current_err.code != .None do return {}, false, current_err
+				if bridge_repository_read_failed(current_err) do return {}, false, bridge_repository_unavailable_error()
 				if current_ok {
 					unchanged := current.regrant_claim == row.regrant_claim
 					domain.bridge_token_destroy(&current)
@@ -734,4 +774,30 @@ revoked_credential_error :: proc(message: string) -> domain.Domain_Error {
     err := domain.domain_error(.Forbidden, message)
     err.cause = "bridge_credential_revoked"
     return err
+}
+
+// ===== H0: repository errors are not authentication answers =====
+//
+// The repository reports a real miss as Not_Found (or, for a lookup that has no
+// error to give, a zero error). Anything else — a busy/locked database, a failed
+// prepare, a disk error — is an infrastructure failure. Reading it as "not found"
+// used to turn a transient database blip into invalid_grant (the bridge wipes its
+// pair) or bridge_credential_revoked (the bridge parks for good).
+bridge_repository_read_failed :: proc(err: domain.Domain_Error) -> bool {
+	return err.code != .None && err.code != .Not_Found
+}
+
+// bridge_repository_unavailable_error is the retriable answer for a failed read:
+// HTTP 5xx on the refresh endpoint and a plain bridge_error on the WS upgrade.
+bridge_repository_unavailable_error :: proc() -> domain.Domain_Error {
+	return domain.domain_error(.Internal_Error, "the bridge credential store is temporarily unavailable; retry")
+}
+
+// bridge_invalid_grant_error is the one final refresh refusal. The message stays
+// "invalid_grant" (older bridges match it); the cause types it for newer ones.
+BRIDGE_INVALID_GRANT_CAUSE :: "invalid_grant"
+bridge_invalid_grant_error :: proc() -> domain.Domain_Error {
+	err := domain.domain_error(.Unauthenticated, "invalid_grant")
+	err.cause = BRIDGE_INVALID_GRANT_CAUSE
+	return err
 }

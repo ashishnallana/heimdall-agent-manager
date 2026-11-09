@@ -127,7 +127,12 @@ bridge_get_by_column :: proc(ctx: rawptr, column, value: string) -> (domain.Brid
 	if sqlite3_prepare_v2(impl.conn.db, cstring(raw_data(query)), -1, &stmt, nil) != SQLITE_OK do return domain.Bridge{}, false, domain.domain_error(.Internal_Error, "failed to prepare bridge lookup")
 	defer sqlite3_finalize(stmt)
 	bind_text(stmt, 1, value)
-	if sqlite3_step(stmt) != SQLITE_ROW do return domain.Bridge{}, false, domain.domain_error(.Not_Found, "bridge not found")
+	// Only SQLITE_DONE is a miss; any other step result is a repository failure (H0).
+	switch rc := sqlite3_step(stmt); rc {
+	case SQLITE_ROW:
+	case SQLITE_DONE: return domain.Bridge{}, false, domain.domain_error(.Not_Found, "bridge not found")
+	case: return domain.Bridge{}, false, domain.domain_error(.Internal_Error, "failed to read bridge")
+	}
 	return bridge_from_stmt(stmt), true, domain.Domain_Error{}
 }
 

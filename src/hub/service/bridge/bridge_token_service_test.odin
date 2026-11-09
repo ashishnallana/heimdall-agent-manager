@@ -715,3 +715,98 @@ test_regrant_failure_after_claim_rolls_back_and_the_retry_recovers :: proc(t: ^t
 	_, use_ok, use_err := verify_bridge_token(&f.svc, recovered.access_token)
 	testing.expect(t, use_ok, use_err.message)
 }
+
+// ===== H0: repository errors are not authentication answers (bridge auth recovery) =====
+
+@(private = "file")
+failing_get_token :: proc(ctx: rawptr, token_id: string) -> (domain.Bridge_Token, bool, domain.Domain_Error) {
+	return domain.Bridge_Token{}, false, domain.domain_error(.Internal_Error, "injected: database is locked")
+}
+
+@(private = "file")
+failing_get_bridge :: proc(ctx: rawptr, bridge_id: string) -> (domain.Bridge, bool, domain.Domain_Error) {
+	return domain.Bridge{}, false, domain.domain_error(.Internal_Error, "injected: database is locked")
+}
+
+@(private = "file")
+failing_list_family :: proc(ctx: rawptr, family_id: string) -> ([]domain.Bridge_Token, domain.Domain_Error) {
+	return nil, domain.domain_error(.Internal_Error, "injected: database is locked")
+}
+
+// A failed token or bridge read during refresh or verification is a retriable
+// Internal_Error: never invalid_grant (the bridge would wipe its pair), never the
+// unknown-token "invalid" (the WS upgrade would answer bridge_credential_revoked),
+// and it spends and revokes nothing — the same refresh token rotates afterwards.
+@(test)
+test_repository_errors_are_not_authentication_answers :: proc(t: ^testing.T) {
+	f := setup_token_fixture(t, "repoerr")
+	defer teardown_token_fixture(f)
+	enrolled := enrol_one(t, f, "repoerr-host")
+	real_get_token := f.repo.get_token
+	real_get_bridge := f.repo.get_bridge
+
+	f.repo.get_token = failing_get_token
+	_, ok, err := refresh_bridge_token(&f.svc, enrolled.refresh_token)
+	testing.expect(t, !ok)
+	testing.expect_value(t, err.code, domain.Error_Code.Internal_Error)
+	testing.expect(t, err.message != "invalid_grant" && err.cause != BRIDGE_INVALID_GRANT_CAUSE)
+	_, vok, verr := verify_bridge_token(&f.svc, enrolled.bridge_token)
+	testing.expect(t, !vok)
+	testing.expect_value(t, verr.code, domain.Error_Code.Internal_Error)
+	token_id, _, split_ok := split_credential(ACCESS_TOKEN_PREFIX, enrolled.bridge_token)
+	testing.expect(t, split_ok)
+	testing.expect_value(t, session_credential_state(&f.svc, token_id), Session_Credential_State.Valid)
+	f.repo.get_token = real_get_token
+
+	pair, rok, rerr := refresh_bridge_token(&f.svc, enrolled.refresh_token)
+	testing.expect(t, rok, rerr.message)
+
+	f.repo.get_bridge = failing_get_bridge
+	_, vok, verr = verify_bridge_token(&f.svc, pair.access_token)
+	testing.expect(t, !vok)
+	testing.expect_value(t, verr.code, domain.Error_Code.Internal_Error)
+	_, rok, rerr = refresh_bridge_token(&f.svc, pair.refresh_token)
+	testing.expect(t, !rok)
+	testing.expect_value(t, rerr.code, domain.Error_Code.Internal_Error)
+	pair_id, _, _ := split_credential(ACCESS_TOKEN_PREFIX, pair.access_token)
+	testing.expect_value(t, session_credential_state(&f.svc, pair_id), Session_Credential_State.Valid)
+	f.repo.get_bridge = real_get_bridge
+
+	// Nothing was spent by the failed rotation: the same token rotates now.
+	advance(f, BRIDGE_REFRESH_REUSE_GRACE_SECONDS + 1)
+	_, rok, rerr = refresh_bridge_token(&f.svc, pair.refresh_token)
+	testing.expect(t, rok, rerr.message)
+}
+
+// A spent token presented inside the grace window needs a family read to tell a
+// crash-recovery retry from theft. If that read fails it must not be read as
+// "not in grace" and revoke the lineage.
+@(test)
+test_family_read_error_on_a_spent_token_is_not_theft :: proc(t: ^testing.T) {
+	f := setup_token_fixture(t, "familyerr")
+	defer teardown_token_fixture(f)
+	enrolled := enrol_one(t, f, "familyerr-host")
+	pair, ok, err := refresh_bridge_token(&f.svc, enrolled.refresh_token)
+	testing.expect(t, ok, err.message)
+	real_list := f.repo.list_tokens_by_family
+	f.repo.list_tokens_by_family = failing_list_family
+	_, rok, rerr := refresh_bridge_token(&f.svc, enrolled.refresh_token)
+	f.repo.list_tokens_by_family = real_list
+	testing.expect(t, !rok)
+	testing.expect_value(t, rerr.code, domain.Error_Code.Internal_Error)
+	_, vok, verr := verify_bridge_token(&f.svc, pair.access_token)
+	testing.expect(t, vok, "the family was not revoked")
+	_ = verr
+}
+
+// The final refusal is typed: cause invalid_grant, message unchanged for old bridges.
+@(test)
+test_invalid_grant_is_typed :: proc(t: ^testing.T) {
+	f := setup_token_fixture(t, "typedgrant")
+	defer teardown_token_fixture(f)
+	_, ok, err := refresh_bridge_token(&f.svc, "hbf_nosuchtoken.secretsecretsecret")
+	testing.expect(t, !ok)
+	testing.expect_value(t, err.code, domain.Error_Code.Unauthenticated)
+	testing.expect_value(t, err.message, "invalid_grant")
+	testing.expect_value(t, err.cause, BRIDGE_INVALID_GRANT_CAUSE)
+}

@@ -65,7 +65,13 @@ bridge_get_token_sqlite :: proc(ctx: rawptr, token_id: string) -> (domain.Bridge
 	if sqlite3_prepare_v2(impl.conn.db, cstring(raw_data(query)), -1, &stmt, nil) != SQLITE_OK do return domain.Bridge_Token{}, false, domain.domain_error(.Internal_Error, "failed to prepare bridge token lookup")
 	defer sqlite3_finalize(stmt)
 	bind_text(stmt, 1, token_id)
-	if sqlite3_step(stmt) != SQLITE_ROW do return domain.Bridge_Token{}, false, domain.domain_error(.Not_Found, "bridge token not found")
+	// Only SQLITE_DONE is a miss. A busy/locked/IO step is a repository failure the
+	// token service must not read as "unknown token" (H0, bridge auth recovery).
+	switch rc := sqlite3_step(stmt); rc {
+	case SQLITE_ROW:
+	case SQLITE_DONE: return domain.Bridge_Token{}, false, domain.domain_error(.Not_Found, "bridge token not found")
+	case: return domain.Bridge_Token{}, false, domain.domain_error(.Internal_Error, "failed to read bridge token")
+	}
 	return bridge_token_from_stmt(stmt), true, domain.Domain_Error{}
 }
 

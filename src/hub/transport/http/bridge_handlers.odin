@@ -1764,7 +1764,9 @@ bridge_ws_upgrade_handler :: proc(ctx: rawptr, req: Request, client: net.TCP_Soc
 		}
 	}
 	// Unauthenticated attempts carry no trustworthy bridge_id: they share one series.
-	if !auth_ok { bridge_metrics_connect_result(BRIDGE_ID_UNKNOWN, "auth_failed"); bridge_ws_auth_error(client, auth_err); return }
+	// H2: a bridge that advertises credential_refresh_on_invalid answers an
+	// unknown-token refusal with one renewal instead of a permanent park.
+	if !auth_ok { bridge_metrics_connect_result(BRIDGE_ID_UNKNOWN, "auth_failed"); bridge_ws_auth_error(client, auth_err, json_bool(hello_text, BRIDGE_HELLO_REFRESH_ON_INVALID)); return }
 	admitted_bridge, found, lookup_err := iface.bridge_get_bridge(h.bridges.repo, bridge_auth.bridge_id)
 	if !found { bridge_metrics_connect_result(BRIDGE_ID_UNKNOWN, "auth_failed"); _ = write_ws_text_frame(client, bridge_ws_error_payload(lookup_err.message)); return }
 	defer domain.bridge_destroy(&admitted_bridge)
@@ -2146,6 +2148,21 @@ bridge_ws_revalidate_interval := 60 * time.Second
 BRIDGE_WS_TOKEN_EXPIRED_CODE :: "bridge_token_expired"
 BRIDGE_WS_CREDENTIAL_REVOKED_CODE :: "bridge_credential_revoked"
 BRIDGE_WS_SUNSET_PENDING_CODE :: "bridge_sunset_pending"
+// H2 (bridge auth recovery): an access token the Hub does not recognise, sent only
+// to a bridge whose hello advertised BRIDGE_HELLO_REFRESH_ON_INVALID. Such a bridge
+// tries one renewal and parks only if the refresh endpoint answers invalid_grant.
+// Older bridges keep bridge_credential_revoked, so none of them starts looping.
+BRIDGE_WS_TOKEN_INVALID_CODE :: "bridge_token_invalid"
+BRIDGE_HELLO_REFRESH_ON_INVALID :: "credential_refresh_on_invalid"
+
+// bridge_ws_auth_error_code maps an authentication refusal to its WS code.
+// Family-maximum and Forbidden revocation always stay bridge_credential_revoked.
+bridge_ws_auth_error_code :: proc(err: domain.Domain_Error, refresh_on_invalid: bool) -> string {
+    if err.cause == BRIDGE_WS_SUNSET_PENDING_CODE do return BRIDGE_WS_SUNSET_PENDING_CODE
+    if err.code == .Unauthenticated && strings.contains(err.message, "expired") do return BRIDGE_WS_TOKEN_EXPIRED_CODE
+    if refresh_on_invalid && err.code == .Unauthenticated && err.message == "bridge token is invalid" do return BRIDGE_WS_TOKEN_INVALID_CODE
+    return BRIDGE_WS_CREDENTIAL_REVOKED_CODE
+}
 
 // bridge_ws_session_check enforces the session credential bound: expired (wall
 // clock against the bound recorded at upgrade or bridge_reauth), or revoked /
@@ -3899,14 +3916,13 @@ bridge_ws_domain_error :: proc(client: net.TCP_Socket, err: domain.Domain_Error)
 
 // Used only after verifying a bridge bearer, never for unrelated authorization.
 // Expiry can be refreshed; invalid/revoked credentials require explicit enrollment.
-bridge_ws_auth_error :: proc(client: net.TCP_Socket, err: domain.Domain_Error) {
+bridge_ws_auth_error :: proc(client: net.TCP_Socket, err: domain.Domain_Error, refresh_on_invalid := false) {
     if err.cause != BRIDGE_WS_SUNSET_PENDING_CODE && err.code != .Unauthenticated && err.code != .Forbidden && err.code != .Bridge_Revoked {
-        // A transient admission failure is not authoritative revocation.
+        // A transient admission failure is not authoritative revocation. Repository
+        // errors arrive here as Internal_Error (H0) and take this branch.
         _ = write_ws_text_frame(client, bridge_ws_error_payload(err.message))
         return
     }
-    code := BRIDGE_WS_CREDENTIAL_REVOKED_CODE
-    if err.cause == BRIDGE_WS_SUNSET_PENDING_CODE do code = BRIDGE_WS_SUNSET_PENDING_CODE
-    else if err.code == .Unauthenticated && strings.contains(err.message, "expired") do code = BRIDGE_WS_TOKEN_EXPIRED_CODE
+    code := bridge_ws_auth_error_code(err, refresh_on_invalid)
     _ = write_ws_text_frame(client, bridge_ws_session_error_payload(code, err.message, context.temp_allocator))
 }
