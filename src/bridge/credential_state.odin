@@ -820,6 +820,8 @@ bridge_credential_recover_at_start :: proc(env: ^Bridge_Renewal_Env) -> bool {
 // without re-evaluating age against both clocks.
 bridge_credential_renewal_loop :: proc(env: ^Bridge_Renewal_Env) {
 	for {
+		// Each iteration may write status/metadata files with temp strings; nothing in env is temp memory.
+		free_all(context.temp_allocator)
 		if sync.atomic_load(&bridge_hub_traffic_stopped) do return
 		phase, _ := bridge_credential_phase()
 		if bridge_credential_phase_blocks_renewal(phase) {
