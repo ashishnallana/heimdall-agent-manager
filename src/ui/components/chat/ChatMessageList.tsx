@@ -23,6 +23,7 @@ import MultiQuestionForm from './MultiQuestionForm';
 import type { ChatDeliveryStatus, ChatMessage, ChatTimestamp } from './types';
 import ChatActionCard from './ChatActionCard';
 import { useIsMobile } from '../shell/responsive';
+import { usePaneLayoutVisible } from '../workbench/paneVisibility';
 import { Icon, Spinner } from '@ui';
 import { replaceVaultTokens } from '../../utils/vaultCrypto.ts';
 import WorkingRings from './WorkingRings';
@@ -379,6 +380,11 @@ export default function ChatMessageList({
   const topSentinelRef = useRef<HTMLDivElement | null>(null);
   const lastConversationRef = useRef(conversationKey);
   const didInitialScrollRef = useRef(false);
+  // Opening (or returning to) a conversation lands on the latest message. The first
+  // scroll happens before the composer inset and late heights (decrypt, highlighting)
+  // exist, so until the reader scrolls, sends or the rows change, layout growth keeps
+  // the list at the bottom. There is no saved per-conversation position to restore.
+  const openSettleRef = useRef(true);
   const [showJump, setShowJump] = useState(false);
   const [highlightId, setHighlightId] = useState<string | null>(null);
   const focusedRef = useRef<string | null>(null);
@@ -737,10 +743,15 @@ export default function ChatMessageList({
   const scrollToBottom = useCallback((behavior: ScrollBehavior = 'auto') => {
     const node = scrollRef.current;
     if (!node) return;
+    // Programmatic: the scroll event it fires is not the reader's gesture.
+    programmaticScrollUntilRef.current = performance.now() + 50;
     node.scrollTo({ top: node.scrollHeight, behavior: prefersReducedMotion() ? 'auto' : behavior });
     stickyRef.current = true;
     setShowJump(false);
   }, []);
+
+  const settlingOpen = useCallback(() => openSettleRef.current && didInitialScrollRef.current
+    && pinKeyRef.current === null && !userScrolling(), [userScrolling]);
 
   useLayoutEffect(() => {
     const node = scrollRef.current;
@@ -763,6 +774,7 @@ export default function ChatMessageList({
       sizeTurnSpacer();
       stickyRef.current = true;
       didInitialScrollRef.current = false;
+      openSettleRef.current = true;
       setShowJump(false);
     }
 
@@ -810,6 +822,7 @@ export default function ChatMessageList({
     }
 
     if (count !== lastCountRef.current) {
+      openSettleRef.current = false;
       const prevCount = lastCountRef.current;
       const grew = count > prevCount;
       lastCountRef.current = count;
@@ -939,11 +952,25 @@ export default function ChatMessageList({
   // overlays it (see the bottom-inset element).
   useLayoutEffect(() => {
     if (pinEnabled) {
+      if (settlingOpen()) scrollToBottom('auto');
       updateJump();
       return;
     }
     if (stickyRef.current && didInitialScrollRef.current) scrollToBottom('auto');
-  }, [bottomInset, pinEnabled, scrollToBottom, updateJump]);
+  }, [bottomInset, pinEnabled, scrollToBottom, settlingOpen, updateJump]);
+
+  // A pane the layout hid while staying mounted (a pager page, a tile behind a
+  // maximised one, the main area under a maximised aux dock) lands on the latest
+  // message again when it is shown, like a fresh open.
+  const layoutVisible = usePaneLayoutVisible();
+  const wasLayoutVisibleRef = useRef(layoutVisible);
+  useLayoutEffect(() => {
+    const wasVisible = wasLayoutVisibleRef.current;
+    wasLayoutVisibleRef.current = layoutVisible;
+    if (!layoutVisible || wasVisible || !didInitialScrollRef.current || pinKeyRef.current !== null) return;
+    openSettleRef.current = true;
+    scrollToBottom('auto');
+  }, [layoutVisible, scrollToBottom]);
 
   // Revealing the held activity line adds content below the bubble without a resize.
   useLayoutEffect(() => { if (pinEnabled) updateJump(); }, [activityHeld, pinEnabled, updateJump]);
@@ -959,10 +986,11 @@ export default function ChatMessageList({
       // changes while the reader is stationary in history.
       prevScrollHeightRef.current = scrollRef.current?.scrollHeight ?? 0;
       sizeTurnSpacer();
+      if (settlingOpen()) scrollToBottom('auto');
     });
     observer.observe(content);
     return () => observer.disconnect();
-  }, [conversationKey, sizeTurnSpacer]);
+  }, [conversationKey, scrollToBottom, settlingOpen, sizeTurnSpacer]);
 
   // REQ-PIN-2 rev3: the scroller's own resize (rotation, window, app viewport) re-sizes
   // the exchange. No visualViewport listener and no inset observer: the keyboard and the
@@ -992,6 +1020,7 @@ export default function ChatMessageList({
     prevScrollHeightRef.current = node.scrollHeight;
     if (anchorRef.current) anchorRef.current.scrollTop = node.scrollTop;
     if (performance.now() >= programmaticScrollUntilRef.current) {
+      openSettleRef.current = false;
       gestureRef.current.lastScroll = performance.now();
       scheduleIdle();
     }

@@ -41,6 +41,11 @@ export function useDocumentVisible(): boolean {
   return visible;
 }
 
+/** The pane is laid out on screen (ignores the browser tab's visibility). */
+export function usePaneLayoutVisible(): boolean {
+  return useContext(PaneVisibilityContext);
+}
+
 /** The pane is laid out on screen AND the browser tab is visible. */
 export function usePaneVisible(): boolean {
   const layoutVisible = useContext(PaneVisibilityContext);

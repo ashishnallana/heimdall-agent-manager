@@ -8,6 +8,7 @@ import { configureStore } from '@reduxjs/toolkit';
 import { JSDOM } from 'jsdom';
 import ChatMessageList, { PIN_TAIL_PX, PIN_TAIL_MAX_PX, pinOffsetFor, pinTailFor, pinSpacerFor, pinFadeFor, PIN_FADE_RANGE_PX, PIN_TRAVEL_MS, PIN_SETTLE_MS, PIN_ACTIVITY_DELAY_MS, PIN_EASE, PIN_EASE_X, PIN_SCROLL_IDLE_MS, JUMP_THRESHOLD_PX, cubicBezierAt, restingInsetFor, TOP_FADE_PX, topFadeFor } from '../src/ui/components/chat/ChatMessageList.tsx';
 import { useComposerDockInset } from '../src/ui/components/chat/MessageComposer.tsx';
+import { PaneVisibilityProvider } from '../src/ui/components/workbench/paneVisibility.tsx';
 
 // REQ-PIN-1..6: send pin-to-top. JSDOM has no layout, so the fixture models one: a 600px
 // viewport, the first sent row (index 3) at y=1900 in content coordinates and each later
@@ -749,5 +750,63 @@ test('REQ-FADE-1..3: the top edge strip is on whenever the list is scrolled off 
     assert.equal(fade(scroll), '0');
     assert.equal(edge(), '1', 'scrolled away from the pin, the edge strip is back');
     scrollerUntouched(scroll);
+  });
+});
+
+// Opening or returning to a conversation lands on the latest message. There is no saved
+// per-conversation position: the first scroll runs before the composer inset and late
+// row heights exist, so until the reader scrolls, sends or the rows change, layout
+// growth keeps the list at the bottom.
+const atBottom = (scroll: HTMLElement) => scroll.scrollHeight - scroll.clientHeight;
+
+test('open lands at the bottom even when the composer inset and row heights arrive late', async () => {
+  await withList(async ({ render, list, geometry, observers, tail }) => {
+    // Cached messages render on the first pass, before the composer dock measured.
+    await render(list(longHistory, { bottomInset: 0 }));
+    const scroll = geometry();
+    scroll.scrollTop = 0; // the first scroll ran against the short, uninset content
+    await render(list(longHistory, { bottomInset: 80 }));
+    assert.equal(scroll.scrollTop, atBottom(scroll), 'the inset arriving keeps the list at the bottom');
+    tail.extra = 300; // decrypt / highlighting grows the last row
+    await act(async () => { observers.forEach((cb: (entries: any[]) => void) => cb([])); });
+    assert.equal(scroll.scrollTop, atBottom(scroll), 'late row growth keeps the list at the bottom');
+  });
+});
+
+test('the open settle ends at the reader\'s first scroll: later layout changes leave them where they are', async () => {
+  await withList(async ({ render, list, geometry, observers, tail }) => {
+    await render(list(longHistory, { bottomInset: 0 }));
+    const scroll = geometry();
+    await sleep(60); // past the open's own programmatic scroll
+    await scrollTo(scroll, 200);
+    await sleep(PIN_SCROLL_IDLE_MS + 20);
+    await render(list(longHistory, { bottomInset: 80 }));
+    tail.extra = 300;
+    await act(async () => { observers.forEach((cb: (entries: any[]) => void) => cb([])); });
+    assert.equal(scroll.scrollTop, 200, 'a reader in history is never pulled down');
+  });
+});
+
+test('switching back to a conversation lands at the bottom, not where it was left', async () => {
+  await withList(async ({ render, list, geometry }) => {
+    await render(list(longHistory));
+    const scroll = geometry();
+    await scrollTo(scroll, 150);
+    await render(list([msg('o1', false, 'Other chat')], { conversationKey: 'chat_other' }));
+    await render(list(longHistory));
+    assert.equal(scroll.scrollTop, atBottom(scroll), 'returning starts at the latest message');
+  });
+});
+
+test('a mounted pane the layout hid lands at the bottom when it is shown again', async () => {
+  await withList(async ({ render, list, geometry }) => {
+    const shown = (visible: boolean) => React.createElement(PaneVisibilityProvider, { visible, children: list(longHistory) });
+    await render(shown(true));
+    const scroll = geometry();
+    await scrollTo(scroll, 150);
+    await render(shown(false));
+    assert.equal(scroll.scrollTop, 150, 'hiding does not move it');
+    await render(shown(true));
+    assert.equal(scroll.scrollTop, atBottom(scroll), 'showing it again starts at the latest message');
   });
 });
