@@ -376,6 +376,8 @@ proxy_copy_response :: proc(client, upstream: net.TCP_Socket) {
 read_http_request :: proc(client: net.TCP_Socket) -> (string, bool) {
 	buf: [8192]byte
 	data := make([dynamic]byte, 0, 8192)
+	// A clone is returned, so the buffer itself is freed on every path.
+	defer delete(data)
 	for {
 		n, recv_err := net.recv_tcp(client, buf[:])
 		if recv_err != nil || n <= 0 do return "", false

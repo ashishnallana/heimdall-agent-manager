@@ -1,6 +1,7 @@
 package main
 
 import local_socket "odin_test:lib/local_socket"
+import "core:bytes"
 import "core:fmt"
 import "core:net"
 import "core:os"
@@ -87,6 +88,76 @@ bridge_local_endpoint_accept_unix_loop :: proc(listener: local_socket.Socket) {
 	}
 }
 
+// BRIDGE_LOCAL_ENDPOINT_MAX_LINE_BYTES caps one buffered JSONL line (or the HTTP
+// first line). The largest legitimate line is an artifact create, whose transport bound
+// is ~28 MiB (ARTIFACT_MAX_REQUEST_BYTES on the Hub); a caller that streams past this
+// without a newline is disconnected instead of growing the buffer without bound.
+BRIDGE_LOCAL_ENDPOINT_MAX_LINE_BYTES :: 64 * 1024 * 1024
+
+// Bridge_Line_Reader accumulates socket reads into ONE owned buffer and hands out
+// complete '\n'-terminated lines as views into it.
+//
+// The receive loops used to do `pending = strings.concatenate({pending, chunk})` for
+// every 8 KiB read and never freed the previous copy, so a single 20 MiB line copied
+// and leaked ~n^2/16 KiB bytes (~22 GiB). Here the buffer grows amortized, `scan`
+// remembers how far it has already searched for '\n' so a long line is scanned once,
+// and consumed lines are dropped by moving `start` — compaction then copies only the
+// unconsumed tail, which is never more than the last read.
+//
+// Views returned by peek/next/pending are valid until the next append.
+Bridge_Line_Reader :: struct {
+	buf:   [dynamic]u8,
+	start: int, // first unconsumed byte
+	scan:  int, // bytes in [start, scan) are known to contain no '\n'
+}
+
+bridge_line_reader_destroy :: proc(r: ^Bridge_Line_Reader) {
+	delete(r.buf)
+	r^ = {}
+}
+
+// bridge_line_reader_append adds one read. It returns false when the unconsumed data
+// would exceed BRIDGE_LOCAL_ENDPOINT_MAX_LINE_BYTES; the caller should drop the client.
+bridge_line_reader_append :: proc(r: ^Bridge_Line_Reader, data: []u8) -> bool {
+	if r.start > 0 {
+		remaining := len(r.buf) - r.start
+		copy(r.buf[:], r.buf[r.start:])
+		resize(&r.buf, remaining)
+		r.scan -= r.start
+		r.start = 0
+	}
+	if len(r.buf) + len(data) > BRIDGE_LOCAL_ENDPOINT_MAX_LINE_BYTES do return false
+	append(&r.buf, ..data)
+	return true
+}
+
+// bridge_line_reader_peek returns the next complete line (without its '\n') without
+// consuming it.
+bridge_line_reader_peek :: proc(r: ^Bridge_Line_Reader) -> (string, bool) {
+	idx := bytes.index_byte(r.buf[r.scan:], '\n')
+	if idx < 0 {
+		r.scan = len(r.buf)
+		return "", false
+	}
+	r.scan += idx
+	return string(r.buf[r.start:r.scan]), true
+}
+
+// bridge_line_reader_next returns and consumes the next complete line.
+bridge_line_reader_next :: proc(r: ^Bridge_Line_Reader) -> (string, bool) {
+	line, ok := bridge_line_reader_peek(r)
+	if !ok do return "", false
+	r.start = r.scan + 1
+	r.scan = r.start
+	return line, true
+}
+
+// bridge_line_reader_pending is every unconsumed byte, for handing the connection to
+// another protocol (the HTTP proxy clones it).
+bridge_line_reader_pending :: proc(r: ^Bridge_Line_Reader) -> string {
+	return string(r.buf[r.start:])
+}
+
 bridge_local_endpoint_unix_client_thread :: proc(client: local_socket.Socket) {
 	registered_instance := ""
 	// REQ-XM-4: see bridge_local_endpoint_client_thread — the proxy path takes
@@ -98,15 +169,16 @@ bridge_local_endpoint_unix_client_thread :: proc(client: local_socket.Socket) {
 		if !proxy_owned do local_socket.close(client)
 	}
 	buf: [8192]byte
-	pending := ""
+	reader: Bridge_Line_Reader
+	defer bridge_line_reader_destroy(&reader)
 	for {
 		n := local_socket.recv(client, buf[:])
 		if n <= 0 do return
-		pending = strings.concatenate({pending, string(buf[:n])})
+		if !bridge_line_reader_append(&reader, buf[:n]) do return
 		// REQ-XM-4: same first-line HTTP demultiplex as the loopback listener.
 		if first_line {
-			if idx := strings.index_byte(pending, '\n'); idx >= 0 {
-				first_line_str := strings.trim_space(pending[:idx])
+			if first, first_ok := bridge_line_reader_peek(&reader); first_ok {
+				first_line_str := strings.trim_space(first)
 				if bridge_telemetry_looks_like_agents_count(first_line_str) {
 					resp := bridge_telemetry_agents_count_http_response()
 					defer delete(resp)
@@ -122,7 +194,7 @@ bridge_local_endpoint_unix_client_thread :: proc(client: local_socket.Socket) {
 					return
 				}
 				if bridge_config.local_proxy_enabled && bridge_proxy_looks_like_http(first_line_str) {
-					bridge_local_proxy_serve_unix(client, pending)
+					bridge_local_proxy_serve_unix(client, bridge_line_reader_pending(&reader))
 					proxy_owned = true
 					return
 				}
@@ -130,10 +202,9 @@ bridge_local_endpoint_unix_client_thread :: proc(client: local_socket.Socket) {
 			}
 		}
 		for {
-			idx := strings.index_byte(pending, '\n')
-			if idx < 0 do break
-			line := strings.trim_space(pending[:idx])
-			pending = pending[idx + 1:]
+			raw_line, line_ok := bridge_line_reader_next(&reader)
+			if !line_ok do break
+			line := strings.trim_space(raw_line)
 			if line == "" do continue
 			if inst, sub_ok := bridge_local_subscribe_instance(line); sub_ok { registered_instance = inst; bridge_wrapper_push_register_unix(inst, client) }
 			resp := bridge_local_endpoint_handle_jsonl_line(line)
@@ -166,18 +237,19 @@ bridge_local_endpoint_client_thread :: proc(client: net.TCP_Socket) {
 		if !proxy_owned do net.close(client)
 	}
 	buf: [8192]byte
-	pending := ""
+	reader: Bridge_Line_Reader
+	defer bridge_line_reader_destroy(&reader)
 	for {
 		n, err := net.recv_tcp(client, buf[:])
 		if err != nil || n <= 0 do return
-		pending = strings.concatenate({pending, string(buf[:n])})
+		if !bridge_line_reader_append(&reader, buf[:n]) do return
 		// REQ-XM-4: demultiplex HTTP from JSONL on the first line only. An HTTP
 		// request line means this is a /proxy/<session_id>/<path> call, which owns
 		// the socket for the rest of its life; anything else is the JSONL protocol
 		// and falls through completely unchanged.
 		if first_line {
-			if idx := strings.index_byte(pending, '\n'); idx >= 0 {
-				first_line_str := strings.trim_space(pending[:idx])
+			if first, first_ok := bridge_line_reader_peek(&reader); first_ok {
+				first_line_str := strings.trim_space(first)
 				if bridge_telemetry_looks_like_agents_count(first_line_str) {
 					resp := bridge_telemetry_agents_count_http_response()
 					defer delete(resp)
@@ -191,7 +263,7 @@ bridge_local_endpoint_client_thread :: proc(client: net.TCP_Socket) {
 					return
 				}
 				if bridge_config.local_proxy_enabled && bridge_proxy_looks_like_http(first_line_str) {
-					bridge_local_proxy_serve_tcp(client, pending)
+					bridge_local_proxy_serve_tcp(client, bridge_line_reader_pending(&reader))
 					proxy_owned = true
 					return
 				}
@@ -199,10 +271,9 @@ bridge_local_endpoint_client_thread :: proc(client: net.TCP_Socket) {
 			}
 		}
 		for {
-			idx := strings.index_byte(pending, '\n')
-			if idx < 0 do break
-			line := strings.trim_space(pending[:idx])
-			pending = pending[idx + 1:]
+			raw_line, line_ok := bridge_line_reader_next(&reader)
+			if !line_ok do break
+			line := strings.trim_space(raw_line)
 			if line == "" do continue
 			if inst, sub_ok := bridge_local_subscribe_instance(line); sub_ok { registered_instance = inst; bridge_wrapper_push_register_tcp(inst, client) }
 			resp := bridge_local_endpoint_handle_jsonl_line(line)

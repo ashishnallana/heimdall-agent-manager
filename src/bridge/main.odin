@@ -682,6 +682,7 @@ handle_bridge_client :: proc(client: net.TCP_Socket) {
 	defer net.close(client)
 	request, ok := read_http_request(client)
 	if !ok do return
+	defer delete(request)
 	method, route := request_method_route(request)
 	if method == "OPTIONS" {
 		write_response(client, 200, "OK", `{}`)
@@ -828,26 +829,42 @@ bridge_ws_chunk_count :: proc(total_bytes, chunk_bytes: int) -> int {
 	return ws.chunk_count(total_bytes, effective_chunk_bytes)
 }
 
+// BRIDGE_LOOPBACK_MAX_REQUEST_BYTES caps a buffered loopback request; its routes carry
+// small JSON bodies, so anything larger is refused rather than buffered without bound.
+BRIDGE_LOOPBACK_MAX_REQUEST_BYTES :: 16 * 1024 * 1024
+
+// read_http_request returns a heap-owned request the caller must delete. Reads grow one
+// buffer amortized (this used to concatenate a fresh copy per 4 KiB read and leak every
+// previous one), and the head is parsed for Content-Length once instead of per read.
+// A peer that closes early still gets what arrived, as before.
 read_http_request :: proc(client: net.TCP_Socket) -> (string, bool) {
 	buf: [4096]byte
-	n, recv_err := net.recv_tcp(client, buf[:])
-	if recv_err != nil || n <= 0 do return "", false
-	request := strings.clone(string(buf[:n]))
-	for !http_request_complete(request) {
-		m, err := net.recv_tcp(client, buf[:])
-		if err != nil || m <= 0 do break
-		request = strings.concatenate({request, string(buf[:m])})
+	data := make([dynamic]byte, 0, len(buf))
+	head_end, content_length := -1, 0
+	for {
+		n, recv_err := net.recv_tcp(client, buf[:])
+		if recv_err != nil || n <= 0 {
+			if len(data) == 0 {
+				delete(data)
+				return "", false
+			}
+			break
+		}
+		if len(data) + n > BRIDGE_LOOPBACK_MAX_REQUEST_BYTES {
+			delete(data)
+			return "", false
+		}
+		scan_from := max(len(data) - 3, 0)
+		append(&data, ..buf[:n])
+		if head_end < 0 {
+			idx := strings.index(string(data[scan_from:]), "\r\n\r\n")
+			if idx < 0 do continue
+			head_end = scan_from + idx
+			content_length = request_content_length(string(data[:head_end + 4]))
+		}
+		if len(data) - (head_end + 4) >= content_length do break
 	}
-	return request, true
-}
-
-http_request_complete :: proc(request: string) -> bool {
-	head_end := strings.index(request, "\r\n\r\n")
-	if head_end < 0 do return false
-	content_length := request_content_length(request)
-	if content_length <= 0 do return true
-	body_len := len(request) - (head_end + 4)
-	return body_len >= content_length
+	return string(data[:]), true
 }
 
 request_body :: proc(request: string) -> string {
