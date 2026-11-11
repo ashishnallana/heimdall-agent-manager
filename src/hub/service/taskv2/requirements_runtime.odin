@@ -101,6 +101,18 @@ requirements_review_guard :: proc(svc: ^Service, task: domain.Task, input: Revie
 	return {}
 }
 
+// user_review_context is what a verdict on `attempt_no` must carry to pass
+// requirements_review_guard: the current requirements revision and that attempt's
+// submitted head. The task review UI reads both from the task; a Needs-action card
+// knows only the attempt it was raised for, so it binds the rest here. The guard
+// still refuses a verdict when that attempt is no longer the one in review, or the
+// requirements changed after it was submitted.
+user_review_context :: proc(svc: ^Service, task: domain.Task, attempt_no: int) -> (requirements_revision: i64, head: string, err: domain.Domain_Error) {
+	events, lerr := iface.taskchain_list_events_by_task(svc.repo, task.task_id, task.owner_user_id)
+	if lerr.code != .None do return 0, "", lerr
+	return requirements_state(events).revision, requirements_submission(events, attempt_no).head, {}
+}
+
 requirements_review_binding :: proc(svc: ^Service, task: domain.Task, payload: ^Json_Object) -> domain.Domain_Error {
 	events, err := iface.taskchain_list_events_by_task(svc.repo, task.task_id, task.owner_user_id)
 	if err.code != .None do return err

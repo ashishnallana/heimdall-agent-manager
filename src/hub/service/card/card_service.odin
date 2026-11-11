@@ -71,6 +71,38 @@ op_arg_string :: proc(obj: json.Object, key: string) -> string {
 	return ""
 }
 
+// op_arg_int reads an integer arg (args.<key> first, then top-level <key>); JSON
+// numbers may decode as Integer or Float.
+op_arg_int :: proc(obj: json.Object, key: string) -> (int, bool) {
+	read :: proc(v: json.Value) -> (int, bool) {
+		#partial switch n in v {
+		case json.Integer: return int(n), true
+		case json.Float: return int(n), true
+		}
+		return 0, false
+	}
+	if args_val, has_args := obj["args"]; has_args {
+		if args_obj, is_args_obj := args_val.(json.Object); is_args_obj {
+			if v, ok := args_obj[key]; ok do return read(v)
+		}
+	}
+	if v, ok := obj[key]; ok do return read(v)
+	return 0, false
+}
+
+// bind_card_review pins a card verdict to the attempt the card was raised for, with
+// that attempt's submitted head and the current requirements revision, the same
+// context the task review UI sends. Without it, a task whose requirements were
+// amended (revision > 1) refused every card verdict as "review context is stale".
+bind_card_review :: proc(s: ^Card_Service, task: domain.Task, attempt_no: int, review: ^taskv2.Review_Input) -> domain.Domain_Error {
+	revision, head, err := taskv2.user_review_context(s.taskchains.engine, task, attempt_no)
+	if err.code != .None do return err
+	review.requirements_revision = revision
+	review.expected_attempt_no = attempt_no
+	review.expected_head = head
+	return {}
+}
+
 // op_arg_string_array mirrors op_arg_string's resolution order (args.<key> first,
 // then top-level <key>) but for JSON arrays of strings. The returned bool is true
 // only when the key is present AS AN ARRAY (even an empty one — meaning "set to the
@@ -808,7 +840,10 @@ reject_card :: proc(s: ^Card_Service, auth: contracts.Auth_Context, id: domain.C
 		if strings.trim_space(decision.summary) == "" do return domain.Card{}, false, domain.domain_error(.Validation_Failed, "say what needs to change")
 		if s.taskchains == nil || s.taskchains.engine == nil do return domain.Card{}, false, domain.domain_error(.Internal_Error, "task engine is not configured")
 		findings := decision.findings_json if strings.trim_space(decision.findings_json) != "" else "[]"
-		_, rv_ok, rv_err := taskv2.user_review(s.taskchains.engine, user_auth, task.task_id, taskv2.Review_Input{task_id = string(task.task_id), verdict = "request_changes", summary = decision.summary, findings_json = findings})
+		review := taskv2.Review_Input{task_id = string(task.task_id), verdict = "request_changes", summary = decision.summary, findings_json = findings}
+		// The guard above matched the card's attempt to the task's current one.
+		if berr := bind_card_review(s, task, task.attempt_no, &review); berr.code != .None do return domain.Card{}, false, berr
+		_, rv_ok, rv_err := taskv2.user_review(s.taskchains.engine, user_auth, task.task_id, review)
 		if !rv_ok do return domain.Card{}, false, rv_err
 	} else if card.provider == domain.CARD_PROVIDER_MEMORY_PROPOSAL {
 		mem_id := strings.trim_prefix(string(card.card_id), "crd_mem_")
@@ -921,9 +956,18 @@ accept_card :: proc(s: ^Card_Service, auth: contracts.Auth_Context, id: domain.C
 				// args.verdict (default approve), args.summary and args.findings;
 				// validate_card_operations already rejected a bad verdict above.
 				review, r_ok, r_reason := op_review_input(op_obj)
+				attempt, a_ok := op_arg_int(op_obj, "attempt_no")
+				task, found, gerr := iface.taskchain_get_task(s.taskchains.repo, tid)
 				if !r_ok {
 					t_err = domain.domain_error(.Validation_Failed, r_reason)
+				} else if !a_ok {
+					t_err = domain.domain_error(.Validation_Failed, op_field_missing("attempt_no"))
+				} else if !found {
+					t_err = gerr
+				} else if berr := bind_card_review(s, task, attempt, &review); berr.code != .None {
+					t_err = berr
 				} else {
+					// Bound to the card's attempt: a newer attempt fails the review guard.
 					_, t_ok, t_err = taskv2.user_review(s.taskchains.engine, user_auth, tid, review)
 				}
 			} else {
