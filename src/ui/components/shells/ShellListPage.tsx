@@ -122,6 +122,7 @@ import {
   type ShellTab,
   type ShellVerb,
 } from './shellModel';
+import { shellRowPatch } from '../../utils/detailVerbRowPatch';
 
 const SEARCH_DEBOUNCE_MS = 250;
 const PAGE_SIZE = 25;
@@ -958,6 +959,11 @@ export default function ShellListPage({ selectedId = '' }: { selectedId?: string
           <ShellDetailPane
             sessionId={selectedId}
             onBack={() => navigateTo(shellListHref(urlState))}
+            onAfterVerb={(verb, session, saved) => {
+              // Same repaint the row verbs do; push events only feed the pill.
+              const patch = shellRowPatch(verb, session, saved);
+              if (patch) list.patchItem(patch.id, patch.next);
+            }}
           />
         ) : null
       }
@@ -971,11 +977,13 @@ export default function ShellListPage({ selectedId = '' }: { selectedId?: string
 function ShellDetailPane({
   sessionId,
   onBack,
+  onAfterVerb,
 }: {
   sessionId: string;
   onBack?: () => void;
+  onAfterVerb?: (verb: ShellVerb, session: ShellSession, saved: unknown) => void;
 }) {
-  const detail = useShellDetail(sessionId);
+  const detail = useShellDetail(sessionId, onAfterVerb);
   const paneRef = React.useRef<HTMLDivElement | null>(null);
   const wide = usePaneIsWide(paneRef);
   const { query, record, busy, actionError, notice, runVerb } = detail;

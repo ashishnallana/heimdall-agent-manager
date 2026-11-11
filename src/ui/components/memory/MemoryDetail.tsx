@@ -83,7 +83,7 @@ function linkForDimension(dim: ScopeDimKey, id: string): string {
   }
 }
 
-export function useMemoryDetail(memoryId: string, onAfterVerb?: (verb: MemoryVerb) => void) {
+export function useMemoryDetail(memoryId: string, onAfterVerb?: (verb: MemoryVerb, saved: unknown) => void) {
   const query = useGetMemoryQuery({ memoryId }, { skip: !memoryId });
   const [approveMemory] = useApproveMemoryMutation();
   const [rejectMemory] = useRejectMemoryMutation();
@@ -100,12 +100,15 @@ export function useMemoryDetail(memoryId: string, onAfterVerb?: (verb: MemoryVer
       setBusy(verb);
       setActionError('');
       try {
-        if (verb === 'reject') await rejectMemory({ memoryId }).unwrap();
-        else if (verb === 'archive') await archiveMemory({ memoryId }).unwrap();
-        else await approveMemory({ memoryId }).unwrap();
+        const saved =
+          verb === 'reject'
+            ? await rejectMemory({ memoryId }).unwrap()
+            : verb === 'archive'
+              ? await archiveMemory({ memoryId }).unwrap()
+              : await approveMemory({ memoryId }).unwrap();
         // Auto-advance (spec › GLOBAL FIXES) is the caller's decision, because only
-        // the list knows what "next" is.
-        onAfterVerb?.(verb);
+        // the list knows what "next" is. It also patches its own row from `saved`.
+        onAfterVerb?.(verb, saved);
       } catch (err) {
         // A system memory rejects every write with the hub's own 403 text; the payload
         // carries no read-only signal (BACKEND-DEP-1), so we attempt and report.

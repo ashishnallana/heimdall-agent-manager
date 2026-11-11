@@ -95,7 +95,7 @@ export function usePaneIsWide(ref: React.RefObject<HTMLElement | null>): boolean
  * Data + verbs
  * ------------------------------------------------------------------ */
 
-export function useAgentDetail(agentId: string, onAfterVerb?: (verb: AgentVerb) => void) {
+export function useAgentDetail(agentId: string, onAfterVerb?: (verb: AgentVerb, saved: unknown) => void) {
   const query = useFetchAgentIdentityQuery({ agentId }, { skip: !agentId });
   const [archiveAgent] = useArchiveAgentIdentityMutation();
   const [unarchiveAgent] = useUnarchiveAgentIdentityMutation();
@@ -116,8 +116,10 @@ export function useAgentDetail(agentId: string, onAfterVerb?: (verb: AgentVerb) 
       setBusy(verb);
       setActionError('');
       try {
-        await (verb === 'unarchive' ? unarchiveAgent : archiveAgent)({ agentId }).unwrap();
-        onAfterVerb?.(verb);
+        const saved = await (verb === 'unarchive' ? unarchiveAgent : archiveAgent)({ agentId }).unwrap();
+        // The list page keeps its own rows (useInfiniteList), which tag invalidation
+        // never reaches, so it patches the row from here.
+        onAfterVerb?.(verb, saved);
       } catch (err) {
         setActionError(agentErrorText(err, `Couldn't ${VERB_LABEL[verb].toLowerCase()} this agent.`));
       } finally {

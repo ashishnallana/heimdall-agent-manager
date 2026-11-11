@@ -94,6 +94,7 @@ import {
   type AgentTab,
   type AgentVerb,
 } from './agentModel';
+import { archivedRowPatch } from '../../utils/detailVerbRowPatch';
 
 const PAGE_SIZE = 50;
 const SEARCH_DEBOUNCE_MS = 250;
@@ -243,7 +244,7 @@ export default function AgentListPage({ selectedId = '' }: { selectedId?: string
       setBusyRow(agentId);
       try {
         const saved = await unarchiveAgent({ agentId }).unwrap();
-        list.patchItem(agentId, (prev) => ({ ...prev, state: 'active', updatedAt: String((saved as any)?.updated_at || prev.updatedAt) }));
+        list.patchItem(agentId, (prev) => archivedRowPatch(prev, 'unarchive', saved));
         pushToast({ tone: 'success', title: 'Agent unarchived' });
       } catch (err) {
         pushToast({ tone: 'danger', title: "Couldn't unarchive this agent", message: agentErrorText(err) });
@@ -259,7 +260,7 @@ export default function AgentListPage({ selectedId = '' }: { selectedId?: string
       const saved = await archiveAgent({ agentId }).unwrap();
       const record = saved && typeof saved === 'object' ? saved : null;
       if (record) {
-        list.patchItem(agentId, (prev) => ({ ...prev, state: 'archived', updatedAt: String((record as any).updated_at || prev.updatedAt) }));
+        list.patchItem(agentId, (prev) => archivedRowPatch(prev, 'archive', record));
       }
     },
     [archiveAgent, list],
@@ -975,7 +976,12 @@ export default function AgentListPage({ selectedId = '' }: { selectedId?: string
       />
     ) : null
   ) : selectedId ? (
-    <AgentDetailPane agentId={selectedId} onAfterArchive={() => undefined} />
+    <AgentDetailPane
+      agentId={selectedId}
+      onAfterVerb={(verb, saved) => {
+        if (verb === 'archive' || verb === 'unarchive') list.patchItem(selectedId, (prev) => archivedRowPatch(prev, verb, saved));
+      }}
+    />
   ) : null;
 
   const emptyDetail = tab === 'live' ? (
@@ -1037,8 +1043,8 @@ export default function AgentListPage({ selectedId = '' }: { selectedId?: string
 /**
  * The right-hand pane of the two-pane layout.
  */
-function AgentDetailPane({ agentId, onAfterArchive }: { agentId: string; onAfterArchive: () => void }) {
-  const { query, record, busy, actionError, runVerb } = useAgentDetail(agentId, () => onAfterArchive());
+function AgentDetailPane({ agentId, onAfterVerb }: { agentId: string; onAfterVerb: (verb: AgentVerb, saved: unknown) => void }) {
+  const { query, record, busy, actionError, runVerb } = useAgentDetail(agentId, onAfterVerb);
   const paneRef = React.useRef<HTMLDivElement | null>(null);
   const wide = usePaneIsWide(paneRef);
 

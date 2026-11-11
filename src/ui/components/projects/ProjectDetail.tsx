@@ -82,7 +82,7 @@ import {
  * Data + verbs
  * ------------------------------------------------------------------ */
 
-export function useProjectDetail(projectId: string, onAfterVerb?: (verb: ProjectVerb) => void) {
+export function useProjectDetail(projectId: string, onAfterVerb?: (verb: ProjectVerb, saved: unknown) => void) {
   const query = useFetchProjectQuery({ projectId }, { skip: !projectId });
   const [archiveProject] = useArchiveProjectMutation();
   const [unarchiveProject] = useUnarchiveProjectMutation();
@@ -105,8 +105,10 @@ export function useProjectDetail(projectId: string, onAfterVerb?: (verb: Project
       setBusy(verb);
       setActionError('');
       try {
-        await (verb === 'unarchive' ? unarchiveProject : archiveProject)({ projectId }).unwrap();
-        onAfterVerb?.(verb);
+        const saved = await (verb === 'unarchive' ? unarchiveProject : archiveProject)({ projectId }).unwrap();
+        // The list page keeps its own rows (useInfiniteList), which tag invalidation
+        // never reaches, so it patches the row from here.
+        onAfterVerb?.(verb, saved);
       } catch (err) {
         setActionError(projectErrorText(err, `Couldn't ${VERB_LABEL[verb].toLowerCase()} this project.`));
       } finally {

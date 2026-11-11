@@ -95,6 +95,7 @@ import {
   type ProjectTab,
   type ProjectVerb,
 } from './projectModel';
+import { archivedRowPatch } from '../../utils/detailVerbRowPatch';
 
 /** The list endpoint's default page size, and search's maximum — they agree at 50. */
 const PAGE_SIZE = 50;
@@ -276,7 +277,7 @@ export default function ProjectListPage({ selectedId = '' }: { selectedId?: stri
       setBusyRow(projectId);
       try {
         const saved = await unarchiveProject({ projectId }).unwrap();
-        list.patchItem(projectId, (prev) => ({ ...prev, state: 'active', updatedAt: String((saved as any)?.updated_at || prev.updatedAt) }));
+        list.patchItem(projectId, (prev) => archivedRowPatch(prev, 'unarchive', saved));
         pushToast({ tone: 'success', title: 'Project unarchived' });
       } catch (err) {
         pushToast({ tone: 'danger', title: "Couldn't unarchive this project", message: projectErrorText(err) });
@@ -295,7 +296,7 @@ export default function ProjectListPage({ selectedId = '' }: { selectedId?: stri
         // Patch IN PLACE with the server's own record, so the new Archived pill
         // appears where the row already sits. The row does not jump, even though
         // the write moved it in the server's order.
-        list.patchItem(projectId, (prev) => ({ ...prev, state: 'archived', updatedAt: String((record as any).updated_at || prev.updatedAt) }));
+        list.patchItem(projectId, (prev) => archivedRowPatch(prev, 'archive', record));
       }
     },
     [archiveProject, list],
@@ -820,7 +821,12 @@ export default function ProjectListPage({ selectedId = '' }: { selectedId?: stri
       list={listColumn}
       detail={
         selectedId ? (
-          <ProjectDetailPane projectId={selectedId} onAfterArchive={() => undefined} />
+          <ProjectDetailPane
+            projectId={selectedId}
+            onAfterVerb={(verb, saved) => {
+              if (verb === 'archive' || verb === 'unarchive') list.patchItem(selectedId, (prev) => archivedRowPatch(prev, verb, saved));
+            }}
+          />
         ) : null
       }
     >
@@ -834,8 +840,8 @@ export default function ProjectListPage({ selectedId = '' }: { selectedId?: stri
  * renders, with its own heading instead of the page's `<h1>` (the page already has
  * one, and a second would break the single-h1 contract `PageShell` enforces).
  */
-function ProjectDetailPane({ projectId, onAfterArchive }: { projectId: string; onAfterArchive: () => void }) {
-  const { query, record, busy, actionError, runVerb } = useProjectDetail(projectId, () => onAfterArchive());
+function ProjectDetailPane({ projectId, onAfterVerb }: { projectId: string; onAfterVerb: (verb: ProjectVerb, saved: unknown) => void }) {
+  const { query, record, busy, actionError, runVerb } = useProjectDetail(projectId, onAfterVerb);
   const paneRef = React.useRef<HTMLDivElement | null>(null);
   const wide = usePaneIsWide(paneRef);
 

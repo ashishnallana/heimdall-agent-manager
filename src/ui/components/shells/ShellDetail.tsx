@@ -128,7 +128,7 @@ export interface PendingConfirm {
  * in place. The poll interval is the same one the log viewer runs on, so the status
  * pill and the output it explains never disagree by more than a second.
  */
-export function useShellDetail(sessionId: string, onAfterVerb?: (verb: ShellVerb) => void) {
+export function useShellDetail(sessionId: string, onAfterVerb?: (verb: ShellVerb, session: ShellSession, saved: unknown) => void) {
   // REQ-SHELL-6 §6: no pollingInterval. Repaints when a shell event invalidates this
   // session's `ShellSession` tag (wsInvalidation.ts, invalidateShellSession).
   const entitlements = useEntitlements();
@@ -154,18 +154,19 @@ export function useShellDetail(sessionId: string, onAfterVerb?: (verb: ShellVerb
       setActionError('');
       setNotice('');
       try {
+        let saved: unknown = null;
         if (verb === 'kill') {
-          await killShell({ sessionId: session.session_id }).unwrap();
+          saved = await killShell({ sessionId: session.session_id }).unwrap();
           setNotice('Killed. The output above stays readable.');
         } else if (verb === 'restart') {
-          await restartShell({ sessionId: session.session_id }).unwrap();
+          saved = await restartShell({ sessionId: session.session_id }).unwrap();
           setNotice('Restarted with the same command and working directory.');
         } else if (verb === 'interrupt') {
           // SIGINT = 2. The hub forwards the number straight to the bridge.
           await signalShell({ sessionId: session.session_id, signal: 2 }).unwrap();
           setNotice('SIGINT sent. Whether the process stops is up to the process.');
         }
-        onAfterVerb?.(verb);
+        onAfterVerb?.(verb, session, saved);
       } catch (err) {
         // Restart gets copy that says whether retrying can work; see shellModel.
         setActionError(
