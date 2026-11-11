@@ -391,17 +391,14 @@ body {
   color: var(--color-text-muted);
 }
 
-/* SH-3: tmux-style active pane border. An overlay (not a border on the pane) so the
-   layout never shifts and pane content backgrounds can't paint over it. Sides +
-   bottom; the header already separates the top. */
-.ui-pane-active-border {
-  position: absolute;
-  inset: 0;
-  z-index: 35;
-  pointer-events: none;
-  border-style: solid;
-  border-color: var(--color-accent);
-  border-width: 0 1px 1px 1px;
+/* SH-3: the selected pane (several visible, this one focused) is marked by its own
+   header: an accent tint and a 2px accent line under it. Only paint changes: the
+   line is an inset shadow and the tint a background, so no pane, header or content
+   height moves when focus does. Headers inside the side panel's body (an aux tab's
+   own chat header) are not the dock's header and stay unmarked. */
+[data-pane-selected='true'] [data-pane-header]:not([data-debug-id='aux-dock-body'] *) {
+  background-color: color-mix(in oklab, var(--color-accent) 12%, var(--color-canvas));
+  box-shadow: inset 0 -2px 0 var(--color-accent);
 }
 
 /* SH-2: active-pane cue. Every breadcrumb segment of a Main pane header uses the

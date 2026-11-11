@@ -18,7 +18,7 @@ export interface MainPaneFrameProps {
   onClose: (paneId: string) => void;
   /** Plays the close animation (the pane is removed right after). */
   isClosing?: boolean;
-  /** SH-3: draw the tmux-style active border (several panes visible and this one has focus). */
+  /** SH-3: mark this pane's header as selected (several panes visible and this one has focus). */
   isActive?: boolean;
   /** Picker header: hidden-sidebar control (top-left pane). */
   headerLeading?: React.ReactNode;
@@ -107,6 +107,7 @@ export function MainPaneFrame({
     <section
       data-debug-id={`main-pane-frame-${paneId}`}
       data-main-pane-focused={isFocused ? 'true' : 'false'}
+      data-pane-selected={isActive ? 'true' : 'false'}
       onMouseDownCapture={() => {
         if (!isFocused) onFocus(paneId);
       }}
@@ -129,6 +130,7 @@ export function MainPaneFrame({
       ) : null}
       {isPicker ? (
         <header
+          data-pane-header
           draggable={!isSinglePane && !isMobile}
           onDragStart={handleDragStart}
           className={`flex shrink-0 select-none items-center justify-between gap-2 border-b border-subtle bg-surface px-3 text-muted ${isMobile ? 'h-14 text-sm' : 'h-12 text-xs'}`}
@@ -155,7 +157,6 @@ export function MainPaneFrame({
           </span>
         </header>
       ) : null}
-      {isActive ? <div aria-hidden="true" data-debug-id={`main-pane-active-border-${paneId}`} className="ui-pane-active-border" /> : null}
       <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">{children}</div>
     </section>
   );

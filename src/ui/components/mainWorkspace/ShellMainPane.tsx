@@ -60,6 +60,7 @@ export function ShellMainPane({ sessionId, isMobile, isFocused = false, openIds,
       <header
         data-debug-id="shell-main-pane-header"
         data-pane-active={isFocused ? 'true' : 'false'}
+        data-pane-header
         className={`relative z-20 flex shrink-0 items-center gap-2 border-b border-subtle bg-canvas/90 px-3 backdrop-blur-md ${isMobile ? 'min-h-14' : 'min-h-12'}`}
       >
         {headerLeading ? <div className="flex shrink-0 items-center gap-1">{headerLeading}</div> : null}

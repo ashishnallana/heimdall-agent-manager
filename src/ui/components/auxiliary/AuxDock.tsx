@@ -324,11 +324,11 @@ export function AuxDock({
       data-aux-shown={shown ? 'true' : 'false'}
       aria-label="Side panel"
       data-aux-active={isActive ? 'true' : 'false'}
+      data-pane-selected={isActive && !isMobile ? 'true' : 'false'}
       onMouseDownCapture={onActivate}
       className={containerClass}
       style={!isMobile && !isMaximized ? { width: shown ? width : 0, maxWidth: '75%' } : undefined}
     >
-      {isActive && !isMobile ? <div aria-hidden="true" data-debug-id="aux-active-border" className="ui-pane-active-border" /> : null}
       {/* Fixed-width inner column so the content doesn't reflow while sliding. */}
       <div
         className="flex h-full min-h-0 flex-col"
