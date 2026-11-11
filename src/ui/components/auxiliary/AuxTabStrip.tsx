@@ -75,7 +75,6 @@ export function AuxTabStrip({
   return (
     <div
       data-debug-id={`aux-tab-strip-${treeKey}`}
-      data-pane-header
       className={`flex ${isMobile ? 'h-14' : 'h-12'} shrink-0 select-none items-center justify-between border-b border-subtle bg-surface-raised/60 px-1.5`}
       style={reserveLeft || reserveRight ? {
         ...(reserveLeft ? { paddingLeft: reserveLeft } : {}),

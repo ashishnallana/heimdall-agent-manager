@@ -18,7 +18,7 @@ export interface MainPaneFrameProps {
   onClose: (paneId: string) => void;
   /** Plays the close animation (the pane is removed right after). */
   isClosing?: boolean;
-  /** SH-3: mark this pane's header as selected (several panes visible and this one has focus). */
+  /** SH-3: draw the selected-pane accent line (several panes visible and this one has focus). */
   isActive?: boolean;
   /** Picker header: hidden-sidebar control (top-left pane). */
   headerLeading?: React.ReactNode;
@@ -130,7 +130,6 @@ export function MainPaneFrame({
       ) : null}
       {isPicker ? (
         <header
-          data-pane-header
           draggable={!isSinglePane && !isMobile}
           onDragStart={handleDragStart}
           className={`flex shrink-0 select-none items-center justify-between gap-2 border-b border-subtle bg-surface px-3 text-muted ${isMobile ? 'h-14 text-sm' : 'h-12 text-xs'}`}

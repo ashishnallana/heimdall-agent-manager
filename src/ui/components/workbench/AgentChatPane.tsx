@@ -3170,7 +3170,6 @@ export function AgentChatPane({
       <header
         data-debug-id="conversation-thread-header"
         data-pane-active={isFocusedPane ? 'true' : 'false'}
-        data-pane-header
         className={`window-drag sticky top-0 z-20 flex ${isMobile ? 'min-h-14' : 'min-h-12'} shrink-0 items-center gap-2 px-3 py-2 sm:gap-3 sm:px-4 bg-canvas/90 backdrop-blur-md overflow-visible`}
       >
         <div

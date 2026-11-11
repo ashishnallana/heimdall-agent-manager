@@ -135,7 +135,7 @@ test('SH-2: every header segment follows the active-pane cue (theme tokens)', ()
   assert.match(css, /\[data-pane-active='false'\] \[data-pane-crumb\]:not\(:hover\) \{\s*color: var\(--color-text-muted\);/);
 });
 
-test('SH-3: the selected pane (or focused aux dock) is marked by its header, not a border', () => {
+test('SH-3: the selected pane (or focused aux dock) shows a thin accent line at its top edge', () => {
   const ws = read('src/ui/components/mainWorkspace/Workspace.tsx');
   assert.match(ws, /const showActiveBorder = !isMobile && \(mainPaneCount > 1 \|\| auxShown\)/);
   assert.match(ws, /isActive=\{showActiveBorder && isFocused && !auxFocused\}/);
@@ -145,20 +145,30 @@ test('SH-3: the selected pane (or focused aux dock) is marked by its header, not
   const dock = read('src/ui/components/auxiliary/AuxDock.tsx');
   assert.match(frame, /data-pane-selected=\{isActive \? 'true' : 'false'\}/);
   assert.match(dock, /data-pane-selected=\{isActive && !isMobile \? 'true' : 'false'\}/);
+  // Both frames are positioned, so the line anchors to the pane's own top edge.
+  assert.match(frame, /className=\{`relative flex h-full w-full/);
+  assert.match(dock, /'relative flex min-w-0 flex-1 flex-col bg-canvas'/);
   // No layout shift: focus only flips an attribute; nothing is mounted or unmounted for it.
   assert.doesNotMatch(frame, /\{isActive \? </);
   assert.doesNotMatch(dock, /\{isActive && !isMobile \? </);
-  assert.match(read('src/ui/components/workbench/AgentChatPane.tsx'), /data-debug-id="conversation-thread-header"\s+data-pane-active=\{isFocusedPane \? 'true' : 'false'\}\s+data-pane-header\n/);
-  assert.match(read('src/ui/components/mainWorkspace/ShellMainPane.tsx'), /data-debug-id="shell-main-pane-header"\s+data-pane-active=\{isFocused \? 'true' : 'false'\}\s+data-pane-header\n/);
-  assert.match(read('src/ui/components/auxiliary/AuxTabStrip.tsx'), /data-debug-id=\{`aux-tab-strip-\$\{treeKey\}`\}\s+data-pane-header\n/);
-  assert.match(frame, /<header\s+data-pane-header/);
   const css = read('src/ui/styles.css');
   assert.doesNotMatch(css, /ui-pane-active-border/);
-  const rule = css.match(/\[data-pane-selected='true'\] \[data-pane-header\]:not\(\[data-debug-id='aux-dock-body'\] \*\) \{([^}]*)\}/);
-  assert.ok(rule, 'selected header rule');
-  // Paint only (a tint and an inset accent line): no border, padding, margin or size,
-  // so no pane, header or content height changes when focus moves.
-  const props = rule![1].split(';').map((d) => d.split(':')[0].trim()).filter(Boolean);
-  assert.deepEqual(props, ['background-color', 'box-shadow']);
-  assert.match(rule![1], /box-shadow: inset 0 -2px 0 var\(--color-accent\)/);
+  // The header is not tinted or underlined any more (the line is the only cue).
+  assert.doesNotMatch(css, /data-pane-header/);
+  for (const file of ['src/ui/components/workbench/AgentChatPane.tsx', 'src/ui/components/mainWorkspace/ShellMainPane.tsx', 'src/ui/components/auxiliary/AuxTabStrip.tsx', 'src/ui/components/mainWorkspace/MainPaneFrame.tsx']) {
+    assert.doesNotMatch(read(file), /data-pane-header/, file);
+  }
+  const rule = css.match(/\[data-pane-selected='true'\]::before \{([^}]*)\}/);
+  assert.ok(rule, 'selected-pane line rule');
+  const decl = Object.fromEntries(rule![1].split(';').map((d) => d.split(':').map((x) => x.trim())).filter((d) => d[0]));
+  // Out of flow (absolute) and click-through: it cannot change any height or take input.
+  assert.equal(decl.position, 'absolute');
+  assert.equal(decl['pointer-events'], 'none');
+  // Mock art_18e6ead45be6d34c: ~3px, top edge, inset 16px to the content padding, theme accent.
+  assert.equal(decl.top, '0');
+  assert.equal(decl.height, '3px');
+  assert.equal(decl.left, '16px');
+  assert.equal(decl.right, '16px');
+  assert.equal(decl['background-color'], 'var(--color-accent)');
+  assert.ok(!('border-radius' in decl), 'square ends');
 });

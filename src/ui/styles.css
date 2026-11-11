@@ -391,14 +391,22 @@ body {
   color: var(--color-text-muted);
 }
 
-/* SH-3: the selected pane (several visible, this one focused) is marked by its own
-   header: an accent tint and a 2px accent line under it. Only paint changes: the
-   line is an inset shadow and the tint a background, so no pane, header or content
-   height moves when focus does. Headers inside the side panel's body (an aux tab's
-   own chat header) are not the dock's header and stay unmarked. */
-[data-pane-selected='true'] [data-pane-header]:not([data-debug-id='aux-dock-body'] *) {
-  background-color: color-mix(in oklab, var(--color-accent) 12%, var(--color-canvas));
-  box-shadow: inset 0 -2px 0 var(--color-accent);
+/* SH-3: the selected pane (several visible, this one focused) carries a thin accent
+   line across its top edge, above the header, inset to the content padding (16px)
+   with square ends; the header keeps its normal background and other panes show
+   nothing. A pseudo-element of the pane frame (MainPaneFrame <section>, AuxDock
+   <aside>, both positioned): absolutely placed, so no pane, header or content height
+   moves when focus does. */
+[data-pane-selected='true']::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 16px;
+  right: 16px;
+  height: 3px;
+  background-color: var(--color-accent);
+  z-index: 40;
+  pointer-events: none;
 }
 
 /* SH-2: active-pane cue. Every breadcrumb segment of a Main pane header uses the
