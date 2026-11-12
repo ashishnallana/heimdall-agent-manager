@@ -11,8 +11,8 @@
  *    (`agent_handlers.odin:338-351`). Amendment 6: do not render what the
  *    API does not send.
  *  - **Owner.** Same reason — `owner_user_id` is never emitted.
- *  - **Restore / Unarchive.** No endpoint reverses an archive.
- *  - **Delete.** There is no DELETE route for an agent identity at all.
+ *  - **Delete, while anything refers to the agent.** Delete appears only when
+ *    `GET /agents/{id}/usage` says nothing does; the hub re-checks on DELETE.
  *
  * Agent→Memories: kept (Amendment 9). The asymmetric ruling removed the
  * Project→Agent link; the Agent→Memory link is intentionally preserved.
@@ -26,6 +26,9 @@ import {
   EmptyState,
   Icon,
   IconButton,
+  Modal,
+  ModalBody,
+  ModalFooter,
   Panel,
   ResourceDetailHeader,
   ResourceSectionCard,
@@ -42,6 +45,8 @@ import {
   useArchiveAgentIdentityMutation,
   useUnarchiveAgentIdentityMutation,
   useFetchAgentIdentityQuery,
+  useFetchAgentUsageQuery,
+  useDeleteAgentIdentityMutation,
   useListAgentInstancesQuery,
   useFetchAgentInstanceQuery,
   useStopAgentInstanceMutation,
@@ -65,6 +70,7 @@ import {
   agentState,
   agentTitle,
   agentViewHref,
+  deleteConfirmBody,
   navigateTo,
   relativeTime,
   stateLabel,
@@ -162,14 +168,43 @@ export function AgentDetailActions({
   record,
   busy,
   onVerb,
+  onDeleted,
 }: {
   record: AgentRecord;
   busy: AgentVerb | '';
   onVerb: (verb: AgentVerb) => void;
+  /** Called after the hub deleted the agent; the caller leaves its view. */
+  onDeleted?: (agentId: string) => void;
 }) {
   const verbs = verbsForState(agentState(record));
   // Archive / Unarchive are direct buttons beside Edit; there is no `…` menu.
   const directVerbs = verbs.filter((verb) => verb !== 'edit');
+  // Delete is offered only for an agent nothing refers to.
+  const usageQuery = useFetchAgentUsageQuery({ agentId: record.agentId }, { skip: !record.agentId, refetchOnMountOrArgChange: true });
+  const deletable = Boolean(usageQuery.data?.deletable);
+  const [deleteAgent, deleteState] = useDeleteAgentIdentityMutation();
+  const [confirmOpen, setConfirmOpen] = React.useState(false);
+  const [deleteError, setDeleteError] = React.useState('');
+
+  const closeConfirm = () => {
+    if (deleteState.isLoading) return;
+    setConfirmOpen(false);
+    setDeleteError('');
+  };
+
+  const confirmDelete = async () => {
+    setDeleteError('');
+    try {
+      await deleteAgent({ agentId: record.agentId }).unwrap();
+      setConfirmOpen(false);
+      onDeleted?.(record.agentId);
+    } catch (err) {
+      // 409 agent_in_use: something started referring to it. Say what, and
+      // refresh the usage so the Delete button goes away.
+      setDeleteError(agentErrorText(err, "Couldn't delete this agent."));
+      void usageQuery.refetch();
+    }
+  };
 
   return (
     <>
@@ -194,6 +229,47 @@ export function AgentDetailActions({
           onClick={() => onVerb(verb)}
         />
       ))}
+      {deletable ? (
+        <ActionButton
+          label="Delete"
+          variant="danger"
+          disabled={Boolean(busy) || deleteState.isLoading}
+          data-debug-id="agent-view-delete"
+          onClick={() => setConfirmOpen(true)}
+        />
+      ) : null}
+      {confirmOpen ? (
+        <Modal
+          open
+          onOpenChange={(next) => { if (!next) closeConfirm(); }}
+          title={`Delete "${agentTitle(record)}"?`}
+          size="sm"
+          data-debug-id="agent-delete-modal"
+        >
+          <ModalBody>
+            <div className="flex flex-col gap-3">
+              <Text role="body">{deleteConfirmBody(agentTitle(record))}</Text>
+              {deleteError ? (
+                <Alert tone="danger" data-debug-id="agent-delete-error">{deleteError}</Alert>
+              ) : null}
+            </div>
+          </ModalBody>
+          <ModalFooter>
+            <Button variant="secondary" data-debug-id="agent-delete-cancel" disabled={deleteState.isLoading} onClick={closeConfirm}>
+              Cancel
+            </Button>
+            <Button
+              variant="danger"
+              loading={deleteState.isLoading}
+              disabled={Boolean(deleteError)}
+              data-debug-id="agent-delete-confirm"
+              onClick={() => void confirmDelete()}
+            >
+              Delete permanently
+            </Button>
+          </ModalFooter>
+        </Modal>
+      ) : null}
     </>
   );
 }
@@ -217,12 +293,14 @@ export function AgentDetailHeader({
   record,
   busy,
   onVerb,
+  onDeleted,
   onBack,
   alert,
 }: {
   record: AgentRecord;
   busy: AgentVerb | '';
   onVerb: (verb: AgentVerb) => void;
+  onDeleted?: (agentId: string) => void;
   onBack?: () => void;
   alert?: React.ReactNode;
 }) {
@@ -253,7 +331,7 @@ export function AgentDetailHeader({
       timestampTooltip={absoluteTime(record.updatedAt)}
       alert={alert}
       onBack={onBack}
-      actions={<AgentDetailActions record={record} busy={busy} onVerb={onVerb} />}
+      actions={<AgentDetailActions record={record} busy={busy} onVerb={onVerb} onDeleted={onDeleted} />}
     />
   );
 }

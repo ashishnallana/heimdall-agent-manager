@@ -215,6 +215,20 @@ approve_memory :: proc(s:^Content_Service, auth:contracts.Auth_Context,id:string
 	return save_memory(s,m)
 }
 reject_memory :: proc(s:^Content_Service, auth:contracts.Auth_Context,id:string)->(domain.Memory,bool,domain.Domain_Error){ return update_memory_status(s,auth,id,"rejected") }
+// delete_memory permanently removes one of the caller's memories, in any status.
+// Archive only hides a memory from bootstrap; delete is for content that must not be
+// kept (a leaked secret, a wrong or private fact). System memories stay read-only.
+// Agents already launched keep the copy rendered into their bootstrap files; only
+// future launches stop receiving it.
+delete_memory :: proc(s:^Content_Service, auth:contracts.Auth_Context, id:string)->(bool,domain.Domain_Error){
+	m,ok,err:=iface.content_get_memory(s.content,id); if !ok do return false,err
+	if m.owner_user_id=="system" do return false,domain.domain_error(.Forbidden,"system memories are read-only")
+	if ok2,e:=ownership.require_owner(auth,m.owner_user_id); !ok2 do return false,e
+	deleted,del_err:=iface.content_delete_memory(s.content,m.memory_id,m.owner_user_id); if !deleted do return false,del_err
+	// A pending proposal leaves the attention deck once it is gone.
+	contracts.attention_notify(s.attention,string(m.owner_user_id),contracts.ATTENTION_SOURCE_MEMORY,m.memory_id)
+	return true,{}
+}
 
 create_conversation :: proc(s:^Content_Service, auth:contracts.Auth_Context, input:Chat_Input)->(domain.Chat_Conversation,bool,domain.Domain_Error){ owner,ok,err:=ownership.owner_from_auth(auth); if !ok do return {},false,err; if input.agent_id=="" do return {},false,domain.domain_error(.Validation_Failed,"agent_id is required"); if input.agent_instance_id=="" do return {},false,domain.domain_error(.Validation_Failed,"agent_instance_id is required"); if !agent_owned(s,owner,input.agent_id) do return {},false,domain.domain_error(.Not_Found,"agent not found"); if bind_ok,bind_err:=conversation_instance_binding_valid(s,owner,input); !bind_ok do return {},false,bind_err; initial:=Message_Input{body=input.initial_body,artifact_ids_json=input.artifact_ids_json}; if strings.trim_space(input.initial_body)!="" { if msg_ok,msg_err:=validate_initial_message(s,auth,initial); !msg_ok do return {},false,msg_err }; now:=platform.clock_now(s.clock); title:=conversation_title_from_input(input.title,input.agent_id); c:=domain.Chat_Conversation{conversation_id=platform.generate_id(s.ids,"chat_"),owner_user_id=owner,agent_id=input.agent_id,agent_instance_id=input.agent_instance_id,project_id=input.project_id,chain_id=input.chain_id,title=title,created_at=now,updated_at=now}; saved,save_ok,save_err:=iface.content_save_conversation(s.content,c); if !save_ok do return {},false,save_err; if strings.trim_space(input.initial_body)!="" { _,sent,send_err := send_message(s,auth,saved.conversation_id,initial); if !sent do return {},false,send_err; updated,got,_:=iface.content_get_conversation(s.content,saved.conversation_id); if got do saved=updated }; return saved,true,{} }
 list_conversations :: proc(s:^Content_Service, auth:contracts.Auth_Context, limit:int, cursor:string)->([]domain.Chat_Conversation,domain.Domain_Error){ owner,ok,err:=ownership.owner_from_auth(auth); if !ok do return nil,err; return iface.content_list_conversations(s.content,owner,limit,cursor) }

@@ -21,6 +21,8 @@ Content_List_Unread_Incoming_IDs_Proc :: proc(ctx: rawptr, conversation_id: stri
 Content_Save_Artifact_Proc :: proc(ctx: rawptr, a: domain.Artifact) -> (domain.Artifact, bool, domain.Domain_Error)
 Content_Get_Artifact_Proc :: proc(ctx: rawptr, artifact_id: string) -> (domain.Artifact, bool, domain.Domain_Error)
 Content_List_Artifacts_Proc :: proc(ctx: rawptr, owner_user_id: domain.User_ID, filter: domain.Artifact_List_Filter) -> ([]domain.Artifact, domain.Domain_Error)
+// Hard-deletes one of the owner's memories; system memories are never matched.
+Content_Delete_Memory_Proc :: proc(ctx: rawptr, memory_id: string, owner_user_id: domain.User_ID) -> (bool, domain.Domain_Error)
 Content_Delete_Artifact_Proc :: proc(ctx: rawptr, artifact_id: string, owner_user_id: domain.User_ID) -> (bool, domain.Domain_Error)
 Content_Save_Template_Proc :: proc(ctx: rawptr, t: domain.Template) -> (domain.Template, bool, domain.Domain_Error)
 Content_Get_Template_Proc :: proc(ctx: rawptr, template_id: string) -> (domain.Template, bool, domain.Domain_Error)
@@ -56,6 +58,7 @@ Content_Repository :: struct {
 	update_artifact_metadata: proc(ctx:rawptr,id:string,owner:domain.User_ID,name,description,updated_at:string)->(bool,domain.Domain_Error),
 	list_artifacts: Content_List_Artifacts_Proc,
 	delete_artifact: Content_Delete_Artifact_Proc,
+	delete_memory: Content_Delete_Memory_Proc,
 	save_template: Content_Save_Template_Proc,
 	get_template: Content_Get_Template_Proc,
 	list_templates: Content_List_Templates_Proc,
@@ -84,6 +87,7 @@ content_mark_messages_read :: proc(r: ^Content_Repository, owner: domain.User_ID
 content_save_artifact :: proc(r: ^Content_Repository, a: domain.Artifact) -> (domain.Artifact, bool, domain.Domain_Error) { if r == nil || r.save_artifact == nil do return {}, false, domain.domain_error(.Internal_Error, "content repository is not configured"); return r.save_artifact(r.ctx, a) }
 content_get_artifact :: proc(r: ^Content_Repository, id: string) -> (domain.Artifact, bool, domain.Domain_Error) { if r == nil || r.get_artifact == nil do return {}, false, domain.domain_error(.Internal_Error, "content repository is not configured"); return r.get_artifact(r.ctx, id) }
 content_list_artifacts :: proc(r: ^Content_Repository, owner: domain.User_ID, filter: domain.Artifact_List_Filter) -> ([]domain.Artifact, domain.Domain_Error) { if r == nil || r.list_artifacts == nil do return nil, domain.domain_error(.Internal_Error, "content repository is not configured"); return r.list_artifacts(r.ctx, owner, filter) }
+content_delete_memory :: proc(r: ^Content_Repository, id: string, owner: domain.User_ID) -> (bool, domain.Domain_Error) { if r == nil || r.delete_memory == nil do return false, domain.domain_error(.Internal_Error, "content repository is not configured"); return r.delete_memory(r.ctx, id, owner) }
 content_delete_artifact :: proc(r: ^Content_Repository, id: string, owner: domain.User_ID) -> (bool, domain.Domain_Error) { if r == nil || r.delete_artifact == nil do return false, domain.domain_error(.Internal_Error, "content repository is not configured"); return r.delete_artifact(r.ctx, id, owner) }
 content_save_template :: proc(r: ^Content_Repository, t: domain.Template) -> (domain.Template, bool, domain.Domain_Error) { if r == nil || r.save_template == nil do return {}, false, domain.domain_error(.Internal_Error, "content repository is not configured"); return r.save_template(r.ctx, t) }
 content_get_template :: proc(r: ^Content_Repository, id: string) -> (domain.Template, bool, domain.Domain_Error) { if r == nil || r.get_template == nil do return {}, false, domain.domain_error(.Internal_Error, "content repository is not configured"); return r.get_template(r.ctx, id) }

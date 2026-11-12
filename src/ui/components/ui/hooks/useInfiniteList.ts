@@ -127,6 +127,8 @@ export interface UseInfiniteList<T> {
   applyPending: () => void;
   /** Update one row where it sits. No reorder, no re-fetch. */
   patchItem: (id: string, next: T | ((prev: T) => T)) => void;
+  /** Drop one row the user just deleted. No re-fetch; the rest keep their places. */
+  removeItem: (id: string) => void;
   /** Re-page from page one looking for a remembered row, capped. */
   restoreToId: (id: string) => Promise<RestoreOutcome>;
   /** True when the last restore ran out of cap — show the "couldn't find where you were" note. */
@@ -337,6 +339,14 @@ export function useInfiniteList<T>(options: UseInfiniteListOptions<T>): UseInfin
     });
   }, []);
 
+  const removeItem = useCallback((id: string) => {
+    setItems((prev) => {
+      const getItemId = getItemIdRef.current;
+      const out = prev.filter((item) => getItemId(item) !== id);
+      return out.length === prev.length ? prev : out;
+    });
+  }, []);
+
   const restoreToId = useCallback(
     async (id: string): Promise<RestoreOutcome> => {
       if (!enabled) return 'aborted';
@@ -437,6 +447,7 @@ export function useInfiniteList<T>(options: UseInfiniteListOptions<T>): UseInfin
     pendingCount,
     applyPending,
     patchItem,
+    removeItem,
     restoreToId,
     restoreNotice,
     dismissRestoreNotice,

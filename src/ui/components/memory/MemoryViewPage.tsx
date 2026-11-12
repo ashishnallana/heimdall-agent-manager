@@ -94,7 +94,14 @@ export default function MemoryViewPage({ memoryId }: { memoryId: string }) {
       // crumb into the <h1>, so the title is never printed twice.
       breadcrumbs={detailCrumbs(title, memoryStatus(record), listState)}
       description={<MemoryDetailMeta record={record} />}
-      actions={<MemoryDetailActions record={record} busy={busy} onVerb={(verb) => void runVerb(verb)} />}
+      actions={
+        <MemoryDetailActions
+          record={record}
+          busy={busy}
+          onVerb={(verb) => void runVerb(verb)}
+          onDeleted={() => navigateTo(memoryListHref(listState))}
+        />
+      }
     >
       <div ref={paneRef} className="min-w-0">
         {/* Mobile: a back link, because the trail collapses to one step that matters. */}

@@ -173,6 +173,15 @@ export const VERB_LABEL: Record<MemoryVerb, string> = {
   restore: 'Restore',
 };
 
+/**
+ * Delete is not a MemoryVerb: it is offered in the detail view in every status,
+ * always behind a confirm, and never in bulk or on a keyboard shortcut. Archive
+ * stays the everyday way to retire a memory; delete is for content that must not
+ * be kept at all.
+ */
+export const MEMORY_DELETE_CONFIRM_BODY =
+  "This permanently removes the memory and its text from Heimdall — it can't be restored. Agents launched from now on won't receive it, but agents already running keep the copy they were started with. To only stop using it, archive it instead.";
+
 /** Only `pending` and `active` records may be edited at all (content_service.odin:168-188). */
 export function isEditable(status: MemoryStatus): boolean {
   return status === 'pending' || status === 'active';

@@ -13,7 +13,7 @@ Content_Repo_SQLite :: struct { conn: ^Conn }
 
 new_content_repository :: proc(impl: ^Content_Repo_SQLite, conn: ^Conn) -> iface.Content_Repository {
 	impl.conn = conn
-	return iface.Content_Repository{ctx=rawptr(impl), answer_question=content_answer_question_sqlite, latest_user_visible_message=content_latest_user_visible_message_sqlite, list_unread_incoming_ids=content_list_unread_incoming_ids_sqlite, save_memory=content_save_memory_sqlite, get_memory=content_get_memory_sqlite, list_memories=content_list_memories_sqlite, save_conversation=content_save_conversation_sqlite, get_conversation=content_get_conversation_sqlite, list_conversations=content_list_conversations_sqlite, list_conversation_project_links=content_list_conversation_project_links_sqlite, save_message=content_save_message_sqlite, get_message=content_get_message_sqlite, update_message=content_update_message_sqlite, list_messages=content_list_messages_sqlite, list_user_visible_messages=content_list_user_visible_messages_sqlite, list_agent_inbox_messages=content_list_agent_inbox_messages_sqlite, mark_messages_read=content_mark_messages_read_sqlite, save_artifact=content_save_artifact_sqlite, get_artifact=content_get_artifact_sqlite, get_artifact_bounded=content_get_artifact_bounded_sqlite, update_artifact_metadata=content_update_artifact_metadata_sqlite, list_artifacts=content_list_artifacts_sqlite, delete_artifact=content_delete_artifact_sqlite, save_template=content_save_template_sqlite, get_template=content_get_template_sqlite, list_templates=content_list_templates_sqlite, delete_template=content_delete_template_sqlite}
+	return iface.Content_Repository{ctx=rawptr(impl), answer_question=content_answer_question_sqlite, latest_user_visible_message=content_latest_user_visible_message_sqlite, list_unread_incoming_ids=content_list_unread_incoming_ids_sqlite, save_memory=content_save_memory_sqlite, get_memory=content_get_memory_sqlite, list_memories=content_list_memories_sqlite, save_conversation=content_save_conversation_sqlite, get_conversation=content_get_conversation_sqlite, list_conversations=content_list_conversations_sqlite, list_conversation_project_links=content_list_conversation_project_links_sqlite, save_message=content_save_message_sqlite, get_message=content_get_message_sqlite, update_message=content_update_message_sqlite, list_messages=content_list_messages_sqlite, list_user_visible_messages=content_list_user_visible_messages_sqlite, list_agent_inbox_messages=content_list_agent_inbox_messages_sqlite, mark_messages_read=content_mark_messages_read_sqlite, save_artifact=content_save_artifact_sqlite, get_artifact=content_get_artifact_sqlite, get_artifact_bounded=content_get_artifact_bounded_sqlite, update_artifact_metadata=content_update_artifact_metadata_sqlite, list_artifacts=content_list_artifacts_sqlite, delete_artifact=content_delete_artifact_sqlite, delete_memory=content_delete_memory_sqlite, save_template=content_save_template_sqlite, get_template=content_get_template_sqlite, list_templates=content_list_templates_sqlite, delete_template=content_delete_template_sqlite}
 }
 
 content_save_memory_sqlite :: proc(ctx: rawptr, m: domain.Memory) -> (domain.Memory, bool, domain.Domain_Error) {
@@ -27,6 +27,22 @@ content_save_memory_sqlite :: proc(ctx: rawptr, m: domain.Memory) -> (domain.Mem
 	// manifest cache by bumping the shared content epoch.
 	bootcache.bump_content_epoch()
 	return m,true,{}
+}
+// content_delete_memory_sqlite hard-deletes one of the owner's memories. System
+// memories are owned by 'system', so the owner match alone already excludes them;
+// the explicit guard keeps that true even for a caller passing owner 'system'.
+content_delete_memory_sqlite :: proc(ctx: rawptr, id: string, owner: domain.User_ID) -> (bool, domain.Domain_Error) {
+	impl := (^Content_Repo_SQLite)(ctx); stmt: sqlite3_stmt = nil
+	q := "DELETE FROM memories WHERE memory_id = ? AND owner_user_id = ? AND owner_user_id <> 'system';"
+	if sqlite3_prepare_v2(impl.conn.db, cstring(raw_data(q)), -1, &stmt, nil) != SQLITE_OK do return false, domain.domain_error(.Internal_Error, "failed to prepare memory delete")
+	bind_text(stmt, 1, id); bind_text(stmt, 2, string(owner))
+	rc, changes := step_changes(impl.conn.db, stmt)
+	sqlite3_finalize(stmt)
+	if rc != SQLITE_DONE do return false, domain.domain_error(.Internal_Error, "memory could not be deleted")
+	if changes == 0 do return false, domain.domain_error(.Not_Found, "memory not found")
+	// The memory may have been rendered into bootstrap manifests; drop them.
+	bootcache.bump_content_epoch()
+	return true, {}
 }
 content_get_memory_sqlite :: proc(ctx: rawptr, id: string) -> (domain.Memory,bool,domain.Domain_Error) { impl:=(^Content_Repo_SQLite)(ctx); stmt:sqlite3_stmt=nil; q:="SELECT memory_id, owner_user_id, agent_ids, project_ids, template_ids, bridge_ids, type, status, title, description, body, evidence, expires_at, created_at, updated_at, proposed_by_instance_id, proposed_in_chain_id FROM memories WHERE memory_id=?;"; if sqlite3_prepare_v2(impl.conn.db,cstring(raw_data(q)),-1,&stmt,nil)!=SQLITE_OK do return {},false,domain.domain_error(.Internal_Error,"failed memory lookup"); defer sqlite3_finalize(stmt); bind_text(stmt,1,id); if sqlite3_step(stmt)!=SQLITE_ROW do return {},false,domain.domain_error(.Not_Found,"memory not found"); return memory_from_stmt(stmt),true,{} }
 content_list_memories_sqlite :: proc(ctx: rawptr, owner: domain.User_ID) -> ([]domain.Memory,domain.Domain_Error) { impl:=(^Content_Repo_SQLite)(ctx); stmt:sqlite3_stmt=nil; q:="SELECT memory_id, owner_user_id, agent_ids, project_ids, template_ids, bridge_ids, type, status, title, description, body, evidence, expires_at, created_at, updated_at, proposed_by_instance_id, proposed_in_chain_id FROM memories WHERE owner_user_id=? OR owner_user_id='system' ORDER BY updated_at DESC;"; if sqlite3_prepare_v2(impl.conn.db,cstring(raw_data(q)),-1,&stmt,nil)!=SQLITE_OK do return nil,domain.domain_error(.Internal_Error,"failed memory list"); defer sqlite3_finalize(stmt); bind_text(stmt,1,string(owner)); out:=make([dynamic]domain.Memory); for sqlite3_step(stmt)==SQLITE_ROW do append(&out,memory_from_stmt(stmt)); return out[:],{} }

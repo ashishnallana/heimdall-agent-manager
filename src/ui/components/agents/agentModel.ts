@@ -6,8 +6,9 @@
  * Key differences:
  *  - No VCS filter: the list endpoint takes limit+cursor only, so tab
  *    is the ONLY client-side filter and `hasActiveFilters` is always false.
- *  - Agent verbs: edit + archive. No restore — the archive endpoint is
- *    one-way (no `state` in Update_Agent_Input, no un-archive route).
+ *  - Agent verbs: edit + archive/unarchive. Delete is separate: the hub
+ *    deletes only an agent nothing refers to (`GET /agents/{id}/usage`), so it
+ *    is offered per agent rather than by state.
  *  - Instructions replaces description throughout.
  *  - Row pills: provider · model · active instances · (Archived).
  */
@@ -74,6 +75,47 @@ export function archiveConfirmBody(names: string[]): string {
       ? `"${names[0]}"`
       : `${names.length} agents`;
   return `Archiving ${subject} only takes ${names.length === 1 ? 'it' : 'them'} out of the Active list — running instances and associated memories are untouched, and nothing is deleted. You can unarchive ${names.length === 1 ? 'it' : 'them'} later.`;
+}
+
+/* ------------------------------------------------------------------ *
+ * Delete (only for an agent nothing refers to)
+ * ------------------------------------------------------------------ */
+
+type UsageCounts = {
+  instances: number;
+  conversations: number;
+  messages: number;
+  artifacts: number;
+  chains: number;
+  tasks: number;
+  memories: number;
+  actions: number;
+  workflows: number;
+};
+
+const USAGE_WORDS: [keyof UsageCounts, string, string][] = [
+  ['instances', 'instance', 'instances'],
+  ['conversations', 'conversation', 'conversations'],
+  ['messages', 'message', 'messages'],
+  ['artifacts', 'artifact', 'artifacts'],
+  ['chains', 'chain', 'chains'],
+  ['tasks', 'task', 'tasks'],
+  ['memories', 'memory', 'memories'],
+  ['actions', 'action', 'actions'],
+  ['workflows', 'workflow', 'workflows'],
+];
+
+/** "2 instances, 1 chain" — the non-zero counts, in the hub's order. */
+export function agentUsageSummary(usage: UsageCounts | null | undefined): string {
+  if (!usage) return '';
+  return USAGE_WORDS
+    .filter(([key]) => (usage[key] || 0) > 0)
+    .map(([key, one, many]) => `${usage[key]} ${usage[key] === 1 ? one : many}`)
+    .join(', ');
+}
+
+export function deleteConfirmBody(name: string): string {
+  return `"${name}" has never been used — no instances, conversations, chains, tasks, memories, actions or workflows refer to it. Deleting it removes it for good, along with its bridge settings and its place in your favorites. This can't be undone.`;
 }
 
 /* ------------------------------------------------------------------ *

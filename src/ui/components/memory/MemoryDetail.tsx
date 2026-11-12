@@ -17,7 +17,8 @@
  *  - a **Source agent** row and the "Agent" badge — a memory carries no author field,
  *    and `status === 'pending'` is a lifecycle state, not provenance (ruling 4).
  *  - **Created** — `created_at` is not serialised by the hub (F12, ruling 3).
- *  - **Delete** — there is no delete verb in this UI; the menu reads Archive (ruling 2).
+ *  - **Delete as a verb.** Delete is a separate, confirmed button in the detail view
+ *    only (never bulk, never a shortcut); Archive stays the everyday verb.
  *  - **Auto-linked `file:line` evidence refs** — evidence is unstructured free text and
  *    any linking is heuristic; a link that lies about where it goes is worse than
  *    honest text (ruling 5). Rendered monospace, with copy.
@@ -30,6 +31,9 @@ import {
   Button,
   Icon,
   IconButton,
+  Modal,
+  ModalBody,
+  ModalFooter,
   Panel,
   ResourceDetailHeader,
   ResourceSectionCard,
@@ -48,11 +52,13 @@ import {
   memoryErrorText,
   useApproveMemoryMutation,
   useArchiveMemoryMutation,
+  useDeleteMemoryMutation,
   useGetMemoryQuery,
   useRejectMemoryMutation,
 } from '../../api/endpoints/memory';
 import { buildRouteHash } from '../../utils/appLocation';
 import {
+  MEMORY_DELETE_CONFIRM_BODY,
   VERB_LABEL,
   absoluteTime,
   memoryEditHref,
@@ -147,12 +153,36 @@ export function MemoryDetailActions({
   record,
   busy,
   onVerb,
+  onDeleted,
 }: {
   // TODO(FIX): Replace any with strict TypeScript interface matching Odin backend schema
   record: any;
   busy: MemoryVerb | '';
   onVerb: (verb: MemoryVerb) => void;
+  /** Called after the hub deleted the memory; the caller leaves its view. */
+  onDeleted?: (memoryId: string) => void;
 }) {
+  const memoryId = String(record?.memoryId || record?.id || '');
+  const [deleteMemory, deleteState] = useDeleteMemoryMutation();
+  const [confirmOpen, setConfirmOpen] = React.useState(false);
+  const [deleteError, setDeleteError] = React.useState('');
+  const closeConfirm = () => {
+    if (deleteState.isLoading) return;
+    setConfirmOpen(false);
+    setDeleteError('');
+  };
+  const confirmDelete = async () => {
+    setDeleteError('');
+    try {
+      await deleteMemory({ memoryId }).unwrap();
+      setConfirmOpen(false);
+      onDeleted?.(memoryId);
+    } catch (err) {
+      // A system memory answers 403 "system memories are read-only"; the payload
+      // carries no read-only flag to hide the button with (BACKEND-DEP-1).
+      setDeleteError(memoryErrorText(err, "Couldn't delete this memory."));
+    }
+  };
   const status = memoryStatus(record);
   const verbs = verbsForStatus(status);
   // Approve/Reject lead; everything else (Edit, Archive, Restore) is a direct button
@@ -204,6 +234,48 @@ export function MemoryDetailActions({
           onClick={() => onVerb(verb)}
         />
       ))}
+      {memoryId ? (
+        <ActionButton
+          label="Delete"
+          variant="danger"
+          disabled={Boolean(busy) || deleteState.isLoading}
+          data-debug-id="memory-view-delete"
+          onClick={() => setConfirmOpen(true)}
+        />
+      ) : null}
+      {confirmOpen ? (
+        <Modal
+          open
+          onOpenChange={(next) => { if (!next) closeConfirm(); }}
+          title="Delete this memory permanently?"
+          size="sm"
+          data-debug-id="memory-delete-modal"
+        >
+          <ModalBody>
+            <div className="flex flex-col gap-3">
+              <Text role="label"><VaultText value={record.title || memoryTitle(record)} as="span" /></Text>
+              <Text role="body">{MEMORY_DELETE_CONFIRM_BODY}</Text>
+              {deleteError ? (
+                <Alert tone="danger" data-debug-id="memory-delete-error">{deleteError}</Alert>
+              ) : null}
+            </div>
+          </ModalBody>
+          <ModalFooter>
+            <Button variant="secondary" data-debug-id="memory-delete-cancel" disabled={deleteState.isLoading} onClick={closeConfirm}>
+              Cancel
+            </Button>
+            <Button
+              variant="danger"
+              loading={deleteState.isLoading}
+              disabled={Boolean(deleteError)}
+              data-debug-id="memory-delete-confirm"
+              onClick={() => void confirmDelete()}
+            >
+              Delete permanently
+            </Button>
+          </ModalFooter>
+        </Modal>
+      ) : null}
     </>
   );
 }
@@ -229,12 +301,14 @@ export function MemoryDetailHeader({
   record,
   busy,
   onVerb,
+  onDeleted,
   onBack,
   alert,
 }: {
   record: any;
   busy: MemoryVerb | '';
   onVerb: (verb: MemoryVerb) => void;
+  onDeleted?: (memoryId: string) => void;
   onBack?: () => void;
   alert?: React.ReactNode;
 }) {
@@ -250,7 +324,7 @@ export function MemoryDetailHeader({
       timestampTooltip={absoluteTime(record.updatedAt)}
       alert={alert}
       onBack={onBack}
-      actions={<MemoryDetailActions record={record} busy={busy} onVerb={onVerb} />}
+      actions={<MemoryDetailActions record={record} busy={busy} onVerb={onVerb} onDeleted={onDeleted} />}
     />
   );
 }

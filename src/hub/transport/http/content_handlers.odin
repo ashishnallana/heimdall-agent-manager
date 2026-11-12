@@ -54,6 +54,7 @@ patch_memory_handler :: proc(ctx:rawptr, req:Request)->Response{
 	b:=strings.builder_make(); write_memory_json(&b,m,false)
 	return respond_success(strings.to_string(b),req.request_id,auth_ctx_server_time(req))
 }
+delete_memory_handler :: proc(ctx:rawptr, req:Request)->Response{ h:=(^Content_Handlers)(ctx); auth,ok,resp:=require_auth(h.auth,req); if !ok do return resp; deleted,err:=content_service.delete_memory(h.content,auth,path_part(req.path,4)); if !deleted do return respond_error(err,req.request_id); return Response{status=204,content_type="application/json",body=""} }
 memory_action_handler :: proc(ctx:rawptr, req:Request)->Response{
 	h:=(^Content_Handlers)(ctx); auth,ok,resp:=require_auth(h.auth,req); if !ok do return resp
 	id:=path_part(req.path,4)

@@ -12,6 +12,11 @@ Agent_Delete_Support_Proc :: proc(ctx: rawptr, agent_id, bridge_id: string, owne
 Agent_Save_Instance_Proc :: proc(ctx: rawptr, instance: domain.Agent_Instance) -> (domain.Agent_Instance, bool, domain.Domain_Error)
 Agent_Get_Instance_Proc :: proc(ctx: rawptr, instance_id: string) -> (domain.Agent_Instance, bool, domain.Domain_Error)
 Agent_Delete_Instance_Proc :: proc(ctx: rawptr, instance_id: string) -> (bool, domain.Domain_Error)
+// Counts the durable records that still refer to agent_id (see domain.Agent_Usage).
+Agent_Usage_Proc :: proc(ctx: rawptr, agent_id: string) -> (domain.Agent_Usage, domain.Domain_Error)
+// Deletes the owner's agent only if nothing refers to it, checked in the same
+// statement as the delete. deleted=false with no error means it is still in use.
+Agent_Delete_Unused_Proc :: proc(ctx: rawptr, agent_id: string, owner_user_id: domain.User_ID) -> (deleted: bool, err: domain.Domain_Error)
 Agent_List_Instances_By_Owner_Proc :: proc(ctx: rawptr, owner_user_id: domain.User_ID, limit: int, cursor: string) -> ([]domain.Agent_Instance, domain.Domain_Error)
 Agent_List_Instances_By_Bridge_Proc :: proc(ctx: rawptr, bridge_id: string) -> ([]domain.Agent_Instance, domain.Domain_Error)
 // Lists the owner's instances bound to one chain (agent_instances.chain_id) — the
@@ -54,6 +59,8 @@ Agent_Repository :: struct {
 	save_instance: Agent_Save_Instance_Proc,
 	get_instance: Agent_Get_Instance_Proc,
 	delete_instance: Agent_Delete_Instance_Proc,
+	usage: Agent_Usage_Proc,
+	delete_unused: Agent_Delete_Unused_Proc,
 	list_instances_by_owner: Agent_List_Instances_By_Owner_Proc,
 	list_instances_by_bridge: Agent_List_Instances_By_Bridge_Proc,
 	list_instances_by_chain: Agent_List_Instances_By_Chain_Proc,
@@ -96,6 +103,16 @@ agent_get_support :: proc(repo: ^Agent_Repository, agent_id, bridge_id: string) 
 agent_list_support :: proc(repo: ^Agent_Repository, agent_id: string, owner_user_id: domain.User_ID) -> ([]domain.Agent_Bridge_Support, domain.Domain_Error) {
 	if repo == nil || repo.list_support == nil do return nil, domain.domain_error(.Internal_Error, "agent repository is not configured")
 	return repo.list_support(repo.ctx, agent_id, owner_user_id)
+}
+
+agent_usage :: proc(repo: ^Agent_Repository, agent_id: string) -> (domain.Agent_Usage, domain.Domain_Error) {
+	if repo == nil || repo.usage == nil do return domain.Agent_Usage{}, domain.domain_error(.Internal_Error, "agent repository is not configured")
+	return repo.usage(repo.ctx, agent_id)
+}
+
+agent_delete_unused :: proc(repo: ^Agent_Repository, agent_id: string, owner_user_id: domain.User_ID) -> (bool, domain.Domain_Error) {
+	if repo == nil || repo.delete_unused == nil do return false, domain.domain_error(.Internal_Error, "agent repository is not configured")
+	return repo.delete_unused(repo.ctx, agent_id, owner_user_id)
 }
 
 agent_delete_support :: proc(repo: ^Agent_Repository, agent_id, bridge_id: string, owner_user_id: domain.User_ID) -> (bool, domain.Domain_Error) {

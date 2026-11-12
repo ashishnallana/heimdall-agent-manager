@@ -69,7 +69,14 @@ export default function AgentViewPage({ agentId }: { agentId: string }) {
       title={title}
       breadcrumbs={detailCrumbs(title, agentState(record), listState)}
       description={<AgentDetailMeta record={record} />}
-      actions={<AgentDetailActions record={record} busy={busy} onVerb={(verb) => void runVerb(verb)} />}
+      actions={
+        <AgentDetailActions
+          record={record}
+          busy={busy}
+          onVerb={(verb) => void runVerb(verb)}
+          onDeleted={() => navigateTo(agentListHref(listState))}
+        />
+      }
     >
       <div ref={paneRef} className="min-w-0">
         {viewport === 'mobile' ? (

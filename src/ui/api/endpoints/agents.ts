@@ -471,6 +471,37 @@ export const agentsApi = heimdallApi.injectEndpoints({
         { type: 'Agents' as const, id: agentId },
       ],
     }),
+    // What still refers to the agent (`GET /agents/{id}/usage`). The hub deletes an
+    // agent only while every count is zero, so the UI offers Delete only then. Tagged
+    // with the agent's own tag so archive/edit refetch it, and refetched on every
+    // mount because instances, chains and tasks can start referring to it at any time.
+    fetchAgentUsage: build.query<AgentUsageResult, { agentId: string }>({
+      queryFn: async ({ agentId }) => {
+        try {
+          const data = await cookieJsonFetch(`/agents/${encodeURIComponent(agentId)}/usage`);
+          return { data: normalizeAgentUsage(data) };
+        } catch (error: any) {
+          return { error: customQueryError(error) as any };
+        }
+      },
+      providesTags: (_result, _error, { agentId }) => [{ type: 'Agents' as const, id: agentId }],
+      keepUnusedDataFor: 0,
+    }),
+    // Permanent (`DELETE /agents/{id}`). The hub refuses with 409 `agent_in_use`
+    // if anything refers to the agent by the time the call lands. Only LIST is
+    // invalidated: the caller leaves the deleted agent's view, and refetching its
+    // own tag would only 404.
+    deleteAgentIdentity: build.mutation<{ agentId: string }, { agentId: string }>({
+      queryFn: async ({ agentId }) => {
+        try {
+          await cookieMutation(`/agents/${encodeURIComponent(agentId)}`, 'DELETE');
+          return { data: { agentId } };
+        } catch (error: any) {
+          return { error: customQueryError(error) as any };
+        }
+      },
+      invalidatesTags: [{ type: 'Agents' as const, id: 'LIST' }],
+    }),
     // TODO(FIX): Replace any with strict TypeScript interface matching Odin backend schema
     listAgentInstances: build.query<any, { agentId?: string; projectId?: string; limit?: number; cursor?: string } | void>({
       queryFn: async (arg) => {
@@ -837,6 +868,8 @@ export const {
   useCreateAgentMutation,
   useArchiveAgentIdentityMutation,
   useUnarchiveAgentIdentityMutation,
+  useFetchAgentUsageQuery,
+  useDeleteAgentIdentityMutation,
   useListAgentInstancesQuery,
   useFetchAgentInstanceQuery,
   useLaunchAgentInstanceMutation,
@@ -875,6 +908,36 @@ export type AgentPermissionMode = 'yolo' | 'ask';
 
 export function normalizePermissionMode(raw: unknown): AgentPermissionMode {
   return raw === 'ask' ? 'ask' : 'yolo';
+}
+
+/** `GET /agents/{id}/usage` — see `domain.Agent_Usage` in the hub. */
+export type AgentUsage = {
+  instances: number;
+  conversations: number;
+  messages: number;
+  artifacts: number;
+  chains: number;
+  tasks: number;
+  memories: number;
+  actions: number;
+  workflows: number;
+};
+
+export type AgentUsageResult = { deletable: boolean; usage: AgentUsage };
+
+const AGENT_USAGE_KEYS: (keyof AgentUsage)[] = ['instances', 'conversations', 'messages', 'artifacts', 'chains', 'tasks', 'memories', 'actions', 'workflows'];
+
+/** Reads the usage body defensively: a missing count is 0, and `deletable` is
+ *  only true when the hub said so AND every count really is 0. */
+export function normalizeAgentUsage(raw: any): AgentUsageResult {
+  const source = raw?.usage && typeof raw.usage === 'object' ? raw.usage : {};
+  const usage = {} as AgentUsage;
+  for (const key of AGENT_USAGE_KEYS) {
+    const n = Number(source[key]);
+    usage[key] = Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+  }
+  const total = AGENT_USAGE_KEYS.reduce((sum, key) => sum + usage[key], 0);
+  return { deletable: raw?.deletable === true && total === 0, usage };
 }
 
 export type AgentRecord = {

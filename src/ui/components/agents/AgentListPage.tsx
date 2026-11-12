@@ -981,6 +981,12 @@ export default function AgentListPage({ selectedId = '' }: { selectedId?: string
       onAfterVerb={(verb, saved) => {
         if (verb === 'archive' || verb === 'unarchive') list.patchItem(selectedId, (prev) => archivedRowPatch(prev, verb, saved));
       }}
+      onDeleted={(deletedId) => {
+        // Drop the row where it sat and close the pane on the same tab.
+        list.removeItem(deletedId);
+        pushToast({ tone: 'success', title: 'Agent deleted' });
+        navigateTo(agentListHref({ ...urlState, tab }));
+      }}
     />
   ) : null;
 
@@ -1043,7 +1049,15 @@ export default function AgentListPage({ selectedId = '' }: { selectedId?: string
 /**
  * The right-hand pane of the two-pane layout.
  */
-function AgentDetailPane({ agentId, onAfterVerb }: { agentId: string; onAfterVerb: (verb: AgentVerb, saved: unknown) => void }) {
+function AgentDetailPane({
+  agentId,
+  onAfterVerb,
+  onDeleted,
+}: {
+  agentId: string;
+  onAfterVerb: (verb: AgentVerb, saved: unknown) => void;
+  onDeleted: (agentId: string) => void;
+}) {
   const { query, record, busy, actionError, runVerb } = useAgentDetail(agentId, onAfterVerb);
   const paneRef = React.useRef<HTMLDivElement | null>(null);
   const wide = usePaneIsWide(paneRef);
@@ -1068,6 +1082,7 @@ function AgentDetailPane({ agentId, onAfterVerb }: { agentId: string; onAfterVer
           record={record}
           busy={busy}
           onVerb={(verb) => void runVerb(verb)}
+          onDeleted={onDeleted}
         />
       </div>
       <div className="flex-1 min-h-0 overflow-y-auto">

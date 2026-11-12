@@ -125,6 +125,37 @@ unarchive_agent_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req))
 }
 
+// GET /api/v1/agents/{id}/usage: what still refers to the agent. The UI offers
+// Delete only when `deletable` is true.
+agent_usage_handler :: proc(ctx: rawptr, req: Request) -> Response {
+	h := (^Agent_Handlers)(ctx)
+	auth_ctx, ok, auth_resp := require_auth(h.auth, req)
+	if !ok do return auth_resp
+	usage, got, err := agent_service.get_agent_usage(h.agents, auth_ctx, path_part(req.path, 4))
+	if !got do return respond_error(err, req.request_id)
+	b := strings.builder_make()
+	strings.write_string(&b, `{"deletable":`)
+	strings.write_string(&b, "true" if domain.agent_usage_total(usage) == 0 else "false")
+	strings.write_string(&b, `,"usage":`)
+	strings.write_string(&b, agent_service.agent_usage_json(usage))
+	strings.write_byte(&b, '}')
+	return respond_success(strings.to_string(b), req.request_id, auth_ctx_server_time(req))
+}
+
+// DELETE /api/v1/agents/{id}: permanent, and refused with 409 `agent_in_use`
+// while anything refers to the agent.
+delete_agent_handler :: proc(ctx: rawptr, req: Request) -> Response {
+	h := (^Agent_Handlers)(ctx)
+	auth_ctx, ok, auth_resp := require_auth(h.auth, req)
+	if !ok do return auth_resp
+	agent_id := path_part(req.path, 4)
+	if strings.contains(agent_id, "/") do return respond_error(domain.domain_error(.Not_Found, "route not found"), req.request_id)
+	agent, deleted, err := agent_service.delete_agent(h.agents, auth_ctx, agent_id)
+	if !deleted do return respond_error(err, req.request_id)
+	publish_agent_changed(h.event_bus, string(agent.owner_user_id), agent.agent_id, "deleted")
+	return Response{status = 204, content_type = "application/json", body = ""}
+}
+
 list_agent_support_handler :: proc(ctx: rawptr, req: Request) -> Response {
 	h := (^Agent_Handlers)(ctx)
 	auth_ctx, ok, auth_resp := require_auth(h.auth, req)

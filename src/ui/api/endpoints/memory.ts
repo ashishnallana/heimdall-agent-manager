@@ -1,4 +1,4 @@
-import { apiErrorText, cookieJsonFetch, cookieJsonFetchEnvelope, cookieMutation } from "../cookieFetch";
+import { apiErrorText, cookieJsonFetch, cookieJsonFetchEnvelope, cookieMutation, customQueryError } from "../cookieFetch";
 import { heimdallApi } from "../heimdallApi";
 import { normalizeMemory } from "../memoryCatalog";
 import { encryptVaultText, decryptVaultText, isVaultArmored, getActiveVaultKey } from "../../utils/vaultContent";
@@ -491,6 +491,19 @@ export const memoryApi = heimdallApi.injectEndpoints({
         { type: "Memory" as const, id: memoryId },
       ],
     }),
+    // Permanent (`DELETE /memories/{id}`, 204). Invalidates the lists only: the
+    // caller leaves the deleted memory's view, and refetching its own tag would 404.
+    deleteMemory: build.mutation<{ memoryId: string }, { memoryId: string }>({
+      queryFn: async ({ memoryId }) => {
+        try {
+          await cookieMutation(`/memories/${encodeURIComponent(memoryId)}`, "DELETE");
+          return { data: { memoryId } };
+        } catch (error: any) {
+          return { error: customQueryError(error) as any };
+        }
+      },
+      invalidatesTags: [{ type: "Memory" as const, id: "ALL" }],
+    }),
   }),
 });
 
@@ -510,6 +523,7 @@ export const {
   useApproveMemoryMutation,
   useRejectMemoryMutation,
   useArchiveMemoryMutation,
+  useDeleteMemoryMutation,
 } = memoryApi;
 
 export { encryptMemoryFields, decryptMemoryRecord } from "../../utils/vaultMemories";

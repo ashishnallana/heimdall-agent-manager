@@ -738,6 +738,7 @@ register_routes :: proc(graph: ^App_Graph) {
 	http.router_add(&graph.router, "GET", "/api/v1/memories/*", rawptr(&graph.content_handlers), http.memory_detail_handler)
 	http.router_add(&graph.router, "PATCH", "/api/v1/memories/*", rawptr(&graph.content_handlers), http.patch_memory_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/memories/*/*", rawptr(&graph.content_handlers), http.memory_action_handler)
+	http.router_add(&graph.router, "DELETE", "/api/v1/memories/*", rawptr(&graph.content_handlers), http.delete_memory_handler)
 	http.router_add(&graph.router, "GET", "/api/v1/chats", rawptr(&graph.content_handlers), http.list_chats_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/chats", rawptr(&graph.content_handlers), http.create_chat_handler)
 	// Registered BEFORE the /chats/* wildcards so the literal "by-instance"
@@ -794,6 +795,8 @@ register_routes :: proc(graph: ^App_Graph) {
 	http.router_add(&graph.router, "PATCH", "/api/v1/agents/*", rawptr(&graph.agent_handlers), http.update_agent_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/agents/*/archive", rawptr(&graph.agent_handlers), http.archive_agent_handler)
 	http.router_add(&graph.router, "POST", "/api/v1/agents/*/unarchive", rawptr(&graph.agent_handlers), http.unarchive_agent_handler)
+	http.router_add(&graph.router, "GET", "/api/v1/agents/*/usage", rawptr(&graph.agent_handlers), http.agent_usage_handler)
+	http.router_add(&graph.router, "DELETE", "/api/v1/agents/*", rawptr(&graph.agent_handlers), http.delete_agent_handler)
 	http.router_add(&graph.router, "GET", "/api/v1/agents/*/bridge-support", rawptr(&graph.agent_handlers), http.list_agent_support_handler)
 	http.router_add(&graph.router, "PUT", "/api/v1/agents/*/bridge-support", rawptr(&graph.agent_handlers), http.put_agent_support_handler)
 	http.router_add(&graph.router, "PATCH", "/api/v1/agents/*/bridge-support/*", rawptr(&graph.agent_handlers), http.patch_agent_support_handler)

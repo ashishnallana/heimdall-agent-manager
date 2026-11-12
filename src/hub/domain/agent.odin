@@ -225,3 +225,22 @@ agent_instances_destroy :: proc(instances: []Agent_Instance) {
 	}
 	delete(instances)
 }
+
+// Agent_Usage counts the durable records that still refer to one agent. An agent
+// can be deleted only while every count is zero; otherwise archive is the way to
+// take it out of the lists (deleting it would orphan or erase that history).
+Agent_Usage :: struct {
+	instances:     int, // agent_instances
+	conversations: int, // chat_conversations
+	messages:      int, // chat_messages sent by it
+	artifacts:     int,
+	chains:        int, // chain fleets, members and chain defaults naming it
+	tasks:         int, // task briefs (assignee/reviewers), reviews and task events
+	memories:      int, // memories targeted at it
+	actions:       int, // scheduled actions targeting it
+	workflows:     int, // workflow definitions and runs naming it
+}
+
+agent_usage_total :: proc(u: Agent_Usage) -> int {
+	return u.instances + u.conversations + u.messages + u.artifacts + u.chains + u.tasks + u.memories + u.actions + u.workflows
+}
